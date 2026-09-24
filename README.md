@@ -1,3 +1,4 @@
+<div align="center">
 <h1><img src="./pic/logo/readme-logo.png" alt="Scivane Logo" width="54" height="54" align="absmiddle" />&nbsp;&nbsp;Scivane</h1>
 
 **Your AI Agent for Research Paper Reading**
@@ -33,6 +34,6 @@ Scivane is released under the [GNU AGPL-3.0](LICENSE) license. It uses PyMuPDF f
 
 ---
 
-<div align="center">
+
 [简体中文](README.zh-CN.md)
 
