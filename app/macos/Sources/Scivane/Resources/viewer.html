@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src scivane-asset: scivane-document: data: blob:;">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+
+<div id="empty" class="empty">
+  <div class="empty-mark"></div>
+  <p class="empty-title">等待识别</p>
+  <p class="empty-sub">左侧载入文档后，这里会逐页出现结果</p>
+</div>
+
+<article id="doc" hidden></article>
+
+<script src="vendor/markdown-it.min.js"></script>
+<script src="vendor/katex/katex.min.js"></script>
+<script src="vendor/katex/auto-render.min.js"></script>
+<script src="viewer.js"></script>
+</body>
+</html>

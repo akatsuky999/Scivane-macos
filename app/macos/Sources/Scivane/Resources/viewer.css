@@ -1,0 +1,428 @@
+/* Scivane 阅读器排版层
+ *
+ * 方向：学术期刊的版面感。衬线正文、克制的灰阶、墨绿作强调色。
+ * 强调色只出现在两个地方：当前页指示、搜索命中。其余一律灰阶。
+ */
+
+:root {
+  /* 暖白纸面，比纯白柔和，长时间阅读不刺眼 */
+  --paper:      #faf9f5;
+  --paper-sunk: #f0f0e8;
+  --ink:        #21302b;
+  --ink-soft:   #5c6961;
+  --ink-faint:  #757f75;
+  --rule:       rgba(20, 20, 26, 0.13);
+  --rule-soft:  rgba(20, 20, 26, 0.065);
+  --panel:      rgba(20, 20, 26, 0.035);
+
+  /* 墨绿强调色，与原生界面同步。 */
+  --accent:      #29574a;
+  --accent-wash: rgba(41, 87, 74, 0.13);
+
+  --serif: "New York", ui-serif, "Songti SC", "Source Han Serif SC", Georgia, serif;
+  --sans:  ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
+  --mono:  ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* 行长**在排版的舒适区内**随窗口伸缩，而不是钉死一个数。
+     58ch 是下限（再窄就频繁折行），76ch 是上限（再宽眼睛回不到行首）。
+     中间那档跟着视口走：窄窗口收紧、宽窗口松一点，两头都不越界。
+     `ch` 本身跟着 body 字号走，所以调字号时行长自动跟着换算。 */
+  --measure: clamp(58ch, 56vw, 76ch);
+  --gutter: clamp(26px, 3.4vw, 52px);
+  /* 表格与插图允许越出正文的行长 —— 期刊排版的常规做法。
+     宽窗口下给得多一点，免得右边空着一大片而表格在横向滚动。 */
+  --bleed: clamp(0px, 4.5vw, 96px);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:      #131814;
+    --paper-sunk: #19201c;
+    --ink:        #e8eddf;
+    --ink-soft:   #a8b8ad;
+    --ink-faint:  #8a9c8f;
+    --rule:       rgba(255, 255, 255, 0.145);
+    --rule-soft:  rgba(255, 255, 255, 0.075);
+    --panel:      rgba(255, 255, 255, 0.05);
+    --accent:      #99c9ad;
+    --accent-wash: rgba(153, 201, 173, 0.16);
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper:      #131814;
+  --paper-sunk: #19201c;
+  --ink:        #e8eddf;
+  --ink-soft:   #a8b8ad;
+  --ink-faint:  #8a9c8f;
+  --rule:       rgba(255, 255, 255, 0.145);
+  --rule-soft:  rgba(255, 255, 255, 0.075);
+  --panel:      rgba(255, 255, 255, 0.05);
+  --accent:      #99c9ad;
+  --accent-wash: rgba(153, 201, 173, 0.16);
+}
+
+* { box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.75;
+  /* 等高数字。老式数字混在中文里会高低不齐，非常显脏。 */
+  font-variant-numeric: lining-nums proportional-nums;
+  font-kerning: normal;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  hanging-punctuation: allow-end;
+}
+
+::selection { background: var(--accent-wash); }
+
+/* --- 空状态 ------------------------------------------------------------ */
+.empty {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-family: var(--sans);
+  user-select: none;
+  pointer-events: none;
+}
+.empty-mark {
+  width: 40px; height: 52px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  margin-bottom: 22px;
+  position: relative;
+  opacity: .8;
+  animation: breathe 5s ease-in-out infinite;
+}
+.empty-mark::before,
+.empty-mark::after {
+  content: ""; position: absolute; left: 9px; right: 9px;
+  height: 1px; background: var(--rule); border-radius: 1px;
+}
+.empty-mark::before { top: 18px; }
+.empty-mark::after  { top: 27px; right: 18px; }
+@keyframes breathe {
+  0%, 100% { opacity: .45; transform: translateY(0); }
+  50%      { opacity: .85; transform: translateY(-4px); }
+}
+.empty-title {
+  margin: 0; font-size: 13px; font-weight: 590;
+  color: var(--ink-soft); letter-spacing: .01em;
+}
+.empty-sub { margin: 0; font-size: 12px; color: var(--ink-faint); }
+
+/* --- 文档容器 ---------------------------------------------------------- */
+#doc {
+  max-width: calc(var(--measure) + var(--gutter) * 2);
+  margin: 0 auto;
+  padding: 60px var(--gutter) 48vh;
+}
+
+/* --- 页分隔 ------------------------------------------------------------
+   页码是导航辅助，不是内容。压到最低视觉重量：小号无衬线、
+   浅灰、左对齐，后面跟一条细到几乎看不见的线。          */
+.page {
+  scroll-margin-top: 20px;
+  position: relative;
+}
+
+.page-mark {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 60px 0 26px;
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 620;
+  letter-spacing: .14em;
+  color: var(--accent);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.page-mark::after {
+  content: ""; flex: 1; height: 1px; background: var(--rule-soft);
+}
+.page:first-child .page-mark { margin-top: 0; }
+
+/* 当前页：一根贴在左边距外的细竖线，比给页码上色安静得多 */
+.page.is-current::before {
+  content: "";
+  position: absolute;
+  left: -18px;
+  top: 4px;
+  bottom: 12px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: .75;
+  animation: slide-in .32s cubic-bezier(.2, .8, .3, 1);
+}
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(-5px); }
+  to   { opacity: .75; transform: none; }
+}
+
+/* --- 标题 --------------------------------------------------------------
+   字阶靠字号和字重拉开，不靠颜色。中文标题需要更紧的字距。 */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--serif);
+  line-height: 1.3;
+  margin: 2em 0 .6em;
+  font-weight: 680;
+  text-wrap: pretty;      /* 避免标题末行孤字 */
+}
+h1 {
+  font-size: 1.78em;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  line-height: 1.22;
+  margin: .55em 0 .75em;
+}
+h2 {
+  font-size: 1.34em;
+  letter-spacing: -0.014em;
+  margin-top: 2.1em;
+}
+h3 {
+  font-size: 1.12em;
+  letter-spacing: -0.008em;
+  margin-top: 1.8em;
+}
+h4, h5, h6 {
+  font-size: .95em;
+  font-family: var(--sans);
+  font-weight: 620;
+  letter-spacing: .01em;
+  color: var(--ink-soft);
+}
+/* 标题后紧跟的第一段不要再叠加上边距 */
+h1 + p, h2 + p, h3 + p { margin-top: 0; }
+
+/* --- 正文 --------------------------------------------------------------
+   **两端对齐 + 自动断词。** 这是期刊版面最直接的一条视觉线索；
+   单独开两端对齐会拉出"河流"，必须和 hyphens 一起上。
+   `overflow-wrap` 兜住 OCR 里常见的长 URL 与不可断的符号串 ——
+   没有它，一个超长 token 会把整行撑开。 */
+p {
+  margin: 0 0 1.1em;
+  text-align: justify;
+  hyphens: auto;
+  overflow-wrap: break-word;
+}
+/* 引用与图注不对齐 —— 短块两端对齐只会字距忽宽忽窄。 */
+blockquote p, figcaption, caption { text-align: left; hyphens: manual; }
+
+/* 参考文献编号、脚注记号：压小并抬起，不撑开行高 */
+sup, sub { font-size: .72em; line-height: 0; }
+strong { font-weight: 680; }
+em { font-style: italic; }
+
+a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color .18s ease;
+}
+a:hover { text-decoration-color: var(--accent); }
+
+hr {
+  border: 0;
+  height: 1px;
+  background: var(--rule-soft);
+  margin: 2.6em auto;
+  width: 40%;
+}
+
+ul, ol { margin: 0 0 1.1em; padding-left: 1.35em; }
+li { margin: .3em 0; padding-left: .15em; }
+li::marker { color: var(--ink-faint); font-size: .9em; }
+li > ul, li > ol { margin-bottom: .2em; margin-top: .3em; }
+
+blockquote {
+  margin: 1.6em 0;
+  padding: .15em 0 .15em 1.3em;
+  border-left: 2px solid var(--rule);
+  color: var(--ink-soft);
+  font-size: .97em;
+}
+blockquote p:last-child { margin-bottom: 0; }
+
+/* --- 表格 --------------------------------------------------------------
+   论文表格常常比正文宽。允许它向两侧溢出到边距里，
+   实在放不下才横向滚动 —— 这是期刊排版的常规做法。 */
+.table-wrap {
+  margin: 2.1em calc((var(--gutter) + var(--bleed)) * -1);
+  padding: 0 calc(var(--gutter) + var(--bleed));
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.table-wrap::-webkit-scrollbar { height: 7px; }
+.table-wrap::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 4px;
+}
+.table-wrap::-webkit-scrollbar-track { background: transparent; }
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--sans);
+  font-size: .82em;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+/* booktabs：**只有三条横线**（表头上、表头下、表尾），一条竖线都没有。
+   竖线是电子表格的默认，不是论文的默认；去掉之后数字列自己就对齐了。 */
+th, td {
+  padding: .5em .9em;
+  text-align: left;
+  vertical-align: top;
+  border: 0;
+}
+th:first-child, td:first-child { padding-left: .1em; }
+th:last-child,  td:last-child  { padding-right: .1em; }
+
+thead th {
+  font-weight: 620;
+  font-size: .93em;
+  color: var(--ink-soft);
+  letter-spacing: .035em;
+  border-top: 1.5px solid var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+  padding: .55em .9em;
+}
+tbody tr:last-child td { border-bottom: 1.5px solid var(--ink-soft); }
+tbody tr { transition: background .15s ease; }
+tbody tr:hover { background: var(--panel); }
+/* 数字列右对齐：一列数字左对齐是表格里最容易看出"没排过版"的地方。
+   `td` 里全是数字/正负号/百分号时才算。 */
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums lining-nums; }
+
+table caption {
+  caption-side: bottom;
+  padding-top: 1em;
+  font-family: var(--sans);
+  font-size: .76em;
+  line-height: 1.55;
+  color: var(--ink-faint);
+  text-align: left;
+}
+
+/* --- 图片 --------------------------------------------------------------
+   图和表一样允许越出正文行长：论文里的图往往本身就比一栏宽，
+   压回行长里等于把它缩小一圈，坐标轴上的字先糊掉。 */
+figure { margin: 2.1em calc(var(--bleed) * -0.5); }
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1.9em auto;
+  border-radius: 4px;
+  border: 1px solid var(--rule-soft);
+  background: var(--paper-sunk);
+}
+figure img { margin: 0 auto; }
+figcaption {
+  margin-top: .9em;
+  font-family: var(--sans);
+  font-size: .76em;
+  line-height: 1.55;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+/* --- 代码 -------------------------------------------------------------- */
+code {
+  font-family: var(--mono);
+  font-size: .84em;
+  background: var(--panel);
+  padding: .15em .4em;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+}
+pre {
+  background: var(--paper-sunk);
+  border: 1px solid var(--rule-soft);
+  padding: 1.05em 1.2em;
+  border-radius: 12px;
+  overflow-x: auto;
+  margin: 1.7em 0;
+  line-height: 1.62;
+}
+pre code { background: none; padding: 0; font-size: .8em; }
+
+/* --- 公式 -------------------------------------------------------------- */
+.katex { font-size: 1.02em; }
+.katex-display {
+  margin: 1.7em 0;
+  padding: .3em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.katex-display::-webkit-scrollbar { height: 6px; }
+.katex-display::-webkit-scrollbar-thumb {
+  background: var(--rule-soft); border-radius: 3px;
+}
+.katex-error {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: .8em;
+  background: var(--accent-wash);
+  padding: .1em .35em;
+  border-radius: 3px;
+}
+
+/* --- 搜索命中 ---------------------------------------------------------- */
+mark.hit {
+  background: var(--accent-wash);
+  color: inherit;
+  border-radius: 2px;
+  padding: .06em .12em;
+  box-shadow: 0 0 0 1px var(--accent-wash);
+}
+mark.hit.active {
+  background: var(--accent);
+  color: var(--paper);
+}
+
+/* --- 紧凑模式：窄栏时收敛边距 ------------------------------------------- */
+@media (max-width: 620px) {
+  :root { --bleed: 0px; }
+  #doc { padding-top: 40px; }
+  .page.is-current::before { left: -12px; }
+  /* 窄栏里两端对齐会把字距拉得忽宽忽窄，退回左对齐 */
+  p { text-align: left; }
+}
+
+/* 无障碍：动效一律可关。
+   （先前这里还有一叠"Studio details"覆盖 —— 页码上色、代码块圆角、表头填色、
+     单元格左内边距、h1 字重，全都在**推翻上面刚写过的规则**。
+     同一个属性在一份样式表里写两遍，读的人分不清哪句还算数，
+     改的人两处都要改 —— 已经合并回各自的段落里了。） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  html { scroll-behavior: auto; }
+}
+
+/* A Markdown file is a continuous document, without invented PDF page markers. */
+.markdown-document .page-mark { display: none; }
+.markdown-document .page.is-current::before { display: none; }
+.markdown-document #doc { padding-top: 36px; }

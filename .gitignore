@@ -1,0 +1,84 @@
+# Scivane 的版本控制边界
+#
+# 仓库里只放构建出 App 所需的东西：克隆下来 `make app`，装上就能用 ——
+# App 与后端的源码、构建脚本、随包分发的前端资源、后端依赖的锁文件。
+# 下面几类不进版本控制（本地文件照常在，只是不会被提交）：
+#   · 构建输出与运行期产物（删了都能重建）
+#   · 测试、验证与开发工具
+#   · 开发文档与本地工具配置（给克隆者看的 README 留在仓库里）
+#   · 凭据与本机配置
+#
+# 用户数据本来就不在仓库里（项目、日志、本地 OCR 组件都在 ~/.scivane/），这里不必列。
+
+# ── 构建输出与运行期产物 ─────────────────────────────────────────────
+# var/：成品 App（var/app）、编译中间产物与下载来的解释器和依赖（var/build）。
+# 整个目录可以删了重来。
+/var/
+
+# Swift Package Manager / Xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcodeproj/
+*.xcworkspace/
+*.dSYM/
+
+# 分发产物（DMG、公证用的压缩包）
+*.dmg
+*.pkg
+
+# ── 测试、验证与开发工具 ─────────────────────────────────────────────
+# 单测与端到端验证
+/services/reader/tests/
+/verify/
+# 开发环境的体检与搭建脚本；开发用的 make 命令（Makefile 在 dev.mk 存在时自动引入）
+/scripts/doctor.sh
+/scripts/setup_runtime.sh
+/dev.mk
+# 重新生成依赖锁文件时才读的输入（构建只用锁文件 requirements-base.txt）与开发用的包描述
+/services/reader/requirements-base.in
+/services/reader/requirements-ocr.in
+/services/reader/pyproject.toml
+/.editorconfig
+
+# ── 开发文档与本地工具配置 ─────────────────────────────────────────
+# README.md 给克隆下来的人看，留在仓库里。docs/ 是开发记录，不进版本控制。
+/docs/
+/AGENTS.md
+/CLAUDE.md
+/.claude/
+/.codex/
+/scripts/check_progress.sh
+
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# ── 凭据与本机配置 —— 绝不进版本控制 ─────────────────────────────────
+# API key 只在钥匙串里；这几个名字防的是有人把调试时的文件放进了仓库。
+.env
+.env.*
+credentials.json
+providers.json
+# 签名与公证用的私钥
+*.p8
+*.p12
+
+# ── 编辑器与系统 ─────────────────────────────────────────────────────
+.DS_Store
+._*
+.AppleDouble
+Icon?
+.idea/
+.vscode/
+*.swp
+*~
