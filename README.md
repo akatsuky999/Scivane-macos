@@ -19,6 +19,8 @@
 
 Scivane is your AI agent for reading research papers. By bringing paper reading, AI interaction, and research tools together in one place, it keeps your reading and exploration closely connected to the original text. Beyond answering questions and analyzing papers in context, the agent can independently search for related literature, retrieve open-source code, and help you understand the underlying methods, turning each paper into a dedicated research project you can continue to explore.
 
+![Scivane desktop app](./pic/readme-app.png)
+
 ## Getting Started
 
 Scivane requires a Mac with Apple Silicon and the Xcode Command Line Tools for building the application.
