@@ -1,7 +1,3 @@
-<div align="center">
-
-[简体中文](README.zh-CN.md)
-
 <h1><img src="./pic/logo/readme-logo.png" alt="Scivane Logo" width="54" height="54" align="absmiddle" />&nbsp;&nbsp;Scivane</h1>
 
 **Your AI Agent for Research Paper Reading**
@@ -34,3 +30,9 @@ make app
 ## License
 
 Scivane is released under the [GNU AGPL-3.0](LICENSE) license. It uses PyMuPDF for PDF processing, which is also distributed under the AGPL-3.0 license.
+
+---
+
+<div align="center">
+[简体中文](README.zh-CN.md)
+
