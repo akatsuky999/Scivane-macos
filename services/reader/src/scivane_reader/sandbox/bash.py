@@ -1,16 +1,8 @@
-"""bash 执行器 —— 在项目目录里跑一条 shell 命令。
+"""Shell executor: one command in the project directory.
 
-三条都不是可选项：
-
-**最小环境。** `build_env()` 从零搭一份环境交给它，用户的 `PATH`、
-`SCIVANE_*`、API key 之类一概不在里面。
-
-**不读 dotfiles。** `--noprofile --norc` 让 bash 启动路径上一个用户文件都不读
-（`/etc/profile`、`~/.bash_profile`、`~/.bashrc` 全跳过）。配合 `HOME` 被指到
-项目内，就算有东西硬要展开 `~` 也落在边界里面。
-
-**工作目录固定为项目根。** agent 写相对路径时的参照点必须是稳定的，
-否则同一条命令在不同时刻含义不同。
+Minimal environment from build_env() (no user PATH, SCIVANE_* or keys), no dotfiles
+(--noprofile --norc, with HOME inside the project), and the project root as the working
+directory so relative paths always mean the same thing.
 """
 
 from __future__ import annotations
@@ -22,12 +14,12 @@ from .runner import ExecResult, Runner
 
 __all__ = ["BASH", "bash_argv", "run_bash"]
 
-#: 绝对路径。走 PATH 查找的话，PATH 本身就成了可以被换掉的输入。
+#: absolute path: PATH is a tainted input
 BASH = "/bin/bash"
 
 
 def bash_argv(command: str) -> tuple[str, ...]:
-    """纯函数，方便测试直接盯住参数形态而不必起进程。"""
+    """Pure, so tests can check the arguments without starting a process."""
     return (BASH, "--noprofile", "--norc", "-c", command)
 
 
@@ -40,7 +32,7 @@ def run_bash(
     timeout: float | None = None,
     stdin: str | None = None,
 ) -> ExecResult:
-    """:raises SandboxUnavailable: 沙箱不可用 —— 此时不执行，不降级。"""
+    """Raises SandboxUnavailable when there is no sandbox; never runs unconfined."""
     active = runner if runner is not None else Runner()
     return active.run(
         bash_argv(command),

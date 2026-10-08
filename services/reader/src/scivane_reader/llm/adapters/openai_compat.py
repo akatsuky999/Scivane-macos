@@ -1,10 +1,6 @@
-"""OpenAI 兼容协议。
+"""OpenAI-compatible protocol (OpenAI, DeepSeek, Kimi, Zhipu, Qwen, SiliconFlow, Ollama, vLLM).
 
-一套协议覆盖极多厂商：OpenAI、DeepSeek、Kimi、智谱、通义、硅基流动，
-以及本地的 Ollama 与 vLLM。它们的差异只在 base_url 和模型名，请求体形状一致。
-
-缓存能力是 IMPLICIT_PREFIX：不需要打任何标记，厂商自动缓存稳定的前缀。
-我们唯一的责任是**保证前缀逐字节稳定** —— 这条在 cache.py 里有指纹可以验证。
+Caching is implicit prefix caching: our only job is keeping the prefix byte-stable.
 """
 
 from __future__ import annotations
@@ -37,11 +33,7 @@ DONE_SENTINEL = "[DONE]"
 
 
 def _content(message: Message) -> object:
-    """把内容块译成 OpenAI 的形状。
-
-    纯文本消息退化成字符串而不是单元素数组 —— 两者语义相同，但字符串是
-    绝大多数厂商的规范形式，兼容性最好（部分兼容实现不接受数组形式）。
-    """
+    """Single-text messages become a plain string, the form every compatible server accepts."""
     if len(message.content) == 1 and isinstance(message.content[0], TextBlock):
         return message.content[0].text
     parts: list[dict[str, object]] = []
@@ -57,12 +49,8 @@ def _content(message: Message) -> object:
 
 
 def _openai_messages(request: CallRequest) -> list[dict[str, object]]:
-    """把统一消息译成 OpenAI 的消息数组。
-
-    工具这一段不是一对一的：统一词汇把工具结果放在一条 user 消息的内容块里
-    （Anthropic 形状），而 OpenAI 要求**每个结果一条独立的 role="tool" 消息**。
-    所以一条带 3 个结果的 user 消息在这里会展开成 3 条。顺序必须保持 ——
-    OpenAI 按 `tool_call_id` 配对，但乱序的历史在部分兼容实现上会被拒。
+    """Unified messages -> OpenAI messages. Each tool result expands into its own role="tool"
+    message, in order.
     """
     messages: list[dict[str, object]] = []
     if request.system:
@@ -76,7 +64,6 @@ def _openai_messages(request: CallRequest) -> list[dict[str, object]]:
             if not isinstance(b, (ToolResultBlock, ToolUseBlock))
         )
 
-        # 工具结果：逐个展开成 role="tool"
         for result in results:
             messages.append({
                 "role": "tool",
@@ -87,7 +74,7 @@ def _openai_messages(request: CallRequest) -> list[dict[str, object]]:
         if uses:
             entry: dict[str, object] = {
                 "role": "assistant",
-                # 只有工具调用、没有正文时也要给 content，部分兼容实现缺了会 400
+                # some compatible servers reject a missing content even when there are tool calls
                 "content": _content(Message(message.role, plain)) if plain else None,
                 "tool_calls": [
                     {
@@ -116,7 +103,7 @@ class OpenAiTranslator(StreamTranslator):
         self._usage = Usage()
         self._finish_reason: str | None = None
         self._emitted = False
-        # index → 累积中的调用。参数是 JSON 片段流式来的，攒完才有意义。
+        # index -> call being assembled; arguments stream as JSON fragments
         self._pending: dict[int, dict[str, str]] = {}
         self._flushed = False
 
@@ -126,15 +113,15 @@ class OpenAiTranslator(StreamTranslator):
         try:
             payload = json.loads(event.data)
         except ValueError:
-            # 坏帧不该毁掉整条流：厂商偶尔会插入非 JSON 的保活内容
+            # skip malformed frames: some servers interleave non-JSON keep-alives
             return
         if not isinstance(payload, dict):
             return
 
         clock = timing.current()
         if clock is not None:
-            # 网关的元数据：请求实际落到了哪一家、别名解析成了哪个模型。
-            # 只有计时开着时才看，而且只收白名单里的键（见 timing.NOTE_KEYS）。
+            # Gateway metadata (actual upstream, resolved model); recorded only when timing is on,
+            # whitelisted keys only.
             clock.note("upstream", payload.get("provider"))
             clock.note("resolved_model", payload.get("model"))
             clock.note("generation", payload.get("id"))
@@ -163,8 +150,7 @@ class OpenAiTranslator(StreamTranslator):
         if not isinstance(delta, dict):
             return
 
-        # DeepSeek 的 reasoner 系列把推理过程放在 reasoning_content。
-        # 部分厂商用 reasoning，两个都认。
+        # DeepSeek reasoner uses reasoning_content; some servers use reasoning.
         for key in ("reasoning_content", "reasoning"):
             thinking = delta.get(key)
             if isinstance(thinking, str) and thinking:
@@ -181,7 +167,7 @@ class OpenAiTranslator(StreamTranslator):
                 if isinstance(raw, dict):
                     self._absorb(raw)
 
-        # finish_reason 到了说明这一轮的调用都收全了，可以一次交出去。
+        # finish_reason means every call of this step has arrived
         if self._finish_reason and not self._flushed:
             yield from self._flush()
 
@@ -218,8 +204,7 @@ class OpenAiTranslator(StreamTranslator):
 
     def finish(self) -> Finish:
         if not self._emitted:
-            # 正常结束却一个字都没有：当失败处理，否则界面上是「转了半天然后
-            # 这一轮悄无声息地结束了」，用户与上层都无从下手。
+            # A normal end with no content is a failure, or the turn would silently end with nothing.
             from ..errors import EMPTY_RESPONSE, LlmFailure
 
             return Finish(
@@ -238,11 +223,9 @@ class OpenAiTranslator(StreamTranslator):
 
 
 def _parse_arguments(text: str) -> dict[str, object]:
-    """解析攒起来的参数 JSON。
+    """Parse accumulated argument JSON.
 
-    解析不了就给空字典而不是抛错 —— 抛错会让整条流炸掉，而调度层对「参数不对」
-    有现成的处理：工具自己会拒绝并把错误作为结果回给模型，模型还能重试。
-    流炸掉则什么都救不回来。
+    Bad JSON yields {} instead of killing the stream: the tool rejects it and the model can retry.
     """
     if not text.strip():
         return {}
@@ -254,32 +237,33 @@ def _parse_arguments(text: str) -> dict[str, object]:
 
 
 def _parse_usage(raw: dict[str, object]) -> Usage:
-    """解析用量。各厂商报告缓存命中的字段名不同，都要认。"""
+    """Parse usage; vendors name the cache fields differently."""
     def as_int(value: object) -> int:
         return value if isinstance(value, int) else 0
 
     prompt = as_int(raw.get("prompt_tokens"))
     completion = as_int(raw.get("completion_tokens"))
 
-    # OpenAI：prompt_tokens_details.cached_tokens
+    # OpenAI: prompt_tokens_details.cached_tokens
     cached = 0
     written = 0
     details = raw.get("prompt_tokens_details")
     if isinstance(details, dict):
         cached = as_int(details.get("cached_tokens"))
-        # OpenRouter 在同一个结构里还报缓存**写入**量（实测 2026-09-12）。
-        # 写入比普通输入略贵，不单独记就看不出「这一轮是在建缓存还是在吃缓存」。
+        # OpenRouter also reports cache writes, which cost slightly more than plain input
         written = as_int(details.get("cache_write_tokens"))
-    # DeepSeek：prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    # DeepSeek: prompt_cache_hit_tokens / prompt_cache_miss_tokens
     if not cached:
         cached = as_int(raw.get("prompt_cache_hit_tokens"))
 
     return Usage(
-        # prompt_tokens 含缓存命中部分，这里拆开记，才看得出缓存有没有生效
+        # prompt_tokens includes cache hits; split them out
         input_tokens=max(0, prompt - cached),
         output_tokens=completion,
         cache_read_tokens=cached,
         cache_write_tokens=written,
+        # prompt_tokens is everything the model saw
+        prompt_tokens=prompt,
     )
 
 
@@ -290,6 +274,29 @@ class OpenAiCompatAdapter(ProtocolAdapter):
 
     def endpoint(self, base_url: str, request: CallRequest) -> str:
         return f"{base_url.rstrip('/')}/chat/completions"
+
+    def model_info_url(self, base_url: str, model: str) -> str | None:
+        # the model list rather than /models/{id}: OpenRouter ids contain '/' and '~'
+        return f"{base_url.rstrip('/')}/models"
+
+    def context_window_from(self, payload: object, model: str) -> int | None:
+        """Find the model's window in the list.
+
+        Field names vary (context_length, context_window, max_model_len); OpenAI and DeepSeek report
+        none. When OpenRouter also reports top_provider.context_length, take the smaller.
+        """
+        entries = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("id") == model:
+                top = entry.get("top_provider")
+                candidates = [entry.get(key) for key in ("context_length", "context_window", "max_model_len")]
+                if isinstance(top, dict):
+                    candidates.append(top.get("context_length"))
+                sizes = [v for v in candidates if isinstance(v, int) and not isinstance(v, bool) and v > 0]
+                return min(sizes) if sizes else None
+        return None
 
     def headers(self, api_key: str) -> dict[str, str]:
         return {
@@ -303,7 +310,7 @@ class OpenAiCompatAdapter(ProtocolAdapter):
             "model": request.model,
             "messages": _openai_messages(request),
             "stream": True,
-            # 不加这个的话流式响应根本不带用量，缓存是否命中就无从得知
+            # without this the stream carries no usage, so cache hits are invisible
             "stream_options": {"include_usage": True},
         }
         if request.max_tokens is not None:
@@ -315,7 +322,7 @@ class OpenAiCompatAdapter(ProtocolAdapter):
                 {"type": "function", "function": tool.as_dict()} for tool in request.tools
             ]
         _apply_reasoning(body, request.reasoning)
-        # extra 最后并：它是用户的逃生口，**必须能覆盖上面任何一项**
+        # extra goes last: the user's escape hatch must be able to override anything above
         body.update(request.extra)
         return body
 
@@ -324,7 +331,7 @@ class OpenAiCompatAdapter(ProtocolAdapter):
 
     def classify(self, status: int, body: str) -> str:
         detail = self.error_detail(body)
-        # 先看结构化的 code，比状态码精确
+        # structured code first; more precise than the status
         try:
             parsed = json.loads(body)
             error = parsed.get("error") if isinstance(parsed, dict) else None
@@ -348,16 +355,10 @@ class OpenAiCompatAdapter(ProtocolAdapter):
 
 
 def _apply_reasoning(body: dict[str, object], level: str | None) -> None:
-    """把中立的推理档位翻成这条协议认得的参数。
+    """Translate the neutral reasoning level.
 
-    `reasoning_effort` 是 OpenAI 的标准字段，DeepSeek、OpenRouter、通义
-    都跟着它走；OpenRouter 还会把它规范化后转发给子供应商。
-
-    **"none" 走的是另一个字段。** OpenAI 没有「完全关掉」这一档，
-    而 OpenRouter 有 `reasoning: {enabled: false}`。两者形状不同，
-    所以分开发 —— 硬塞成 `reasoning_effort: "none"` 会被严格的网关判成非法值。
-
-    不认识的档位一律不发：**宁可用厂商默认，也不要发一个会让请求 400 的字段。**
+    reasoning_effort for OpenAI-style servers; "none" uses OpenRouter's reasoning.enabled=false
+    instead. Unknown levels are not sent: the vendor default beats a 400.
     """
     if not level:
         return

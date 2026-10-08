@@ -2,8 +2,7 @@ import AppKit
 import PDFKit
 import UniformTypeIdentifiers
 
-/// 一份待识别（或已识别）的文档。
-/// 转换模式看的是一队 job，阅读模式看的是其中选中的那一个 —— 同一条流水线，两种呈现。
+/// A document to recognise, or already recognised.
 @MainActor
 final class DocumentJob: ObservableObject, Identifiable {
 
@@ -13,7 +12,7 @@ final class DocumentJob: ObservableObject, Identifiable {
         case queued
         case running(done: Int, total: Int)
         case finished(seconds: Double)
-        /// 带 `UIText`：失败的原因会一直挂在文档上，切换界面语言之后要跟着换。
+        /// UIText: the reason stays on the document and must follow a language switch
         case failed(UIText)
         case cancelled
 
@@ -45,9 +44,9 @@ final class DocumentJob: ObservableObject, Identifiable {
     @Published var plainText = ""
     @Published var exportedTo: URL?
 
-    /// 服务端回报的已用秒数，用来算平均单页耗时和剩余时间
+    /// seconds reported by the server, for per-page averages and time left
     @Published var elapsed: Double = 0
-    /// 正在识别的页码。密集版面单页要十几秒，没有这个界面就是死的。
+    /// dense pages take over ten seconds; without this the UI looks frozen
     @Published var activePage: Int = 0
 
     let pdf: PDFDocument?
@@ -82,7 +81,7 @@ final class DocumentJob: ObservableObject, Identifiable {
         }
     }
 
-    /// 导出优先用跨页整理版，没有就退回逐页拼接 —— 别让用户干等整理。
+    /// the cross-page restructured text if available, else the pages joined, so export never waits
     var markdown: String {
         if !consolidated.isEmpty { return consolidated }
         return pages.keys.sorted().compactMap { pages[$0] }.joined(separator: "\n\n")

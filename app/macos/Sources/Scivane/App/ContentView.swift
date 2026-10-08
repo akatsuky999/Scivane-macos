@@ -7,7 +7,6 @@ struct ContentView: View {
   @State private var isTargeted = false
   @AppStorage("sidebarVisible") private var sidebarVisible = true
   @State private var documentQuery = ""
-  /// 「新建项目」弹窗。
   @State private var creatingProject = false
   @State private var newProjectTitle = ""
   @State private var showReadingOptions = false
@@ -47,8 +46,7 @@ struct ContentView: View {
       do { try await Task.sleep(nanoseconds: 2_200_000_000) } catch { return }
       model.notice = nil
     }
-    // 启动时静默拉一次项目列表。没装运行时的人只是看不到项目，
-    // 读 Markdown 这条路完全不受影响。
+    // Quietly load the project list at launch; without a runtime the list is just empty.
     .task { await model.refreshProjects(quiet: true) }
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: sidebarVisible)
     .tint(Palette.accent)
@@ -67,7 +65,7 @@ struct ContentView: View {
   }
 
 
-  /// 侧栏里的一行导航。**所有行共用它** —— 主动作靠图标着色区分，不靠实心底。
+  /// One sidebar row, shared by all rows; the primary action is told apart by icon colour.
   private func navRow(
     _ title: String, symbol: String, accent: Bool, action: @escaping () -> Void
   ) -> some View {
@@ -87,7 +85,6 @@ struct ContentView: View {
     .contentShape(Rectangle())
   }
 
-  /// 分组标题。安静、不带计数 —— 计数是给统计看的，不是给人找东西用的。
   private func sectionTitle(_ title: String) -> some View {
     Text(title)
       .font(.system(size: 10.5, weight: .medium))
@@ -95,7 +92,7 @@ struct ContentView: View {
       .padding(.horizontal, 10).padding(.bottom, 4)
   }
 
-  /// - Parameter action: 给「项目」那节用的「＋」。传 nil 就只有标题和计数。
+  /// - Parameter action: the "+" of the Projects section; nil shows only the title.
   private func sectionHeader(
     _ title: String, count: Int, action: (label: String, run: () -> Void)? = nil
   ) -> some View {
@@ -112,7 +109,6 @@ struct ContentView: View {
     }.foregroundStyle(Palette.inkFaint).padding(.top, 14).padding(.bottom, 5)
   }
 
-  /// 不属于任何项目的文档数。
   private var looseCount: Int {
     model.jobs.filter { model.jobProjects[$0.id] == nil }.count
   }
@@ -123,12 +119,8 @@ struct ContentView: View {
       ? model.projects : model.projects.filter { $0.title.localizedStandardContains(query) }
   }
 
-  /// 「本次文档」只列临时文档。
-  ///
-  /// 属于某个项目的文件不在这里出现 —— 进入项目时它的原稿与正文会被挂进
-  /// 阅读区（走和手动导入同一套 job 机制），但那是项目的一部分，
-  /// 在侧栏里再列一遍会让同一篇论文出现两次，而且名字是 `source` 这种
-  /// 磁盘文件名，读的人根本认不出是哪篇。
+  /// Only loose documents. A project's files belong to the project and would otherwise appear twice,
+  /// under disk names like `source`.
   private var filteredJobs: [DocumentJob] {
     let query = documentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     let loose = model.jobs.filter { model.jobProjects[$0.id] == nil }
@@ -136,24 +128,17 @@ struct ContentView: View {
       ? loose : loose.filter { $0.title.localizedStandardContains(query) }
   }
 
-  // MARK: - 唯一那条工具栏
+  // MARK: - Toolbar
   //
-  // 之前是两条：46pt 的全局栏 + 每栏 38pt 的栏头，内容开始前先吃掉 84pt。
-  // 对一个「论文才是主角」的阅读器，这个比例站不住。现在栏的身份、布局、
-  // 模式切换全部收在这一条里；页码浮到原稿之上，不再占布局高度。
-  //
-  // 常驻的只有五类：**退到哪去**（返回）、**当前在读什么**（标题）、
-  // **看哪一栏**（分段）、**怎么排**（单双栏）、**还能做什么**（⋯ 与 ＋）。
-  // 「开始 OCR」这种一次性动作不常驻 —— 它在正文栏的空态里，也在 ⋯ 里。
+  // One toolbar for back, title, pane, layout and more; the page number floats over the PDF.
+  // One-off actions such as Start OCR live in the empty text pane and the ... menu.
 
   private var header: some View {
     HStack(spacing: 12) {
       Button { sidebarVisible.toggle() } label: { Image(systemName: "sidebar.left") }
         .help(L("文档列表（⌘B）", "Sidebar (⌘B)")).accessibilityLabel(L("切换侧栏", "Toggle Sidebar"))
 
-      // **进得去就必须出得来。** 没有这个入口时，打开一篇论文之后回不到
-      // 「还没打开任何项目」那个状态 —— 书房那层 agent（跨项目的那一层）
-      // 也就再没有入口了。`leaveProject` 一直都在，缺的只是一个按钮。
+      // A way back out of a project, without which the librarian could never be reached again.
       if model.activeProject != nil {
         Button { model.leaveProject() } label: { Image(systemName: "chevron.backward") }
           .help(L("退出项目 · 回到全部项目", "Leave Project · Back to All Projects"))
@@ -168,7 +153,7 @@ struct ContentView: View {
 
       Spacer(minLength: 16)
 
-      // 这一篇还没建项目时，把主动作摆出来 —— 它是产品里最该被点的那个
+      // no project yet for this document: show the main action
       Group {
         if let source = model.readingSource, model.canBuildProject(source) {
           Button { Task { await model.buildProject(from: source) } } label: {
@@ -179,17 +164,9 @@ struct ContentView: View {
                   "Copy the original into a project that's recognized and kept"))
         }
 
-        // 放大镜去掉了 —— ⌘F 人人都会按，而工具栏上每多一个常驻图标，
-        // 真正重要的那几个就少一分。
         SegmentedTabs(items: paneTabs, selection: $model.paneSelection)
 
-        // **单/双栏常驻。** 一度随「双栏对照下架」一起去掉，结果是进了项目就是
-        // 双栏且回不到单栏。对照着读是这个产品的日常
-        // 动作之一，藏进菜单等于没有。
-        //
-        // 用**和左边那组同一种分段控件**，只是不带文字：一个裸图标按钮要靠
-        // 选中态去表达"现在是几栏"，而分段控件把两种状态一起摆出来、滑块指着
-        // 当前那个 —— 不用猜画的是"现在"还是"点下去会变成"。
+        // Single/dual layout stays on the toolbar, as a segmented control so both states are visible.
         SegmentedTabs(items: layoutTabs, selection: layoutSelection, iconOnly: true)
           .accessibilityIdentifier("toggle-dual-pane")
       }
@@ -199,8 +176,7 @@ struct ContentView: View {
           Button(L("开始 OCR", "Start OCR")) { model.startOCR(source) }
           Divider()
         }
-        // 里面现在有正文与对话两档，所以**不再随"有没有正文"禁用** ——
-        // 在 Agent 那栏想调对话字号时，正文栏往往正好是空的。
+        // Not disabled without a text pane: the dialog also sets the conversation text size.
         Button(L("字号…", "Text Size…")) { showReadingOptions = true }
         Toggle(L("原稿缩略图", "Page Thumbnails"), isOn: $model.showThumbnails)
           .disabled(model.readingSource?.isPDF != true)
@@ -229,8 +205,7 @@ struct ContentView: View {
     .frame(height: 46)
   }
 
-  /// 标题显示项目名，而不是磁盘文件名。
-  /// 项目里的原稿副本一律叫 `source.pdf`，把它摆在最显眼处毫无信息量。
+  /// The project name, not the on-disk file name (every source copy is called source.pdf).
   private var anchorTitle: String {
     if let project = model.activeProject { return project.title }
     if let job = model.selected { return job.title }
@@ -241,20 +216,17 @@ struct ContentView: View {
     model.activeProject?.sourceName ?? model.selected?.url.path ?? ""
   }
 
-  /// 单 / 双栏那一组。图标本身就说明形状，文字退到 tooltip。
   private var layoutTabs: [SegmentedTabs.Item] {
     [.init(id: "single", label: L("单栏", "Single Pane"), symbol: "rectangle"),
      .init(id: "dual", label: L("双栏对照 · 原稿在左", "Side by Side · Original on the Left"),
            symbol: "rectangle.split.2x1")]
   }
 
-  /// 分段控件认字符串，布局是个布尔 —— 这里翻译一次。
   private var layoutSelection: Binding<String> {
     Binding(get: { model.dualPane ? "dual" : "single" },
             set: { model.dualPane = $0 == "dual" })
   }
 
-  /// 单栏三选一，双栏右栏两选一。
   private var paneTabs: [SegmentedTabs.Item] {
     let text = SegmentedTabs.Item(id: "text", label: L("正文", "Text"), symbol: "text.alignleft")
     let chat = SegmentedTabs.Item(id: "chat", label: "Agent", symbol: "sparkles")

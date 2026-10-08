@@ -1,38 +1,35 @@
 import AppKit
 import Foundation
 
-/// Agent 的接线：provider 列表、凭据注入、发问、批准。
-///
-/// 状态在 AppModel 里，这里只放行为（与 ProjectWorkspace 同一个路数）。
+/// Agent wiring: providers, credential injection, asking, approval. State lives in AppModel; this
+/// holds behaviour only, like ProjectWorkspace.
 @MainActor
 extension AppModel {
 
-  /// 设置页要显示的 provider 概要。**不含任何凭据原文** ——
-  /// 后端的 `describe_all()` 也刻意不返回它。
+  /// Never contains a credential; the backend's describe_all() doesn't return one either.
   struct ProviderSummary: Identifiable, Decodable, Equatable {
     let id: String
     let label: String
     let model: String
     let baseUrl: String
-    /// 三套协议之一。编辑时要回填它，不能猜。
+    /// must be filled back in when editing, never guessed
     let proto: String
-    /// 后端那边有没有凭据（环境变量 / 运行时注入 / 凭据文件，任一）。
+    /// env var, runtime injection or credentials file
     let hasCredential: Bool
-    /// 这个模型的上下文窗口有多大。**可选** —— 没填就不画余量条。
-    ///
-    /// 不猜：这个系统里没有「厂商」概念，同一个模型名在不同网关后面可能是
-    /// 不同的窗口，**猜错比不显示更糟** —— 用户会照着一个假的余量规划对话。
+    /// Optional; otherwise the endpoint's reported window (detectedWindow). Never guessed from the
+    /// model name: the same name can have different windows behind different gateways, and a wrong
+    /// number is worse than none.
     let contextWindow: Int?
-    /// 推理预算档位（none / low / medium / high）。
-    ///
-    /// **放在 provider 上而不是全局**：同一个系统里可能同时接着一个推理模型
-    /// 和一个普通模型，给后者传档位只会被忽略或者直接报错。
+    /// Read-only. Not saved into contextWindow, so an alias such as `...-latest` doesn't keep a stale window.
+    let detectedWindow: Int?
+    var window: Int? { contextWindow ?? detectedWindow }
+    /// none / low / medium / high. Per provider, not global: a reasoning and a plain model can be
+    /// configured side by side, and the latter ignores or rejects the setting.
     let reasoning: String
-    /// 这张卡的 key 从哪来：`own` 或 `macro:<编号>`。**不是秘密，只是引用。**
+    /// `own` or `macro:<n>`; a reference, not a secret
     let credentialRef: String
 
-    /// 界面上叫它什么。昵称是用户自己起的，没起就退回标识 ——
-    /// **不要退回模型 id**，那串东西是给机器看的。
+    /// falls back to the id, never the model id
     var displayName: String { label.isEmpty ? id : label }
 
     private enum CodingKeys: String, CodingKey {
@@ -42,6 +39,7 @@ extension AppModel {
       case baseUrl = "base_url"
       case hasCredential = "has_credential"
       case contextWindow = "context_window"
+      case detectedWindow = "detected_window"
     }
 
     init(from decoder: Decoder) throws {
@@ -53,18 +51,20 @@ extension AppModel {
       proto = (try? c.decode(String.self, forKey: .proto)) ?? ProviderDefaults.proto
       hasCredential = (try? c.decode(Bool.self, forKey: .hasCredential)) ?? false
       contextWindow = try? c.decodeIfPresent(Int.self, forKey: .contextWindow)
+      detectedWindow = try? c.decodeIfPresent(Int.self, forKey: .detectedWindow)
       reasoning = (try? c.decode(String.self, forKey: .reasoning)) ?? ProviderDefaults.reasoning
       credentialRef = (try? c.decode(String.self, forKey: .credentialRef)) ?? "own"
     }
 
-    /// 给预览与离屏验证造样本用。真实数据一律从后端解码。
+    /// for previews and offscreen checks; real data is always decoded from the backend
     init(
       id: String, label: String, model: String, baseUrl: String,
       proto: String = ProviderDefaults.proto, hasCredential: Bool = false,
-      contextWindow: Int? = nil, reasoning: String = ProviderDefaults.reasoning,
+      contextWindow: Int? = nil, detectedWindow: Int? = nil, reasoning: String = ProviderDefaults.reasoning,
       credentialRef: String = "own"
     ) {
       self.contextWindow = contextWindow
+      self.detectedWindow = detectedWindow
       self.reasoning = reasoning
       self.credentialRef = credentialRef
       self.id = id
@@ -76,26 +76,19 @@ extension AppModel {
     }
   }
 
-  /// 新建 provider 时的默认值。
-  ///
-  /// 用当前这套 OpenRouter 配置当起点 —— 它是验证过能跑通的，
-  /// 让第一次配的人有个能改的样板，而不是面对四个空框。
+  /// Defaults for a new provider: a working OpenRouter setup to edit, rather than four empty fields.
   enum ProviderDefaults {
     static let id = "openrouter"
     static let label = "OpenRouter"
     static let proto = "openai"
     static let baseURL = "https://openrouter.ai/api/v1"
     static let model = "qwen/qwen3.8-flash"
-    /// 默认档位。取 medium 而不是 low：论文场景里「核对公式和代码是否等价」
-    /// 这类活儿确实需要推理，砍到最低会让结论变浅。
+    /// medium, not low: checking that code matches a formula needs real reasoning
     static let reasoning = "medium"
   }
 
-  /// 推理预算的四档。值与后端 `REASONING_LEVELS` 一一对应 ——
-  /// **改一边必须改另一边**，对不上的表现是保存之后悄悄回到默认。
-  ///
-  /// 是计算属性而不是 `static let`：里面的字要跟着界面语言换，
-  /// `static let` 在第一次读的时候就把那一刻的语言定死了。
+  /// Must match REASONING_LEVELS in the backend; a mismatch silently resets to the default on save.
+  /// Computed rather than static let so the labels follow the UI language.
   static var reasoningLevels: [(value: String, label: String, hint: String)] {
     [
       ("none", L("关", "Off"), L("完全不推理。最快，但复杂推导会变浅", "No reasoning. Fastest, but hard derivations get shallow")),
@@ -107,10 +100,8 @@ extension AppModel {
     ]
   }
 
-  /// 三套协议。**「厂商」在这个系统里不是一个概念** ——
-  /// 它就是「协议 + 地址 + 模型名」的组合：接 DeepSeek 是
-  /// openai + api.deepseek.com/v1，接本地 Ollama 是 openai + localhost:11434/v1，
-  /// 两者共用同一个适配器。所以界面上问的也是这三样，不是「选一个厂商」。
+  /// There is no "vendor" here, only protocol + address + model: DeepSeek is openai +
+  /// api.deepseek.com/v1, local Ollama is openai + localhost:11434/v1, both on one adapter.
   static var protocols: [(id: String, label: String, hint: String)] {
     [
       ("openai", L("OpenAI 兼容", "OpenAI-compatible"),
@@ -121,7 +112,7 @@ extension AppModel {
     ]
   }
 
-  // MARK: - provider
+  // MARK: - Providers
 
   func refreshProviders(quiet: Bool = true) async {
     guard await awaitBackend(quiet: quiet) else { return }
@@ -141,18 +132,12 @@ extension AppModel {
     await injectCredentials()
   }
 
-  /// 三张预置卡：OpenRouter / DeepSeek / OpenAI，地址与协议都填好，只差 key。
+  /// Three preset cards (OpenRouter / DeepSeek / OpenAI) that only need a key.
   ///
-  /// **只建一次**（记一个标记）。不记的话，用户把三张都删掉之后它们会在下次
-  /// 启动时原样长回来 —— 那不是「预置」，是「删不掉」。
-  ///
-  /// 模型名给的是各家当下的通用款，**用户几乎一定会改** ——
-  /// 填一个能跑的默认值，比留空让人对着一个必填框发愣要好。
+  /// Created once, behind a flag; otherwise deleted presets would grow back on the next launch.
   private func seedPresetsOnce() async {
-    // **只有真 App 能建卡。** 这件事是写盘（providers.json）+ 起后端，
-    // 而 `refreshProviders()` 在离屏验证里也会被调到 —— 那边既没有把落盘路径
-    // 引开、也不该凭空起一个占着 8710 的后端。挂在只读刷新上的副作用，
-    // 症状是「跑一次验证，用户的真实配置里多出三张卡」。
+    // Only the real app: this writes providers.json and starts the backend, and refreshProviders()
+    // also runs in offscreen checks.
     guard isLiveApp else { return }
     let flag = "seededProviderPresets"
     guard !UserDefaults.standard.bool(forKey: flag) else { return }
@@ -165,37 +150,27 @@ extension AppModel {
     await refreshProviders()
   }
 
-  /// 预置卡的内容。`window` 填的是各家文档上的公开值，填了才画余量条；
-  /// 拿不准的留空 —— **猜错比不显示更糟**（见 ProviderSummary.contextWindow）。
-  ///
-  /// 显示名按**建卡那一刻**的界面语言写进卡里（它是用户可改的数据，之后不再跟着换）。
+  /// `window` is the vendor's documented value; unknown ones stay empty, a wrong number being worse
+  /// than none. Labels are written in the UI language at creation time and are user data after that.
   static var presets: [(id: String, label: String, model: String, baseURL: String, window: Int?)] {
     [
-      // **三个不同的接入点，不是三个模型。** 中转站与官方的地址各不相同，
-      // 而地址正是新建一张卡时最容易填错、也最不该让人去查文档的东西。
-      // OpenRouter 那张给 `openrouter/auto`（它自己的路由模型）——
-      // 填某一家的模型会让这张卡看起来像另一张的重复。
+      // Three endpoints, not three models: the base URL is what people get wrong most. OpenRouter gets
+      // openrouter/auto so it doesn't look like a duplicate of another card.
       ("openrouter", "OpenRouter", "openrouter/auto", "https://openrouter.ai/api/v1", nil),
       ("deepseek", L("DeepSeek 官方", "DeepSeek Official"), "deepseek-chat", "https://api.deepseek.com/v1", 128_000),
       ("openai", L("OpenAI 官方", "OpenAI Official"), "gpt-5.2", "https://api.openai.com/v1", nil),
     ]
   }
 
-  /// 把 Keychain 里的 key 注入后端。
+  /// Inject the Keychain keys into the backend.
   ///
-  /// **走运行时接口而不是启动时的环境变量**，理由有三：
-  ///
-  /// 1. 进程环境是可读的 —— `ps -E` 能看到同一用户下任何进程的环境变量，
-  ///    把 key 摆在那里等于让用户自己跑的任何程序都能顺手读走
-  /// 2. 后端会因为「轻量 → 完整」升级而重启（加载 OCR 模型那次）。
-  ///    环境变量那条路要在每个重启分支上重新铺一遍；走接口只要在
-  ///    「后端就绪」这一个点上补一次
-  /// 3. 在设置里换了 key 立刻生效，不必重启后端
-  ///
-  /// 注入之后把 provider 记进 `injectedProviders`，后端重启时清空重来。
+  /// Through the runtime endpoint rather than environment variables at launch:
+  /// 1. process environments are readable (`ps -E`) by any process of the same user
+  /// 2. the backend restarts on the light -> full upgrade; the endpoint only needs one injection
+  ///    point (backend ready) instead of every restart path
+  /// 3. a changed key applies immediately, without a restart
   func injectCredentials() async {
-    // 后端重启过（比如为了 OCR 从轻量升级到完整）就得重新注入 ——
-    // 凭据只活在那个进程的内存里
+    // credentials only live in the backend process's memory
     if injectedGeneration != backend.launchGeneration {
       injectedProviders.removeAll()
       injectedGeneration = backend.launchGeneration
@@ -210,8 +185,8 @@ extension AppModel {
       request.timeoutInterval = 15
       request.setValue("application/json", forHTTPHeaderField: "Content-Type")
       request.httpBody = try? JSONSerialization.data(withJSONObject: ["api_key": secret])
-      // 失败不提示：这是后台补齐，真有问题会在「测试连接」或提问时说清楚。
-      // **绝不把 secret 写进任何日志或错误消息。**
+      // No message on failure: this is background catch-up, and real problems surface on Test or when
+      // asking. Never put the secret in a log or error.
       if let (_, response) = try? await URLSession.shared.data(for: request),
         (response as? HTTPURLResponse)?.statusCode == 200 {
         injectedProviders.insert(provider.id)
@@ -219,11 +194,8 @@ extension AppModel {
     }
   }
 
-  /// 这张卡实际该用哪把 key。
-  ///
-  /// **解析发生在 App 这一侧，后端从头到尾不知道「宏观 key」存在** ——
-  /// 它只会收到一把解析好的明文（走 `/credential`，只活在它的内存里）。
-  /// 这样红线（key 不进 providers.json、不进日志）一个字都不用改。
+  /// Which key this card actually uses. Resolved on the app side; the backend never learns about
+  /// shared keys and only receives the resolved key in memory.
   static func secret(for provider: ProviderSummary) -> String? {
     if provider.credentialRef.hasPrefix("macro:") {
       return MacroKeys.secret(id: String(provider.credentialRef.dropFirst(6)))
@@ -231,15 +203,13 @@ extension AppModel {
     return Keychain.secret(provider: provider.id)
   }
 
-  /// 这张卡现在有没有可用的 key。**界面据此显示「未配置」。**
-  ///
-  /// 用共享 key 的卡片要看那把共享 key 在不在 —— 只看自己名下的条目会让
-  /// 一张配好的卡显示成未配置，用户会去重填一遍，反而把共享那把覆盖掉。
+  /// A card using a shared key depends on that key. Checking only the card's own entry would show a
+  /// configured card as unconfigured, and re-entering it would overwrite the shared one.
   static func hasKey(_ provider: ProviderSummary) -> Bool {
     secret(for: provider) != nil
   }
 
-  /// 保存 key：写 Keychain，然后立刻注入后端。
+  /// Write to the Keychain, then inject at once.
   func saveCredential(_ secret: String, provider: String) async -> Bool {
     guard Keychain.set(secret, provider: provider) else { return false }
     injectedProviders.remove(provider)
@@ -248,9 +218,7 @@ extension AppModel {
     return true
   }
 
-  /// 新增或改写一个 provider。**后端会落盘**（写 providers.json），
-  /// 所以改完重启还在 —— 落盘的路径只在后端的 config.py 里定义一处，
-  /// 这边不重复那个路径。
+  /// The backend persists it (providers.json; the path is defined only in config.py).
   func saveProvider(
     id: String, label: String, proto: String, model: String, baseURL: String,
     contextWindow: Int? = nil, reasoning: String = ProviderDefaults.reasoning,
@@ -285,15 +253,14 @@ extension AppModel {
       let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"]
       return (false, (detail as? String) ?? L("保存失败（\(code)）", "Couldn't save (\(code))"))
     }
-    // 换了地址或模型，之前注入的凭据仍然属于这个 id，但后端可能换了实例，
-    // 重新注入一次最省心
+    // address or model changed: inject again to be safe
     injectedProviders.remove(identifier)
     await refreshProviders()
     agentProvider = identifier
     return (true, L("已保存", "Saved"))
   }
 
-  /// 删掉一个 provider，连同它在钥匙串里的 key。
+  /// Also removes its key from the Keychain.
   func deleteProvider(_ id: String) async {
     guard await awaitBackend() else { return }
     var request = URLRequest(
@@ -306,7 +273,7 @@ extension AppModel {
     await refreshProviders()
   }
 
-  /// 「测试连接」。返回一句能直接显示给用户的话。
+  /// Returns a sentence that can be shown as is.
   func testProvider(_ id: String) async -> (ok: Bool, message: String) {
     guard await awaitBackend() else { return (false, L("本地服务没起来", "The local service isn't running")) }
     var request = URLRequest(
@@ -321,7 +288,7 @@ extension AppModel {
       guard let model = root["model"] as? String else { return (true, L("连通了", "Connected")) }
       return (true, L("连通了，模型 \(model)", "Connected · model \(model)"))
     }
-    // 后端的错误码是稳定的，这里翻成人话。**不回显任何凭据原文。**
+    // stable backend error codes, phrased for people; no credential is ever echoed
     let failure = root["code"] as? String ?? "UNKNOWN"
     switch failure {
     case "MISSING_CREDENTIAL": return (false, L("还没填 API key", "No API key yet"))
@@ -337,24 +304,20 @@ extension AppModel {
     }
   }
 
-  /// 当前 provider 声明的上下文窗口。没填就是 nil，界面据此决定画不画余量条。
+  /// manual window first, then the reported one; nil if neither
   var activeContextWindow: Int? {
-    providers.first { $0.id == activeProviderID }?.contextWindow
+    providers.first { $0.id == activeProviderID }?.window
   }
 
-  // MARK: - 用户上传的材料
+  // MARK: - Project files
 
-  /// 拉一次这个项目 `files/` 里的清单。
   func refreshProjectFiles(_ projectID: String) async {
     guard await awaitBackend(quiet: true) else { return }
     guard let found = try? await projectClient.files(projectID) else { return }
     projectFiles[projectID] = found
   }
 
-  /// 把一批本机文件复制进项目的 `files/`。
-  ///
-  /// 一次拖进来几个就逐个送 —— 失败的那个单独报，不要因为一个坏文件
-  /// 让其余几个也白拖一次。
+  /// Files are sent one by one, so a bad file fails on its own.
   func addProjectFiles(_ urls: [URL]) async {
     guard let projectID = activeProjectID else {
       notifyProject(L("先打开一个项目，文件才知道该放哪儿", "Open a project first, so the files know where to go"))
@@ -402,11 +365,11 @@ extension AppModel {
     await refreshProjectFiles(projectID)
   }
 
-  // MARK: - 发问
+  // MARK: - Asking
 
   var canAskAgent: Bool {
     guard !agentProvider.isEmpty else { return false }
-    // 书房那层不需要正文
+    // the librarian needs no text
     guard let project = activeProject else { return true }
     return project.hasUsableContext
   }
@@ -423,11 +386,30 @@ extension AppModel {
     }
   }
 
-  /// 这一刻该用哪张卡。
-  ///
-  /// **每条对话各记各的**：优先用这条对话选定的那张；没选过（老对话、
-  /// 刚建的新对话）就回落到全局默认。指向一张已经被删掉的卡时也回落 ——
-  /// 否则发问会以「没有这个 provider」失败，而用户完全看不出为什么。
+  /// Compact the current conversation by hand. Same preparation as asking (backend, credentials):
+  /// it calls the model. The librarian has nothing to compact.
+  func compactAgentContext() {
+    guard activeProjectID != nil, !activeProviderID.isEmpty else { return }
+    let session = agentSession
+    let provider = activeProviderID
+    Task {
+      guard await awaitBackend() else { return }
+      await injectCredentials()
+      session.compact(base: backend.apiBase, provider: provider)
+    }
+  }
+
+  /// Reads local numbers only, so no credential injection.
+  func refreshAgentContext() async {
+    guard activeProjectID != nil else { return }
+    let session = agentSession
+    let provider = activeProviderID
+    guard await awaitBackend(quiet: true) else { return }
+    await session.refreshContext(base: backend.apiBase, provider: provider.isEmpty ? nil : provider)
+  }
+
+  /// Each conversation remembers its own card, falling back to the global default when none is set
+  /// or the card was deleted; otherwise asking fails with an unknown provider for no visible reason.
   var activeProviderID: String {
     if let chosen = activeConversationRecord?.provider,
       providers.contains(where: { $0.id == chosen }) {
@@ -436,19 +418,19 @@ extension AppModel {
     return agentProvider
   }
 
-  /// 当前这条对话的记录（书房层没有对话，所以可能是 nil）。
+  /// nil for the librarian
   var activeConversationRecord: Conversation? {
     guard let projectID = activeProjectID, let current = activeConversation[projectID]
     else { return nil }
     return conversations[projectID]?.first { $0.id == current }
   }
 
-  /// 在聊天框里换一张卡。写进这条对话的日志，所以下次打开还记得。
+  /// Saved in the conversation's log, so it sticks.
   func useProvider(_ providerID: String) {
     guard let projectID = activeProjectID,
       let conversationID = activeConversation[projectID]
     else {
-      // 书房层没有对话可记，只能改全局默认 —— 那一层本来也只有一问一答。
+      // the librarian has no conversation; change the global default
       agentProvider = providerID
       return
     }
@@ -464,7 +446,7 @@ extension AppModel {
     }
   }
 
-  /// 进入项目、切回书房、或换一条对话时把那一段历史补回来。
+  /// After entering a project, returning to the librarian or switching conversations.
   func restoreAgentHistory() {
     let session = agentSession
     Task {
@@ -473,23 +455,19 @@ extension AppModel {
     }
   }
 
-  // MARK: - 对话
+  // MARK: - Conversations
   //
-  // 一个项目可以有多条对话，各自一段历史。切换条在 AgentPanel 顶部。
-  // 清单的唯一来源是后端（它从对话文件本身算出来），这边不另存一份 ——
-  // 两份必然漂移，而漂移的那份会让用户看到一个不存在的对话。
+  // The backend is the only source of the list (computed from the conversation files); a second
+  // copy here would drift.
 
-  /// 拉一次这个项目的对话清单，并确保有一条被选中。
-  ///
-  /// **一条都没有时不在这里建。** 建在发问那一刻（后端的
-  /// `ensure_conversation` 会接上），否则光是点开 Agent 栏就会在磁盘上
-  /// 留下一条空对话。
+  /// Load the list and make sure one is selected. Never creates one here: the backend does that on
+  /// the first question, otherwise opening the agent pane would leave an empty conversation on disk.
   @discardableResult
   func refreshConversations(_ projectID: String) async -> Bool {
     guard await awaitBackend(quiet: true) else { return false }
     guard let found = try? await projectClient.conversations(projectID) else { return false }
     conversations[projectID] = found
-    // 选中的那条被删掉了（或者还没选过）就回到最近一条
+    // the selection was deleted (or never made): back to the most recent
     if let current = activeConversation[projectID],
       found.contains(where: { $0.id == current })
     { return true }
@@ -501,10 +479,8 @@ extension AppModel {
     return true
   }
 
-  /// 开一条新对话并切过去。
-  ///
-  /// 当前这条要是还没说过话，就原地不动 —— 连点几下「新对话」不该在磁盘上
-  /// 堆出一串空文件，而用户想要的「一张白纸」他已经看着了。
+  /// Stays put if the current conversation is still empty, so repeated clicks don't leave a trail
+  /// of empty files.
   func newConversation() async {
     guard let projectID = activeProjectID else { return }
     if let current = activeConversationID,
@@ -521,32 +497,28 @@ extension AppModel {
     }
   }
 
-  /// 从侧栏点开某个项目的某条对话 —— **那个项目可能还不是当前项目**。
-  ///
-  /// 先进项目再选对话，顺序不能反：`selectConversation` 写的是
-  /// `activeConversation[activeProjectID]`，项目没切过去的话会写到别人头上。
+  /// Open a conversation from the sidebar; the project may not be the current one. Enter the project
+  /// first: selectConversation writes to activeConversation[activeProjectID].
   func openConversation(project: Project, conversation: String) async {
     guard !sidebarNavigationBusy else { return }
     sidebarNavigationBusy = true
     defer { sidebarNavigationBusy = false }
     if activeProjectID != project.id { await enterProject(project) }
-    // 进入失败不能把目标对话写进上一个项目；点击对话也必须真的显示 Agent。
+    // if entering failed, don't write into the previous project; and a click must show the agent
     guard activeProjectID == project.id else { return }
-    // 只决定「看哪一栏」。**不碰 dualPane** —— 那是用户偏好，顺手改掉的话，
-    // 用户刚切成双栏、点一下对话又被打回单栏。
+    // Only picks the pane; dualPane is the user's preference and stays as it is.
     paneSelection = "chat"
     selectConversation(conversation)
   }
 
-  /// 在某个项目里开一条新对话（同样可能不是当前项目）。
+  /// The project may not be the current one here either.
   func newConversation(in project: Project) async {
     guard !sidebarNavigationBusy else { return }
     sidebarNavigationBusy = true
     defer { sidebarNavigationBusy = false }
     if activeProjectID != project.id { await enterProject(project) }
     guard activeProjectID == project.id else { return }
-    // 只决定「看哪一栏」。**不碰 dualPane** —— 那是用户偏好，顺手改掉的话，
-    // 用户刚切成双栏、点一下对话又被打回单栏。
+    // Only picks the pane; dualPane is the user's preference and stays as it is.
     paneSelection = "chat"
     await newConversation()
   }
@@ -569,7 +541,7 @@ extension AppModel {
     }
   }
 
-  /// 删掉一条对话。**问一次** —— 它带着这段谈话的全部历史，删了不可撤销。
+  /// Asks first: it takes the whole history and can't be undone.
   func deleteConversation(_ conversationID: String, in targetProject: String? = nil) async {
     guard let projectID = targetProject ?? activeProjectID else { return }
     let title =
@@ -587,7 +559,7 @@ extension AppModel {
     guard await awaitBackend() else { return }
     do {
       try await projectClient.deleteConversation(projectID, conversationID)
-      // 会话实例也要丢掉，否则同 id 再出现时会拿到一份陈旧的记录
+      // drop the session too, or a reused id gets a stale transcript
       forgetSession(projectID: projectID, conversation: conversationID)
       if activeConversation[projectID] == conversationID {
         activeConversation.removeValue(forKey: projectID)
@@ -599,10 +571,8 @@ extension AppModel {
     }
   }
 
-  /// 导出一条对话为 .json 文件。
-  ///
-  /// 后端给的是**原始事件流**（权威记录，能重建模型历史与界面记录两种投影），
-  /// 这里原样写盘，不在中间解码再编码。
+  /// The backend returns the raw event log (the authoritative record); it is written as is, without
+  /// decoding and re-encoding.
   func exportConversation(_ conversationID: String, in targetProject: String? = nil) async {
     guard let projectID = targetProject ?? activeProjectID,
       let project = projects.first(where: { $0.id == projectID }) else { return }
@@ -631,11 +601,8 @@ extension AppModel {
     }
   }
 
-  /// 导出文件的默认名字：`<项目> · <对话>.json`。
-  ///
-  /// 把项目名也放进去：导出的文件多半会离开这台机器，只叫「对话.json」
-  /// 的话，几个月后没人知道它属于哪篇论文。
-  /// 路径分隔符要换掉 —— 论文标题里真的会出现斜杠（"A/B testing"）。
+  /// `<project> · <conversation>.json`. The project is included because exports leave the machine.
+  /// Slashes are replaced: titles do contain them ("A/B testing").
   static func exportFilename(project: String, conversation: String) -> String {
     func safe(_ text: String) -> String {
       text.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: "-")

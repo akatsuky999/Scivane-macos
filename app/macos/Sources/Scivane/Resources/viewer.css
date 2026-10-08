@@ -1,11 +1,8 @@
-/* Scivane 阅读器排版层
- *
- * 方向：学术期刊的版面感。衬线正文、克制的灰阶、墨绿作强调色。
- * 强调色只出现在两个地方：当前页指示、搜索命中。其余一律灰阶。
- */
+/* Reader typography: the feel of an academic journal. Serif text, restrained greys, and a dark
+ * green accent used only for the current-page marker and search hits. */
 
 :root {
-  /* 暖白纸面，比纯白柔和，长时间阅读不刺眼 */
+  /* warm paper white, easier than pure white over long reading */
   --paper:      #faf9f5;
   --paper-sunk: #f0f0e8;
   --ink:        #21302b;
@@ -15,7 +12,7 @@
   --rule-soft:  rgba(20, 20, 26, 0.065);
   --panel:      rgba(20, 20, 26, 0.035);
 
-  /* 墨绿强调色，与原生界面同步。 */
+  /* dark green accent, same as the native UI */
   --accent:      #29574a;
   --accent-wash: rgba(41, 87, 74, 0.13);
 
@@ -23,14 +20,12 @@
   --sans:  ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
   --mono:  ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* 行长**在排版的舒适区内**随窗口伸缩，而不是钉死一个数。
-     58ch 是下限（再窄就频繁折行），76ch 是上限（再宽眼睛回不到行首）。
-     中间那档跟着视口走：窄窗口收紧、宽窗口松一点，两头都不越界。
-     `ch` 本身跟着 body 字号走，所以调字号时行长自动跟着换算。 */
+  /* Line length follows the window within the comfortable range: 58ch minimum (shorter wraps
+     too often), 76ch maximum (longer loses the line start). `ch` follows the font size. */
   --measure: clamp(58ch, 56vw, 76ch);
   --gutter: clamp(26px, 3.4vw, 52px);
-  /* 表格与插图允许越出正文的行长 —— 期刊排版的常规做法。
-     宽窗口下给得多一点，免得右边空着一大片而表格在横向滚动。 */
+  /* Tables and figures may extend past the measure, as in journals; more on wide windows so
+     tables don't scroll next to empty space. */
   --bleed: clamp(0px, 4.5vw, 96px);
 
   color-scheme: light dark;
@@ -78,7 +73,7 @@ body {
   font-family: var(--serif);
   font-size: 17px;
   line-height: 1.75;
-  /* 等高数字。老式数字混在中文里会高低不齐，非常显脏。 */
+  /* lining figures: old-style digits look uneven next to CJK text */
   font-variant-numeric: lining-nums proportional-nums;
   font-kerning: normal;
   -webkit-font-smoothing: antialiased;
@@ -88,7 +83,7 @@ body {
 
 ::selection { background: var(--accent-wash); }
 
-/* --- 空状态 ------------------------------------------------------------ */
+/* --- Empty state ------------------------------------------------------ */
 .empty {
   position: fixed;
   inset: 0;
@@ -127,16 +122,15 @@ body {
 }
 .empty-sub { margin: 0; font-size: 12px; color: var(--ink-faint); }
 
-/* --- 文档容器 ---------------------------------------------------------- */
+/* --- Document --------------------------------------------------------- */
 #doc {
   max-width: calc(var(--measure) + var(--gutter) * 2);
   margin: 0 auto;
   padding: 60px var(--gutter) 48vh;
 }
 
-/* --- 页分隔 ------------------------------------------------------------
-   页码是导航辅助，不是内容。压到最低视觉重量：小号无衬线、
-   浅灰、左对齐，后面跟一条细到几乎看不见的线。          */
+/* --- Page breaks ------------------------------------------------------
+   Page numbers are navigation, not content: small, light grey, left-aligned, then a faint rule. */
 .page {
   scroll-margin-top: 20px;
   position: relative;
@@ -160,7 +154,7 @@ body {
 }
 .page:first-child .page-mark { margin-top: 0; }
 
-/* 当前页：一根贴在左边距外的细竖线，比给页码上色安静得多 */
+/* current page: a thin bar outside the left margin, quieter than a coloured number */
 .page.is-current::before {
   content: "";
   position: absolute;
@@ -178,14 +172,14 @@ body {
   to   { opacity: .75; transform: none; }
 }
 
-/* --- 标题 --------------------------------------------------------------
-   字阶靠字号和字重拉开，不靠颜色。中文标题需要更紧的字距。 */
+/* --- Headings ---------------------------------------------------------
+   Hierarchy through size and weight, not colour. CJK headings need tighter tracking. */
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--serif);
   line-height: 1.3;
   margin: 2em 0 .6em;
   font-weight: 680;
-  text-wrap: pretty;      /* 避免标题末行孤字 */
+  text-wrap: pretty;      /* no orphaned last word */
 }
 h1 {
   font-size: 1.78em;
@@ -211,24 +205,22 @@ h4, h5, h6 {
   letter-spacing: .01em;
   color: var(--ink-soft);
 }
-/* 标题后紧跟的第一段不要再叠加上边距 */
+/* no extra top margin for the first paragraph after a heading */
 h1 + p, h2 + p, h3 + p { margin-top: 0; }
 
-/* --- 正文 --------------------------------------------------------------
-   **两端对齐 + 自动断词。** 这是期刊版面最直接的一条视觉线索；
-   单独开两端对齐会拉出"河流"，必须和 hyphens 一起上。
-   `overflow-wrap` 兜住 OCR 里常见的长 URL 与不可断的符号串 ——
-   没有它，一个超长 token 会把整行撑开。 */
+/* --- Body text --------------------------------------------------------
+   Justified with hyphenation; justification alone opens rivers. overflow-wrap catches the long
+   URLs and unbreakable symbol runs common in OCR output. */
 p {
   margin: 0 0 1.1em;
   text-align: justify;
   hyphens: auto;
   overflow-wrap: break-word;
 }
-/* 引用与图注不对齐 —— 短块两端对齐只会字距忽宽忽窄。 */
+/* quotes and captions aren't justified: short blocks only get uneven spacing */
 blockquote p, figcaption, caption { text-align: left; hyphens: manual; }
 
-/* 参考文献编号、脚注记号：压小并抬起，不撑开行高 */
+/* reference numbers and footnote marks: smaller and raised, without growing the line */
 sup, sub { font-size: .72em; line-height: 0; }
 strong { font-weight: 680; }
 em { font-style: italic; }
@@ -265,9 +257,9 @@ blockquote {
 }
 blockquote p:last-child { margin-bottom: 0; }
 
-/* --- 表格 --------------------------------------------------------------
-   论文表格常常比正文宽。允许它向两侧溢出到边距里，
-   实在放不下才横向滚动 —— 这是期刊排版的常规做法。 */
+/* --- Tables -----------------------------------------------------------
+   Paper tables are often wider than the text: they may extend into the margins and only scroll
+   when even that isn't enough. */
 .table-wrap {
   margin: 2.1em calc((var(--gutter) + var(--bleed)) * -1);
   padding: 0 calc(var(--gutter) + var(--bleed));
@@ -289,8 +281,8 @@ table {
   line-height: 1.5;
   font-variant-numeric: tabular-nums lining-nums;
 }
-/* booktabs：**只有三条横线**（表头上、表头下、表尾），一条竖线都没有。
-   竖线是电子表格的默认，不是论文的默认；去掉之后数字列自己就对齐了。 */
+/* booktabs: three horizontal rules (above and below the header, at the end) and no vertical
+   ones, which are a spreadsheet default rather than a paper's. */
 th, td {
   padding: .5em .9em;
   text-align: left;
@@ -312,8 +304,7 @@ thead th {
 tbody tr:last-child td { border-bottom: 1.5px solid var(--ink-soft); }
 tbody tr { transition: background .15s ease; }
 tbody tr:hover { background: var(--panel); }
-/* 数字列右对齐：一列数字左对齐是表格里最容易看出"没排过版"的地方。
-   `td` 里全是数字/正负号/百分号时才算。 */
+/* numeric columns right-aligned (class set by viewer.js when every cell is numeric) */
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums lining-nums; }
 
 table caption {
@@ -326,9 +317,9 @@ table caption {
   text-align: left;
 }
 
-/* --- 图片 --------------------------------------------------------------
-   图和表一样允许越出正文行长：论文里的图往往本身就比一栏宽，
-   压回行长里等于把它缩小一圈，坐标轴上的字先糊掉。 */
+/* --- Figures ----------------------------------------------------------
+   Figures may extend past the measure like tables: squeezing a wide figure blurs the axis
+   labels first. */
 figure { margin: 2.1em calc(var(--bleed) * -0.5); }
 img {
   max-width: 100%;
@@ -349,7 +340,7 @@ figcaption {
   text-align: center;
 }
 
-/* --- 代码 -------------------------------------------------------------- */
+/* --- Code ------------------------------------------------------------- */
 code {
   font-family: var(--mono);
   font-size: .84em;
@@ -369,7 +360,7 @@ pre {
 }
 pre code { background: none; padding: 0; font-size: .8em; }
 
-/* --- 公式 -------------------------------------------------------------- */
+/* --- Math ------------------------------------------------------------- */
 .katex { font-size: 1.02em; }
 .katex-display {
   margin: 1.7em 0;
@@ -390,7 +381,7 @@ pre code { background: none; padding: 0; font-size: .8em; }
   border-radius: 3px;
 }
 
-/* --- 搜索命中 ---------------------------------------------------------- */
+/* --- Search hits ------------------------------------------------------ */
 mark.hit {
   background: var(--accent-wash);
   color: inherit;
@@ -403,20 +394,16 @@ mark.hit.active {
   color: var(--paper);
 }
 
-/* --- 紧凑模式：窄栏时收敛边距 ------------------------------------------- */
+/* --- Narrow panes: tighter margins ------------------------------------ */
 @media (max-width: 620px) {
   :root { --bleed: 0px; }
   #doc { padding-top: 40px; }
   .page.is-current::before { left: -12px; }
-  /* 窄栏里两端对齐会把字距拉得忽宽忽窄，退回左对齐 */
+  /* justified text in a narrow column spaces words unevenly; align left */
   p { text-align: left; }
 }
 
-/* 无障碍：动效一律可关。
-   （先前这里还有一叠"Studio details"覆盖 —— 页码上色、代码块圆角、表头填色、
-     单元格左内边距、h1 字重，全都在**推翻上面刚写过的规则**。
-     同一个属性在一份样式表里写两遍，读的人分不清哪句还算数，
-     改的人两处都要改 —— 已经合并回各自的段落里了。） */
+/* Accessibility: all motion can be turned off. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
   html { scroll-behavior: auto; }

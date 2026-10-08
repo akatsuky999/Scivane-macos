@@ -1,11 +1,9 @@
 import SwiftUI
 
-// **入口已下架（2026-09-16）。** 这个视图现在没有任何调用方 —— 保留是因为
-// 下架是产品决定而不是代码判决：真要把它放回去，只需要在 ContentView 里
-// 接一个分支。**不要以为它是死代码顺手删掉**，也不要往它上面加新东西。
-//
+// Currently unused: the entry point was removed as a product decision. Kept so it can be wired
+// back into ContentView; not dead code to delete, and not a place for new work.
 
-/// 转换模式：不打算读，只要 .md。一队文档串行跑完，一次导出。
+/// Batch conversion: documents run one after another and are exported as .md.
 struct ConvertView: View {
     @ObservedObject var model: AppModel
 
@@ -94,7 +92,7 @@ struct ConvertView: View {
     }
 }
 
-// MARK: - 队列行
+// MARK: - Queue row
 
 private struct JobRow: View {
     @ObservedObject var model: AppModel
@@ -199,7 +197,7 @@ private struct JobRow: View {
         return job.status.label
     }
 
-    /// 按已完成页的平均耗时外推剩余时间
+    /// extrapolated from the average time of finished pages
 
     private var remaining: Double? {
         guard case .running(let done, let total) = job.status,

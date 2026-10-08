@@ -33,7 +33,7 @@ import Foundation
   }
 private static func matches(_ entry: Entry, source: URL) -> Bool {
   if let digest = entry.fingerprint { return digest == fingerprint(source) }
-  // Migrate results produced by the first manual-OCR build in this update.
+  // Migrate results written by the first build with manual OCR.
   guard let attributes = try? FileManager.default.attributesOfItem(atPath: source.path),
         let size = attributes[.size] as? Int, let modified = attributes[.modificationDate] as? Date,
         let oldDate = entry.modified, entry.size == size else { return false }

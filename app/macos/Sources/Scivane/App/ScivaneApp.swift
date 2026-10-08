@@ -13,9 +13,8 @@ struct ScivaneApp: App {
         let backend = BackendManager()
         _backend = StateObject(wrappedValue: backend)
         let model = AppModel(backend: backend)
-        // **这里是唯一一处置位。** 带副作用的启动动作（首启预置模型卡 ——
-        // 它要写 providers.json 并起后端）只该发生在用户面前；离屏验证
-        // 同样会构造 AppModel，不该跟着建卡。
+        // The only place this is set: startup side effects (seeding provider cards, which writes
+        // providers.json and starts the backend) belong to the real app, not to offscreen checks.
         model.isLiveApp = true
         _model = StateObject(wrappedValue: model)
     }
@@ -37,8 +36,8 @@ struct ScivaneApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1160, height: 760)
-        // 菜单里我们自己的项目当场跟着界面语言换；系统自带的那几项（编辑、窗口、退出）
-        // 由 AppKit 在启动时定语言，重新打开后才跟上（`Localization.launchLanguage`）。
+        // Our own menu items follow the UI language immediately; AppKit's built-in ones (Edit, Window,
+        // Quit) pick their language at launch (Localization.launchLanguage).
         .commands {
             CommandGroup(replacing: .appSettings) {
                 SettingsLink { Text(L("设置…", "Settings…")) }
@@ -83,7 +82,7 @@ struct ScivaneApp: App {
     }
 }
 
-/// llama-server 抱着 1.8GB 常驻内存，App 退出必须连它一起收掉。
+/// llama-server keeps 1.8 GB resident; quitting must take it down too.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var backend: BackendManager?
 private var pendingFiles: [URL] = []

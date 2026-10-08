@@ -1,17 +1,15 @@
 import Foundation
 
-/// 负责拉起并守着后端两层（llama-server + FastAPI）。
+/// Starts and supervises the backend (FastAPI, plus llama-server in full mode).
 ///
-/// 这台是无风扇的 Air，llama-server 抱着 2.8GB 常驻、推理时吃满 GPU。
-/// 所以这里的第一原则是**收得干净、收得快**：
-///   - App 退出 → 同步等它死透，必要时 SIGKILL，不留残留
-///   - App 被强杀 → 脚本里的守护进程按 PID 补刀
-///   - 长时间不用 → 自动停掉，下次要用再拉起（冷启动只要 2-3 秒）
+/// llama-server keeps 2.8 GB resident and saturates the GPU, so shutdown must be clean and quick:
+///   - app quits: wait synchronously until it is gone, SIGKILL if needed
+///   - app is killed: the script's watchdog reaps it by PID
+///   - idle for a while: stop it; a cold start takes 2-3 s
 @MainActor
 final class BackendManager: ObservableObject {
 
-    /// 带的是 `UIText` 而不是 String：「启动失败」这类状态会一直挂在侧栏与设置页上，
-    /// 切换界面语言之后要跟着换，而不是停在出事那一刻的语言里。
+    /// UIText, not String: a failure stays on screen and must follow a language switch.
     enum State: Equatable {
         case idle
         case launching(UIText)
@@ -21,23 +19,20 @@ final class BackendManager: ObservableObject {
         var isReady: Bool { self == .ready }
     }
 
-    /// 后端起到哪一层。
-    ///
-    /// 项目管理、阅读、云端问答都不需要本地 OCR 模型 —— 没理由为了列一下
-    /// 项目就加载 2.8GB 权重。轻量模式实测 0.4 秒起、常驻 58MB；
-    /// 真要 OCR 时再换成完整模式。
+    /// Projects, reading and cloud chat don't need the local OCR model, so the light mode skips
+    /// loading 2.8 GB of weights (starts in 0.4 s, 58 MB resident). Full mode only when OCR runs.
     enum Mode: String {
-        case lite   // 只有编排层
-        case full   // 编排层 + llama-server
+        case lite   // API only
+        case full   // API + llama-server
 
         var needsModel: Bool { self == .full }
     }
 
-    /// 当前进程实际起到哪一层。没在跑时为 nil。
+    /// nil when not running
     @Published private(set) var runningMode: Mode?
 
     @Published private(set) var state: State = .idle
-    /// 因为长时间闲置被自动停掉（区别于用户主动停）
+    /// stopped for idling, as opposed to stopped by the user
     @Published private(set) var stoppedForIdle = false
 
     private let preferences: UserDefaults
@@ -47,14 +42,14 @@ final class BackendManager: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var idleTimer: Timer?
 
-    /// 由 AppModel 注入：还有任务在跑就不要自动停
+    /// set by AppModel: don't idle-stop while work is running
     var isBusy: () -> Bool = { false }
 
-    /// 闲置多久后自动停掉后端。0 表示不自动停。
+    /// 0 disables the idle stop
     var idleTimeout: TimeInterval {
         get {
             let v = preferences.object(forKey: "idleTimeout") as? Double
-            return v ?? 300   // 默认 5 分钟
+            return v ?? 300   // 5 minutes
         }
         set {
             preferences.set(newValue, forKey: "idleTimeout")
@@ -62,8 +57,8 @@ final class BackendManager: ObservableObject {
         }
     }
 
-    /// 设置页里指定的后端位置。nil = 自动定位（见 `InstallContext`）。
-    /// 键名沿用 `projectRoot`：老版本存下的值照样被当成覆盖读出来。
+    /// nil = locate automatically (InstallContext). The key keeps its old name `projectRoot` so values
+    /// saved by earlier versions still apply.
     var backendOverride: URL? {
         get {
             guard let s = preferences.string(forKey: "projectRoot"), !s.isEmpty else { return nil }
@@ -75,7 +70,7 @@ final class BackendManager: ObservableObject {
         }
     }
 
-    /// 后端从哪来。每次启动前现算 —— 设置改了、App 被挪了都跟得上。
+    /// Recomputed before every launch, so a changed setting or a moved app is picked up.
     var install: Result<InstallContext, InstallContext.Failure> {
         Self.resolve(override: backendOverride ?? Self.environmentOverride)
     }
@@ -89,11 +84,11 @@ final class BackendManager: ObservableObject {
         InstallContext.resolve(override: override, bundle: Bundle.main.bundleURL, executable: Bundle.main.executableURL)
     }
 
-    /// 设置页「项目目录」一栏的写回。**只有用户真的改了才记成覆盖。**
+    /// Written back from the Settings field; only a real change is stored as an override.
     ///
-    /// 那一栏打开时预填的是自动定位的结果。原样点一下「重启引擎」就把它记成覆盖的话，
-    /// 装包的用户会被钉死在包内那条路径上 —— App 挪个位置或换个版本，就指向一个
-    /// 不存在的旧包，而自动定位本来能找对。清空这一栏同样回到自动定位。
+    /// The field is prefilled with the located path. Storing it unchanged would pin an installed app
+    /// to that bundle path, which breaks once the app is moved or updated. Clearing the field returns
+    /// to automatic location.
     func useBackendLocation(_ path: String) {
         let trimmed = path.trimmingCharacters(in: .whitespaces)
         let automatic = try? Self.resolve(override: Self.environmentOverride).get()
@@ -105,11 +100,10 @@ final class BackendManager: ObservableObject {
         }
     }
 
-    /// 设置页里指定的本地 OCR 位置。nil = 自动发现（组件目录 → 旧部署，见 runtime.py）。
+    /// nil = discover automatically (component dir, then legacy deployment).
     ///
-    /// **只有用户真的指定了才传 `SCIVANE_RUNTIME_ROOT`** —— 那是「覆盖」档，设了就只看它。
-    /// 从前这里总会传一个默认的个人路径，等于在每台机器上都把发现链短路成「只看那个
-    /// 不存在的目录」。
+    /// SCIVANE_RUNTIME_ROOT is passed only when the user set it: it is the override tier, and once set
+    /// nothing else is looked at.
     var runtimeOverride: URL? {
         get {
             guard let s = preferences.string(forKey: "runtimeRoot"), !s.isEmpty else { return nil }
@@ -125,15 +119,12 @@ final class BackendManager: ObservableObject {
         Int(ProcessInfo.processInfo.environment["SCIVANE_API_PORT"] ?? "8710") ?? 8710
     }
     var apiBase: URL { URL(string: "http://127.0.0.1:\(apiPort)")! }
-    /// 运行期产物：日志、pidfile、OCR 抠图、沙箱策略。
-    ///
-    /// **在用户目录下，不跟着仓库走。** 打包安装的机器上根本没有仓库；
-    /// 从源码跑时也不该往工作副本里写。与 `config.py` 的 `VAR_DIR` 是同一个默认值。
+    /// Runtime output: logs, pidfiles, OCR crops, sandbox policies. Kept in the user's home, never in
+    /// the repository (an installed app has none). Same default as VAR_DIR in config.py.
     nonisolated static let defaultVarRoot = URL(
         fileURLWithPath: NSString(string: "~/.scivane/var").expandingTildeInPath)
-    /// 这一次运行的产物目录。**这条规则只写在这里** —— App 自己的计时日志
-    /// （`AgentTiming`，在 URLSession 的回调线程上也会用到）也从这里取，
-    /// 和后端的日志落在同一个 `logs/` 下。
+    /// The one place this is decided. The app's own timing log (AgentTiming, also used from URLSession
+    /// callback threads) reads it too, so both sides log to the same logs/.
     nonisolated static var currentVarRoot: URL {
         if let path = ProcessInfo.processInfo.environment["SCIVANE_VAR_DIR"] { return URL(fileURLWithPath: path) }
         return defaultVarRoot
@@ -146,13 +137,12 @@ final class BackendManager: ObservableObject {
 
     private var pidFile: URL { varRoot.appendingPathComponent("run/backend.pids") }
 
-    // MARK: - 启动
+    // MARK: - Start
 
-    /// 要用的时候调这个。已在运行且层级够用就什么都不做。
+    /// Call before use. Does nothing if already running at a sufficient level.
     ///
-    /// 轻量在跑而这次需要 OCR 时会重启成完整模式 —— 两层是同一个进程树，
-    /// 没法只补上缺的那一层。重启只发生在用户真的点了 OCR 的时候，
-    /// 而 OCR 本来就要等好几秒，这几秒不显眼。
+    /// A running light backend is restarted in full mode when OCR is needed: both levels are one
+    /// process tree. This only happens when the user starts OCR, which takes seconds anyway.
     func ensureRunning(mode requested: Mode = .full) {
         noteActivity()
         if let process, process.isRunning {
@@ -162,12 +152,8 @@ final class BackendManager: ObservableObject {
         start(mode: requested)
     }
 
-    /// 每起一次后端换一个号。
-    ///
-    /// 凭据是注入进后端进程内存的（走 /llm/providers/{id}/credential），
-    /// 进程一重启就没了 —— 而「轻量 → 完整」的升级**就是一次重启**。
-    /// 上层据此知道该重新注入，否则升级去做 OCR 之后再提问会莫名其妙地
-    /// 报「没有凭据」。
+    /// Changes on every backend launch. Credentials live in the backend's memory and are lost on
+    /// restart, and upgrading light -> full is a restart; this tells callers to inject them again.
     @Published private(set) var launchGeneration = UUID()
 
     func start(mode requested: Mode = .full) {
@@ -198,14 +184,14 @@ final class BackendManager: ObservableObject {
         p.arguments = [script.path]
         p.currentDirectoryURL = context.root
         var env = ProcessInfo.processInfo.environment
-        // 脚本据此在 App 意外退出时自我了断，避免 llama-server 变成孤儿
+        // lets the script kill itself if the app dies, so llama-server is never orphaned
         env["SCIVANE_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
-        // 本地 OCR：只有设置页里指定了才覆盖；否则交给后端的三档发现
+        // only when set in Settings; otherwise the backend's own discovery applies
         if let runtimeOverride { env["SCIVANE_RUNTIME_ROOT"] = runtimeOverride.path }
-        // **产物位置由这一侧说了算。** 两种语言各算一遍必然有一天算得不一样，
-        // 而症状是「插图打不开」这类极难查的错 —— 算一次，传下去。
+        // Computed once here and passed down: two languages computing it separately would drift one day,
+        // and the symptom (figures that won't open) is hard to trace.
         env["SCIVANE_VAR_DIR"] = varRoot.path
-        // 分段计时开着时两边一起开：只有一边的数字分不清慢在哪一层
+        // timing on both sides at once; numbers from one side can't tell which layer is slow
         if AgentTiming.enabled { env["SCIVANE_TIMING"] = "1" }
         if !requested.needsModel { env["SCIVANE_SKIP_LLAMA"] = "1" }
         p.environment = env
@@ -230,10 +216,9 @@ final class BackendManager: ObservableObject {
         start(mode: previous)
     }
 
-    // MARK: - 停止
+    // MARK: - Stop
     //
-    // 同步收尾：App 退出时必须等它真的死了才返回，
-    // 否则 llama-server 会活过 App，在后台继续烤 CPU。
+    // Synchronous: quitting must wait until it is really gone, or llama-server outlives the app.
 
     func stop() {
         pollTask?.cancel()
@@ -250,9 +235,9 @@ final class BackendManager: ObservableObject {
         guard let p = process else { return }
         process = nil
 
-        if p.isRunning { p.terminate() }                       // SIGTERM → 脚本 trap → 收子进程
+        if p.isRunning { p.terminate() }                       // SIGTERM -> script trap -> children
 
-        // 给 3 秒优雅退出。GPU 上正在推理时未必来得及响应。
+        // 3 s to exit cleanly; mid-inference on the GPU it may not respond in time
         let deadline = Date().addingTimeInterval(3)
         while p.isRunning && Date() < deadline {
             usleep(100_000)
@@ -262,7 +247,7 @@ final class BackendManager: ObservableObject {
         }
     }
 
-    /// 按脚本落盘的 PID 补刀。脚本自己被强杀时这是最后一道防线。
+    /// Kill by the PID the script wrote: the last line of defence if the script itself was killed.
     private func reapFromPidFile() {
         guard let text = try? String(contentsOf: pidFile, encoding: .utf8) else { return }
         for line in text.split(separator: "\n") {
@@ -272,9 +257,9 @@ final class BackendManager: ObservableObject {
         try? FileManager.default.removeItem(at: pidFile)
     }
 
-    // MARK: - 闲置自动停
+    // MARK: - Idle stop
 
-    /// 有识别活动时调用，把闲置计时推后
+    /// Postpones the idle stop.
     func noteActivity() {
         restartIdleTimer()
     }
@@ -288,7 +273,7 @@ final class BackendManager: ObservableObject {
         idleTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.process != nil else { return }
-                // 还在跑就不要停，往后顺延
+                // still busy: try again later
                 guard !self.isBusy() else { self.restartIdleTimer(); return }
                 self.stop()
                 self.stoppedForIdle = true
@@ -296,14 +281,14 @@ final class BackendManager: ObservableObject {
         }
     }
 
-    // MARK: - 健康检查
+    // MARK: - Health
 
     private func pollHealth(mode: Mode) {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             guard let self else { return }
-            // 完整模式首次加载模型通常 10-30 秒，给到 3 分钟；
-            // 轻量模式只起一个 Python 进程，几秒不成就是真出问题了
+            // full mode's first model load usually takes 10-30 s; the light mode is one Python process, so a
+            // slow start there is a real failure
             let deadline = Date().addingTimeInterval(mode.needsModel ? 180 : 30)
             let config = URLSessionConfiguration.ephemeral
             config.timeoutIntervalForRequest = 3
@@ -352,7 +337,7 @@ final class BackendManager: ObservableObject {
         let (data, response) = try await session.data(from: base.appendingPathComponent("health"))
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        // `ok` 专指本地 OCR 引擎就绪；轻量模式只要编排层活着就算数
+        // `ok` means the OCR engine is ready; in light mode a live API is enough
         if mode.needsModel { return (json["ok"] as? Bool) ?? false }
         return (json["api"] as? String) == "up"
     }

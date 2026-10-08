@@ -1,25 +1,21 @@
-"""项目的落盘存储。
+"""On-disk project storage.
 
     ~/.scivane/projects/<id>/
-    ├── .lumen/          控制面 —— agent 看不见
-    │   ├── project.json     元数据
-    │   ├── session.jsonl    append-only 项目生命周期日志
-    │   ├── conversations/   一条对话一个 .jsonl（见 conversations.py）
-    │   └── policy.json      沙箱与工具策略
-    ├── pdf/             原稿 —— 只读
-    ├── md/              OCR 正文与插图 —— 可改
-    ├── code/            论文的开源代码
-    ├── workbench/       agent 的脚本与产物
-    └── notes/           人写的批注与结论
+    ├── .lumen/          control plane, hidden from the agent
+    │   ├── project.json     metadata
+    │   ├── session.jsonl    append-only lifecycle log
+    │   ├── conversations/   one .jsonl per conversation
+    │   ├── annotations.json highlights and underlines on the source PDF
+    │   └── policy.json      sandbox and tool policy
+    ├── pdf/             source document, read-only
+    ├── md/              OCR text and images
+    ├── code/            the paper's code
+    ├── workbench/       the agent's scripts and outputs
+    └── notes/           the user's notes and conclusions
 
-**存储层自己不走 workspace.resolve()。** 那是 agent 侧的入口，会拒绝 `.lumen/`；
-而维护元数据与日志恰恰要写那里。两者是不同身份，见 workspace.py 的模块说明。
-
-**为什么复制原稿而不是引用原地**：一个带着对话历史的项目，因为用户挪了
-或删了源文件就打不开，是很恶劣的体验。多占一份空间换取项目自包含。
-
-**为什么不放 var/**：var/ 在本项目的文档里被定义为「整个删掉也不影响代码」，
-`make clean` 会清里面的东西。对话历史不是可丢弃的运行期产物。
+The store writes .lumen/ directly instead of going through workspace.resolve(), which is the
+agent's entry point and refuses it. Source documents are copied, not referenced, so a project
+survives the original file being moved or deleted.
 """
 
 from __future__ import annotations
@@ -45,6 +41,7 @@ from .model import (
     TitleSource,
 )
 from . import title as title_tools
+from .annotations import FILE_NAME as ANNOTATIONS_FILE, AnnotationBook
 from .conversations import (
     CONVERSATION_EVENTS,
     CONVERSATIONS_DIR,
@@ -56,18 +53,16 @@ from .workspace import CONTROL_DIR, FILES_DIR, MD_DIR, PDF_DIR, SKELETON
 
 logger = logging.getLogger("scivane.projects")
 
-#: 项目根。真正的配置在 config.PROJECTS_DIR，这里只是个别名 ——
-#: 「配置只在 config.py 一处」是本项目的既定纪律。
 DEFAULT_PROJECTS_ROOT = config.PROJECTS_DIR
 
-#: 升级前的备份目录叫 `<id>.backup-<时间戳>`。
-#: 点号不在合法 id 的字符集里，所以它永远不会被当成项目 —— list_all 也据此跳过。
+#: Backups are named <id>.backup-<timestamp>. '.' is not valid in an id, so list_all can never
+#: mistake one for a project.
 BACKUP_MARK = ".backup-"
 
-#: OCR 产出的 Markdown 里的插图路径，形如 /assets/<job>/page-1/img_0.png
+#: image paths in OCR Markdown, e.g. /assets/<job>/page-1/img_0.png
 _OCR_ASSET = re.compile(r"/assets/[A-Za-z0-9_\-/]+?/[^\s\"'<>)\]]+")
 
-#: 用户上传的 Markdown 里的本地图片引用（行内、引用式、HTML 三种写法）
+#: local image references in uploaded Markdown (inline, reference and HTML forms)
 _LOCAL_IMAGE_PATTERNS = (
     re.compile(r"!\[[^\]]*\]\(\s*<?([^)\n]+?)>?\s*\)"),
     re.compile(r"(?m)^\s*\[[^\]]+\]:\s*<?([^\s\n]+)>?\s*$"),
@@ -76,10 +71,7 @@ _LOCAL_IMAGE_PATTERNS = (
 
 
 def now() -> str:
-    """时间戳精确到毫秒。
-
-    秒级精度不够：连着建几个项目会落在同一秒，列表排序就变成任意的。
-    """
+    """Millisecond precision: projects created within one second would otherwise sort arbitrarily."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
@@ -96,13 +88,13 @@ def sha256_file(path: Path) -> str:
 
 
 def rough_tokens(text: str) -> int:
-    """粗估 token 数，用来在界面上告诉用户「这篇论文有多大」。"""
+    """Rough token count, to show the user how large the paper is."""
     cjk = sum(1 for ch in text if "一" <= ch <= "鿿" or "぀" <= ch <= "ヿ")
     return cjk + (len(text) - cjk) // 4
 
 
 class ProjectError(Exception):
-    """项目操作失败。带一个稳定 code，路由层据此选状态码。"""
+    """Project operation failed; the stable code picks the HTTP status."""
 
     def __init__(self, message: str, code: str = "PROJECT_ERROR") -> None:
         super().__init__(message)
@@ -110,44 +102,30 @@ class ProjectError(Exception):
 
 
 class ProjectStore:
-    """项目的增删查改。进程内单例见模块底部。"""
-
     def __init__(self, root: Path | None = None) -> None:
         self._root = root if root is not None else DEFAULT_PROJECTS_ROOT
-        #: 日志文件路径 → 下一条事件的 seq。
-        #:
-        #: **按路径而不是按 project_id 缓存**：v3 之后一个项目有多份日志
-        #: （生命周期一份、每条对话一份），按项目缓存会让它们共用一个计数器，
-        #: 各文件的 seq 于是变得跳跃且相互干扰。
-        #:
-        #: 不缓存的话每次追加都要重扫整份日志算 seq，实测 50 条 0.09 ms/条、
-        #: 200 条 0.14、400 条 0.21 —— 明显在涨。工具调用把事件频率翻了一倍
-        #: 以上（一次调用两条事件），这条从「无所谓」变成了必须修。
+        #: Log path -> next seq. Keyed by path because each conversation has its own log since v3.
+        #: Without the cache every append rescans the log (0.09 ms at 50 events, 0.21 ms at 400).
         self._next_seq: dict[str, int] = {}
 
     @property
     def root(self) -> Path:
         return self._root
 
-    # --- 路径 ---------------------------------------------------------
-
     def dir_for(self, project_id: str) -> Path:
-        """项目目录。顺带挡掉用 id 做目录穿越。"""
+        """Project directory; rejects ids that would traverse directories."""
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", project_id):
             raise ProjectError(ui(f"非法的项目 id：{project_id!r}",
                                   f"Invalid project id: {project_id!r}"), "INVALID_ID")
         return self._root / project_id
 
     def control_dir(self, project_id: str) -> Path:
-        """控制面目录。元数据、日志、策略都在这里，agent 看不见。"""
+        """Control plane: metadata, logs and policy, hidden from the agent."""
         return self.dir_for(project_id) / CONTROL_DIR
 
     def _dual(self, project_id: str, new: Path, legacy: Path) -> Path:
-        """新布局优先，回落到旧布局。
-
-        升级**之前**也要能读到这些文件 —— list 与 stat 只读头部、不触发升级
-        （列表与 stat 只读头部、不发布后继），所以访问器必须
-        同时认得两种布局。都不存在时返回新位置，让写入落在新布局上。
+        """New layout first, then the old one. list and stat read headers before any upgrade, so the
+        accessors must know both layouts; when neither exists, writes go to the new one.
         """
         if new.exists():
             return new
@@ -177,10 +155,8 @@ class ProjectStore:
         return None
 
     def _log_path(self, project_id: str) -> Path:
-        """项目生命周期日志。
-
-        v3 之后这里**只剩生命周期事件**（建项目、改名、换正文、升布局）；
-        提问、回答、工具调用都在对话文件里。分界线见 conversations.py。
+        """Project lifecycle log. Since v3 it only holds lifecycle events; messages and tool calls live
+        in the conversation files.
         """
         return self._dual(
             project_id,
@@ -192,10 +168,8 @@ class ProjectStore:
         return self.control_dir(project_id) / CONVERSATIONS_DIR
 
     def conversation_path(self, project_id: str, conversation_id: str) -> Path:
-        """一条对话的日志文件。
-
-        id 先过 `is_valid_id` —— 它来自 HTTP 查询参数，不校验的话
-        `../../` 就能把追加写引到项目目录之外。与 `dir_for` 是同一道防线。
+        """A conversation's log file. The id comes from a query parameter, so it is validated first or
+        `../../` could redirect writes outside the project.
         """
         if not is_valid_id(conversation_id):
             raise ProjectError(ui(f"非法的对话 id：{conversation_id!r}",
@@ -203,13 +177,11 @@ class ProjectStore:
                                "INVALID_CONVERSATION")
         return self.conversations_dir(project_id) / f"{conversation_id}.jsonl"
 
-    # --- 读写元数据 ---------------------------------------------------
-
     def _write_meta(self, project: Project) -> None:
         project.updated_at = now()
         path = self._meta_path(project.id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # 原子写：崩在半路也不会留下一个解析不了的 project.json
+        # atomic write: a crash can't leave an unparseable project.json
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(project.as_dict(), ensure_ascii=False, indent=2),
@@ -218,11 +190,8 @@ class ProjectStore:
         temporary.replace(path)
 
     def get(self, project_id: str, *, migrate: bool = True) -> Project:
-        """读一个项目。
-
-        **「打开」就是升级的时机**，所以默认顺带把布局升到最新。
-        `migrate=False` 留给只读头部的场景（list / stat）—— 它绝不改磁盘，
-        也就绝不会在列个目录时触发一串目录复制：只有真正打开项目时才升级。
+        """Read a project. Opening is when the layout gets upgraded; migrate=False (list, stat) never
+        touches the disk.
         """
         project = self._read_meta(project_id)
         if migrate and project.layout < LAYOUT_VERSION:
@@ -230,7 +199,7 @@ class ProjectStore:
         return project
 
     def _read_meta(self, project_id: str) -> Project:
-        """只读元数据，绝不碰磁盘结构。"""
+        """Metadata only; never touches the disk layout."""
         path = self._meta_path(project_id)
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -243,31 +212,25 @@ class ProjectStore:
         return Project.from_dict(raw)
 
     def list_all(self) -> list[Project]:
-        """列出全部项目，最近更新的在前。
-
-        单个项目损坏只跳过它，不连累其它 —— 一个坏掉的 project.json
-        不该让整个项目列表打不开。
-        """
+        """All projects, most recently updated first. A damaged project is skipped, not fatal."""
         if not self._root.is_dir():
             return []
         projects: list[Project] = []
         for entry in self._root.iterdir():
             if not entry.is_dir() or BACKUP_MARK in entry.name:
-                continue    # 升级备份不是项目
+                continue    # upgrade backups are not projects
             try:
-                # 列表只读头部，不升级 —— 否则开一次列表就会把所有项目整体复制一遍
+                # headers only, no upgrade: listing must not copy every project
                 projects.append(self.get(entry.name, migrate=False))
             except ProjectError:
                 logger.warning("跳过损坏的项目目录：%s", entry.name)
-        # id 做次级键，保证时间相同时次序仍然确定
+        # id as the tie-breaker keeps the order deterministic
         projects.sort(key=lambda p: (p.updated_at, p.id), reverse=True)
         return projects
 
     def find_by_source(self, source_sha256: str) -> Project | None:
-        """按原稿内容找已有项目，避免同一篇论文被重复构建。
-
-        空摘要一律不匹配：空项目的 `source_sha256` 就是空串，不挡这一下的话
-        「按内容找」会把第一个空项目当成任何东西的重复。
+        """Find a project by source hash to avoid building the same paper twice. Empty hashes never match,
+        or every empty project would be a duplicate.
         """
         if not source_sha256:
             return None
@@ -275,8 +238,6 @@ class ProjectStore:
             if project.source_sha256 == source_sha256:
                 return project
         return None
-
-    # --- 会话日志 -----------------------------------------------------
 
     def append_event(
         self,
@@ -286,21 +247,11 @@ class ProjectStore:
         *,
         conversation: str | None = None,
     ) -> None:
-        """往 append-only 日志里追加一条。
+        """Append an event to an append-only log: the conversation's file when given, else the lifecycle log.
 
-        `conversation` 决定落哪个文件：给了就写那条对话，没给就写项目
-        生命周期日志。**调用方不需要自己判断事件属于哪一类** ——
-        谁在写谁知道自己在哪条对话里（`StoreJournal` 带着 id），
-        而生命周期那几处本来就不属于任何对话。
-
-        凡是会改变模型可见内容的事都要留痕。读回来重建模型历史是 `projects/session.py` 的
-        `derive_messages()`。
-
-        **`seq` 是参考值，不是主键；文件里的行序才是权威。** 用 `"a"` 模式打开
-        即 `O_APPEND`，所以多个进程各自追加不会把彼此的行写坏；但它们各算的
-        seq 可能撞号。撞号无害，因为没有任何消费者按 seq 索引 ——
-        `derive_messages()` 只看顺序，界面也只按顺序渲染。真要做成全局唯一
-        就得引入锁文件，对「一个本地 App 读一篇论文」这个场景是纯负担。
+        Line order is authoritative, `seq` is only a hint. "a" mode is O_APPEND, so concurrent
+        writers never corrupt lines; their seqs may collide, which is harmless because nothing
+        indexes by seq.
         """
         path = (
             self.conversation_path(project_id, conversation)
@@ -317,11 +268,8 @@ class ProjectStore:
             handle.write(line + "\n")
 
     def _reserve_seq(self, path: Path) -> int:
-        """取下一个 seq，首次访问时从文件尾部恢复。
-
-        从尾部恢复而不是数行数：数行数是 O(n)，恢复才是这次优化的重点。
-        尾部那几行解析不出 seq（写了一半被 kill、旧格式）时退回数行数 ——
-        这是慢路径，但只在日志确实坏了的时候走一次。
+        """Next seq, recovered from the end of the file on first use. Falls back to counting lines only
+        when the tail is unreadable (a write killed halfway, an old format).
         """
         key = str(path)
         cached = self._next_seq.get(key)
@@ -332,13 +280,13 @@ class ProjectStore:
 
     @staticmethod
     def _recover_seq(path: Path) -> int:
-        """从日志尾部读出最后一条的 seq，返回「下一条该用的 seq」。"""
+        """Seq after the last event in the file's tail."""
         if not path.is_file():
             return 1
         try:
             size = path.stat().st_size
             with path.open("rb") as handle:
-                # 只读尾部：一条事件再长也就几十 KB，64 KB 足够覆盖最后几条
+                # events are at most tens of KB, so 64 KB covers the last few
                 handle.seek(max(0, size - 65_536))
                 tail = handle.read().decode("utf-8", errors="replace")
         except OSError:
@@ -349,20 +297,17 @@ class ProjectStore:
             try:
                 seq = json.loads(line).get("seq")
             except ValueError:
-                continue  # 坏行跳过，与 events() 的取舍一致
+                continue  # skip bad lines, as events() does
             if isinstance(seq, int):
                 return seq + 1
-        # 尾部一条都解析不出来：退回数行数（慢路径，只在日志坏了时走）
+        # nothing parseable in the tail: count lines (slow path, only for damaged logs)
         return sum(1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
                    if line.strip()) + 1
 
     def events(
         self, project_id: str, *, conversation: str | None = None
     ) -> Iterator[dict[str, Any]]:
-        """按顺序读出日志。坏行跳过，不让一行脏数据毁掉整份历史。
-
-        `conversation` 给了就读那条对话，没给就读项目生命周期日志。
-        """
+        """Events in order; bad lines are skipped so one corrupt line can't lose the whole history."""
         path = (
             self.conversation_path(project_id, conversation)
             if conversation is not None
@@ -378,17 +323,8 @@ class ProjectStore:
             except ValueError:
                 logger.warning("跳过 %s 中一条无法解析的日志", project_id)
 
-    # --- 对话 ---------------------------------------------------------
-    #
-    # 一个项目可以有多条对话，各自一个 .jsonl。为什么这么存见
-    # conversations.py 的模块说明。这里只做增删查与「取当前这条」。
-
     def list_conversations(self, project_id: str) -> list[dict[str, Any]]:
-        """列出这个项目的全部对话，最近活动的在前。
-
-        标题、条数、时间全部从文件本身算出来，**没有索引文件** ——
-        索引与文件不同步的那一刻，用户看到的列表就是错的。
-        """
+        """Conversations, most recent activity first. Computed from the files; there is no index."""
         directory = self.conversations_dir(project_id)
         if not directory.is_dir():
             return []
@@ -396,22 +332,17 @@ class ProjectStore:
         for entry in sorted(directory.glob("*.jsonl")):
             conversation_id = entry.stem
             if not is_valid_id(conversation_id):
-                continue        # 不是我们写的文件，别当成对话
+                continue        # not a file we wrote
             found.append(
                 summarise(conversation_id, list(self.events(project_id, conversation=conversation_id)))
             )
-        # 空对话没有事件、也就没有 updated_at，用 id 兜底 ——
-        # id 本身带着可排序的时间戳（见 conversations.new_id）
+        # empty conversations have no updated_at; the id carries a sortable timestamp
         found.sort(key=lambda c: (c["updated_at"] or c["id"], c["id"]), reverse=True)
         return found
 
     def create_conversation(self, project_id: str, title: str = "") -> dict[str, Any]:
-        """开一条新对话。
-
-        **立刻落盘**（写一条 `conversation/created`）而不是等第一句话 ——
-        界面要在用户打字之前就拿到 id，否则「新对话」这个按钮点完什么都没发生。
-        """
-        self.get(project_id, migrate=False)      # 项目不存在就直接报错
+        """Start a conversation. Persisted immediately so the UI has an id before the user types."""
+        self.get(project_id, migrate=False)
         conversation_id = new_conversation_id()
         data: dict[str, Any] = {}
         cleaned = title_tools.clean(title)
@@ -425,7 +356,7 @@ class ProjectStore:
         )
 
     def rename_conversation(self, project_id: str, conversation_id: str, title: str) -> dict[str, Any]:
-        """给对话改个名字。走事件而不是回头改文件头 —— 日志是 append-only 的。"""
+        """Rename via an event; the log is append-only."""
         path = self.conversation_path(project_id, conversation_id)
         if not path.is_file():
             raise ProjectError(ui(f"没有这条对话：{conversation_id}",
@@ -445,12 +376,8 @@ class ProjectStore:
     def set_conversation_provider(
         self, project_id: str, conversation_id: str, provider: str
     ) -> dict[str, Any]:
-        """这条对话改用哪张模型卡。
-
-        **不校验这个 provider 存不存在** —— 校验属于发问那一刻（那时才需要它
-        真能用），而这里记的是用户的选择。卡片被删掉之后重新打开旧对话，
-        界面会发现它指向一张不存在的卡，回落到默认并提示，比在这里拒绝写入
-        更接近用户预期：他的选择不该因为另一件事失效而被悄悄改掉。
+        """Switch the conversation's model card. Not validated here: the choice is recorded as made, and
+        a card deleted later is detected (and replaced by the default) when the conversation opens.
         """
         path = self.conversation_path(project_id, conversation_id)
         if not path.is_file():
@@ -469,11 +396,7 @@ class ProjectStore:
         )
 
     def delete_conversation(self, project_id: str, conversation_id: str) -> bool:
-        """删掉一条对话。
-
-        **只删这一个文件**，项目的正文、原稿与其它对话都不受影响 ——
-        这正是一条对话一个文件换来的好处。
-        """
+        """Delete one conversation's file; nothing else is touched."""
         path = self.conversation_path(project_id, conversation_id)
         if not path.is_file():
             return False
@@ -482,18 +405,14 @@ class ProjectStore:
         return True
 
     def latest_conversation(self, project_id: str) -> str | None:
-        """最近活动的那条对话。一条都没有时返回 None。"""
+        """The most recently active conversation, or None."""
         found = self.list_conversations(project_id)
         return found[0]["id"] if found else None
 
     def ensure_conversation(self, project_id: str, conversation_id: str | None = None) -> str:
-        """把「要写哪条对话」定下来。
-
-        三种情况：指定了就用它（但必须真的存在，否则一个手滑的 id
-        会凭空造出一条对话）；没指定就用最近那条；一条都没有就新建。
-
-        **这是所有写入口的必经之路**，所以「对话文件从不凭空出现」
-        这条保证只需要在这里成立一次。
+        """Settle which conversation to write to: the given one (which must exist), else the most
+        recent, else a new one. Every write goes through here, so conversation files never appear
+        out of nowhere.
         """
         if conversation_id is not None:
             path = self.conversation_path(project_id, conversation_id)
@@ -507,15 +426,8 @@ class ProjectStore:
         return self.create_conversation(project_id)["id"]
 
     def export_conversation(self, project_id: str, conversation_id: str) -> dict[str, Any]:
-        """把一条对话整理成可导出的 JSON 文档。
-
-        导出的是**原始事件**而不是渲染好的文字：事件流是权威记录，
-        由它能重建模型历史与界面记录两种投影（`session.py` 的两个函数），
-        反过来则不行。带上项目与对话的头部信息，让这个文件离开本机之后
-        仍然自解释。
-
-        **不含任何凭据** —— 工具参数里从来没有 API key（模型层的凭据走
-        credentials.py，从不经过工具），这一条有测试钉着。
+        """A conversation as an exportable JSON document: the raw events (the authoritative record) plus
+        project and conversation headers. Never contains credentials; a test checks this.
         """
         project = self.get(project_id, migrate=False)
         path = self.conversation_path(project_id, conversation_id)
@@ -535,18 +447,11 @@ class ProjectStore:
             "events": events,
         }
 
-    # --- 布局升级 -----------------------------------------------------
-    #
-    # 只做**相邻**升级（vN → vN+1），跨版本靠把相邻步骤串起来。这样每一步
-    # 都能单独测，也不会出现「从 v1 直接跳 v5」那种没人验证过的路径。
-    # 每一步都单独迁移并记录，失败时可以恢复原布局。
+    # Layout upgrades go one adjacent version at a time, each step backed up and reversible.
 
     def _ensure_policy(self, project_id: str) -> None:
-        """写一份默认策略文件。
-
-        刻意**不**把 workspace.py 的分层规则镜像进来 —— 两处同一个事实必然漂移，
-        而漂移的那份如果被当成权威，边界就形同虚设。这里只放项目专属的覆盖项，
-        当前还没有。
+        """Write the default policy file. Deliberately doesn't mirror workspace.py's tier rules: two
+        copies of a boundary drift apart. Only project-specific overrides belong here (none yet).
         """
         control = self.control_dir(project_id)
         control.mkdir(parents=True, exist_ok=True)
@@ -565,7 +470,7 @@ class ProjectStore:
         )
 
     def _make_backup(self, project_id: str) -> Path:
-        """把整个项目目录复制一份到同级。这是唯一的回滚来源。"""
+        """Copy the whole project directory next to it; the only rollback source."""
         directory = self.dir_for(project_id)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         backup = self._root / f"{project_id}{BACKUP_MARK}{stamp}"
@@ -573,17 +478,14 @@ class ProjectStore:
         return backup
 
     def _restore(self, project_id: str, backup: Path) -> None:
-        """从备份整体恢复。失败绝不能留下半个升级过的目录。"""
+        """Restore from the backup; a failure must never leave a half-upgraded directory."""
         directory = self.dir_for(project_id)
         shutil.rmtree(directory, ignore_errors=True)
         shutil.copytree(backup, directory)
 
     def ensure_layout(self, project_id: str) -> Project:
-        """把项目升级到当前布局版本。已经是最新就原样返回（幂等）。
-
-        每一步升级前先整体备份，任何一步抛错都回滚到备份。**备份不删** ——
-        结构迁移之后自动清掉用户数据是最容易让人追悔的那类操作，
-        路径记在 `layout/migrated` 事件里，将来可以由界面提供清理。
+        """Upgrade to the current layout (idempotent). Each step is backed up first and rolled back on
+        error. Backups are kept; their paths are in the layout/migrated event.
         """
         project = self.get(project_id, migrate=False)
         while project.layout < LAYOUT_VERSION:
@@ -602,7 +504,7 @@ class ProjectStore:
                 raise
             project = self.get(project_id, migrate=False)
             if project.layout <= before:
-                # 升级没有推进版本号，再循环就是死循环
+                # the version didn't advance; looping again would never end
                 self._restore(project_id, backup)
                 raise ProjectError(
                     ui(f"布局升级未推进版本号（仍为 v{project.layout}）",
@@ -617,7 +519,7 @@ class ProjectStore:
         return project
 
     def _migrate_v1_to_v2(self, project_id: str) -> None:
-        """扁平布局 → 工作区骨架。"""
+        """Flat layout -> workspace skeleton."""
         directory = self.dir_for(project_id)
         control = directory / CONTROL_DIR
 
@@ -634,7 +536,7 @@ class ProjectStore:
             move(legacy_source, directory / PDF_DIR / legacy_source.name)
         move(directory / "context.md", directory / MD_DIR / "context.md")
 
-        # md/assets 已经由骨架建出来了，所以要逐项搬进去而不是整目录覆盖
+        # md/assets already exists from the skeleton, so move entries one by one
         legacy_assets = directory / "assets"
         if legacy_assets.is_dir():
             target_assets = directory / MD_DIR / "assets"
@@ -651,19 +553,11 @@ class ProjectStore:
         )
 
     def _migrate_v2_to_v3(self, project_id: str) -> None:
-        """一条会话日志 → 生命周期 + 独立对话。
+        """One session log -> lifecycle log plus conversation files, split by CONVERSATION_EVENTS.
 
-        把 `session.jsonl` 按 `CONVERSATION_EVENTS` 分成两半：属于谈话的
-        整体搬进 `conversations/<新 id>.jsonl`，其余留在原地。
-
-        三个刻意的做法：
-
-        - **搬的是原始行，不是解析后重新序列化的结果。** 重新 dump 会改动
-          键序与空白，日志就不再逐字节等于当时写下的样子了。
-        - **解析不出来的行留在生命周期日志里。** 分不了类的数据宁可留着
-          （读的时候本来就会跳过），也不要在一次迁移里丢掉用户的东西。
-        - **原来就没有谈话事件的项目不建空对话文件。** 从没聊过的项目
-          升级完应该是「零条对话」，而不是凭空多出一条空的。
+        Raw lines are moved, not re-serialised, so the log stays byte-identical to what was written.
+        Unparseable lines stay in the lifecycle log rather than being dropped. Projects that never
+        chatted get no empty conversation file.
         """
         control = self.control_dir(project_id)
         log = control / "session.jsonl"
@@ -677,7 +571,7 @@ class ProjectStore:
                 try:
                     kind = json.loads(line).get("type")
                 except ValueError:
-                    lifecycle.append(line)   # 坏行留着，不在迁移里丢数据
+                    lifecycle.append(line)   # keep bad lines; a migration never drops data
                     continue
                 (talk if kind in CONVERSATION_EVENTS else lifecycle).append(line)
 
@@ -685,8 +579,7 @@ class ProjectStore:
             conversations = control / CONVERSATIONS_DIR
             conversations.mkdir(parents=True, exist_ok=True)
             conversation_id = new_conversation_id()
-            # 头一条 `conversation/created` 的时间取被搬的第一条事件，
-            # 这样「这条对话什么时候开始的」是真的，而不是迁移那一刻
+            # the header takes the time of the first moved event, so the start date stays true
             try:
                 started = json.loads(talk[0]).get("at") or now()
             except ValueError:
@@ -701,7 +594,7 @@ class ProjectStore:
 
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("\n".join(lifecycle) + ("\n" if lifecycle else ""), encoding="utf-8")
-        # 文件被整体改写了，缓存的 seq 不再对应它的尾部
+        # the file was rewritten; the cached seq no longer matches its tail
         self._next_seq.pop(str(log), None)
 
         meta = control / "project.json"
@@ -709,16 +602,12 @@ class ProjectStore:
         raw["layout"] = 3
         meta.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    #: 布局版本 → 把它升到下一版的方法名。
-    #:
-    #: 存**名字**而不是函数对象：类体里直接引用函数会在定义时就把它捕获，
-    #: 之后子类覆盖或测试替换都影响不到这张表，排查起来很费时间。
+    #: Layout version -> name of the method that upgrades it. Names rather than function objects,
+    #: so subclasses and test doubles can override them.
     _MIGRATIONS = {1: "_migrate_v1_to_v2", 2: "_migrate_v2_to_v3"}
 
-    # --- 创建与删除 ---------------------------------------------------
-
     def create(self, source: Path) -> Project:
-        """从一份原稿构建项目。复制原稿，快猜标题，写元数据。"""
+        """Build a project from a source document: copy it, guess a title, write the metadata."""
         source = Path(source).expanduser()
         if not source.is_file():
             raise ProjectError(ui(f"找不到原文件：{source}", f"Source file not found: {source}"),
@@ -751,7 +640,7 @@ class ProjectStore:
             )
             self._write_meta(project)
         except Exception:
-            # 建到一半失败不留半个项目在列表里
+            # a failed build leaves no half project in the list
             shutil.rmtree(directory, ignore_errors=True)
             raise
 
@@ -762,24 +651,15 @@ class ProjectStore:
         })
         return project
 
-    #: 没起名字的空项目叫什么。配 `title_source="placeholder"`，
-    #: 意思是「这不是谁给的名字」—— 之后导入原稿时任何提取都可以改进它。
+    #: Name of an unnamed empty project. Paired with title_source="placeholder" so any later
+    #: extraction can improve it.
     UNTITLED = "未命名项目"
 
     def create_empty(self, title: str = "") -> Project:
-        """建一个还没有原稿的空项目。
+        """Create a project without a source document (notes, code and chat first; the PDF later).
 
-        **为什么允许没有原稿**：论文项目不总是从一份 PDF 开始的。先建个
-        项目放笔记、放代码、先和 agent 聊清楚要找什么，之后再把 PDF 放进来，
-        是真实存在的用法。原稿可以事后用 `attach_source` 挂上。
-
-        **名字留空与打了字是两回事**（红线：用户手动改过的名字不许被覆盖）：
-
-        - 打了字 → `manual`，排在最顶上，此后任何自动提取都不许覆盖它
-        - 留空   → `placeholder`，排在最底下，导入原稿或跑完 OCR 时会被改进
-
-        这样「项目名用户自定义」与「导入 PDF 后识别成项目名」两件事
-        同时成立，而且不互相打架。
+        A typed title is `manual` and never overwritten; an empty one is `placeholder` and improves
+        on import or after OCR.
         """
         cleaned = title_tools.clean(title)
         project_id = uuid.uuid4().hex[:12]
@@ -814,14 +694,9 @@ class ProjectStore:
         return project
 
     def attach_source(self, project_id: str, source: Path) -> Project:
-        """给一个空项目挂上原稿，并顺势精确化标题。
-
-        **只对还没有原稿的项目开放。** 换掉一篇已有原稿意味着正文、插图、
-        既往对话引用的一切都不再对应它 —— 那是另一件事，不该由这个入口
-        顺手做掉。
-
-        标题走的是和建项目时同一条 `better_than` 规则：placeholder 会被
-        PDF 里提取出来的名字改进，用户手打的 manual 则原样保留。
+        """Attach a source document to an empty project and refine its title with the same better_than
+        rule. Projects that already have one are refused: replacing it would orphan everything that
+        refers to it.
         """
         project = self.get(project_id)
         if project.has_source:
@@ -855,25 +730,25 @@ class ProjectStore:
             return self.rename(project_id, candidate, origin)
         return self.get(project_id)
 
-    # --- 用户上传的材料 -----------------------------------------------
+    def annotation_book(self, project_id: str, *, writing: bool = False) -> AnnotationBook:
+        """The project's highlights and underlines. Marks need a source to sit on, so writes to an
+        empty project are refused; reading one just finds none.
+        """
+        project = self.get(project_id)
+        if writing and not project.has_source:
+            raise ProjectError(ui("这个项目还没有原稿，没有地方可标注",
+                                  "This project has no original to annotate yet"), "NO_SOURCE")
+        return AnnotationBook(self.control_dir(project_id) / ANNOTATIONS_FILE)
 
-    #: 一份上传文件的大小上限。超过这个数放进项目只会让目录变笨重，
-    #: 而 agent 也读不完 —— 真要处理大数据集，让它自己在沙箱里生成更合适。
+    #: Upload size limit; large datasets are better generated by the agent in the sandbox.
     MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
     def files_dir(self, project_id: str) -> Path:
         return self.dir_for(project_id) / FILES_DIR
 
     def add_file(self, project_id: str, source: Path) -> dict[str, Any]:
-        """把用户拖进来的一个文件复制进 `files/`。
-
-        **复制而不是引用**，和原稿同一个道理：项目要自包含，用户挪走或删掉
-        原文件之后这个项目还得能打开。
-
-        重名不覆盖，加 `-2`、`-3` 的后缀 —— 上传是个随手动作，
-        悄悄覆盖掉上一份是最容易让人追悔的那类行为。
-        """
-        self.get(project_id)                 # 项目不存在就直接报错
+        """Copy a dropped file into files/. Name clashes get -2, -3 suffixes instead of overwriting."""
+        self.get(project_id)                 # raises when the project doesn't exist
         source = Path(source).expanduser()
         if not source.is_file():
             raise ProjectError(ui(f"找不到这个文件：{source}", f"File not found: {source}"),
@@ -907,7 +782,7 @@ class ProjectStore:
         }
 
     def list_files(self, project_id: str) -> list[dict[str, Any]]:
-        """`files/` 里有什么。最近放进来的在前。"""
+        """Contents of files/, most recent first."""
         directory = self.files_dir(project_id)
         if not directory.is_dir():
             return []
@@ -926,7 +801,7 @@ class ProjectStore:
         return found
 
     def remove_file(self, project_id: str, name: str) -> bool:
-        """删掉一份上传的材料。名字要过一遍消毒，它来自 HTTP 路径参数。"""
+        """Delete an uploaded file; the name comes from a path parameter and is sanitised."""
         safe = _safe_name(name)
         if safe != name:
             raise ProjectError(ui(f"非法的文件名：{name!r}", f"Invalid file name: {name!r}"),
@@ -941,14 +816,14 @@ class ProjectStore:
         directory = self.dir_for(project_id)
         resolved = directory.resolve()
         root = self._root.resolve()
-        # 绝不让一次删除跑到项目根之外
+        # never let a delete escape the project root
         if resolved == root or not resolved.is_relative_to(root):
             raise ProjectError(ui("拒绝删除项目根之外的路径",
                                   "Refusing to delete a path outside the projects root"), "INVALID_ID")
         if not directory.is_dir():
             return False
         shutil.rmtree(directory, ignore_errors=True)
-        # 备份是为了升级失败能回滚；项目都删了，留着它们只会变成孤儿
+        # backups only exist to roll back upgrades; with the project gone they would be orphans
         for backup in self._root.glob(f"{project_id}{BACKUP_MARK}*"):
             shutil.rmtree(backup, ignore_errors=True)
         return True
@@ -968,9 +843,8 @@ class ProjectStore:
         return project
 
     def maybe_improve_title(self, project_id: str, markdown: str) -> Project:
-        """OCR 完成后用 Markdown 的一级标题精确化名字。
-
-        只在**更可靠**时才覆盖：用户手动改过的名字，任何自动提取都不许动。
+        """Refine the title from the Markdown's first heading after OCR, only when more reliable.
+        A title the user typed is never touched.
         """
         project = self.get(project_id)
         found = title_tools.from_markdown(markdown)
@@ -983,8 +857,6 @@ class ProjectStore:
             return project
         return self.rename(project_id, candidate, source)
 
-    # --- 上下文 -------------------------------------------------------
-
     def set_context(
         self,
         project_id: str,
@@ -995,20 +867,16 @@ class ProjectStore:
         jobs_root: Path | None = None,
         source_dir: Path | None = None,
     ) -> Project:
-        """替换项目的静态上下文。
-
-        「重新 OCR 覆盖」与「上传文件覆盖」走的是同一个入口 —— 两者的差别
-        只在 `origin`，以及由此决定的是否需要人工确认。
-
-        插图会被一并吸收进项目目录并改写成相对路径，这样项目自包含：
-        清掉 var/jobs 或挪走源目录都不会让正文里的图失效。
+        """Replace the static context. Re-running OCR and uploading a file share this entry; `origin`
+        decides whether confirmation is needed. Images are absorbed into the project and rewritten
+        to relative paths so the project is self-contained.
         """
         project = self.get(project_id)
         directory = self.dir_for(project_id)
         assets_dir = directory / MD_DIR / "assets"
         assets_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        # 先写到临时目录，成功了再换上去。中途失败不该毁掉已有的上下文。
+        # stage first and swap in on success; a failure must not destroy the existing context
         staging = directory / MD_DIR / "assets.staging"
         shutil.rmtree(staging, ignore_errors=True)
         try:
@@ -1028,8 +896,7 @@ class ProjectStore:
             chars=len(absorbed),
             tokens=rough_tokens(absorbed),
             updated_at=now(),
-            # OCR 的结果就是从这份原稿扫出来的，无需确认；
-            # 上传的文件未必对应这篇论文，必须由人点头。
+            # OCR output comes from this paper's own source; uploads need a person to confirm
             confirmed=origin == "ocr",
             job_id=job_id,
         )
@@ -1048,7 +915,7 @@ class ProjectStore:
         return project
 
     def confirm_context(self, project_id: str, accepted: bool) -> Project:
-        """人工确认上传的 Markdown 是否对应这篇论文。"""
+        """Confirm or reject uploaded Markdown as this paper's text."""
         project = self.get(project_id)
         if project.context is None:
             raise ProjectError(ui("这个项目还没有上下文", "This project has no text yet"), "NO_CONTEXT")
@@ -1057,7 +924,7 @@ class ProjectStore:
             self._write_meta(project)
             self.append_event(project_id, ProjectEvent.CONTEXT_CONFIRMED, {})
             return project
-        # 拒绝就把它整个撤掉，不留一份没人认账的正文在项目里
+        # rejecting removes it; no unconfirmed text stays in the project
         self.context_path(project_id).unlink(missing_ok=True)
         shutil.rmtree(self.dir_for(project_id) / "assets", ignore_errors=True)
         project.context = None
@@ -1071,8 +938,6 @@ class ProjectStore:
             raise ProjectError(ui("这个项目还没有上下文", "This project has no text yet"), "NO_CONTEXT")
         return path.read_text(encoding="utf-8")
 
-    # --- 插图吸收 -----------------------------------------------------
-
     def _absorb_assets(
         self,
         markdown: str,
@@ -1081,11 +946,7 @@ class ProjectStore:
         jobs_root: Path | None,
         source_dir: Path | None,
     ) -> str:
-        """把正文引用的本地图片复制进项目，并改写成相对路径。
-
-        改写成相对路径之后，项目目录本身就是完整的：拷走、备份、日后换台
-        机器打开都不会缺图。
-        """
+        """Copy local images referenced by the text into the project, rewriting them to relative paths."""
         replacements: dict[str, str] = {}
 
         def absorb(origin_path: Path, relative_name: str) -> str | None:
@@ -1099,7 +960,7 @@ class ProjectStore:
             target.write_bytes(data)
             return f"assets/{relative_name}"
 
-        # 1) OCR 产出的 /assets/<job>/... 引用
+        # OCR references: /assets/<job>/...
         if jobs_root is not None:
             for reference in sorted(set(_OCR_ASSET.findall(markdown)), key=len, reverse=True):
                 relative = reference[len("/assets/"):]
@@ -1111,7 +972,7 @@ class ProjectStore:
                 if new_path:
                     replacements[reference] = new_path
 
-        # 2) 用户上传的 Markdown 里的相对图片
+        # relative images in uploaded Markdown
         if source_dir is not None:
             candidates: set[str] = set()
             for pattern in _LOCAL_IMAGE_PATTERNS:
@@ -1120,7 +981,7 @@ class ProjectStore:
                     if not raw or raw.startswith("/assets/"):
                         continue
                     if re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.IGNORECASE):
-                        continue        # http(s)/data: 之类，不碰
+                        continue        # http(s), data: and the like are left alone
                     candidates.add(raw)
             for reference in sorted(candidates, key=len, reverse=True):
                 resolved = _safe_join(source_dir, reference)
@@ -1132,17 +993,15 @@ class ProjectStore:
                     replacements[reference] = new_path
 
         rewritten = markdown
-        # 长的先替换，避免短引用是长引用前缀时把长的截坏
+        # longest first, so a reference that prefixes another doesn't break it
         for old in sorted(replacements, key=len, reverse=True):
             rewritten = rewritten.replace(old, replacements[old])
         return rewritten
 
 
 def _safe_name(name: str) -> str:
-    """把一个上传文件名压成安全的单段名字。
-
-    只保留 basename 并挡掉分隔符与点开头 —— 名字来自用户的文件系统，
-    也会经由 HTTP 路径参数回来，两条路都不能让它拼出 `files/` 之外的位置。
+    """Reduce an uploaded file name to one safe path segment: it comes from the user's file system
+    and comes back through a path parameter, and neither may escape files/.
     """
     cleaned = re.sub(r"[/\\\x00]", "_", Path(name).name).strip()
     cleaned = cleaned.lstrip(".") or "file"
@@ -1150,7 +1009,7 @@ def _safe_name(name: str) -> str:
 
 
 def _safe_join(base: Path, relative: str) -> Path | None:
-    """把相对路径接到 base 上，挡掉目录穿越与符号链接越界。"""
+    """Join a relative path onto base, rejecting traversal and symlinks that escape it."""
     from urllib.parse import unquote
 
     try:
@@ -1164,5 +1023,4 @@ def _safe_join(base: Path, relative: str) -> Path | None:
     return target
 
 
-#: 进程内单例。与 jobs.py 的 `jobs`、llm 的 `registry` 同一模式。
 projects = ProjectStore()

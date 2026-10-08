@@ -1,9 +1,7 @@
 import SwiftUI
 
-/// 设置页「引擎」里的本地 OCR：在用哪一档；没装的话，从这里也能装。
-///
-/// 自己观察 `OCRInstaller`（从 AppModel 的属性里顺手取出来的对象
-/// 不被观察），安装进度用正文栏顶上的同一张卡。
+/// Local OCR in Settings > Engine: which tier is in use, with install from here. Observes
+/// OCRInstaller itself; progress uses the same card as the text pane.
 struct OCRRuntimeRow: View {
 
     @ObservedObject var installer: OCRInstaller
@@ -17,8 +15,7 @@ struct OCRRuntimeRow: View {
                         .lineLimit(1).truncationMode(.middle)
                         .help(installer.status?.root ?? "")
                     Spacer()
-                    // 没装：装或迁。在用旧部署：这里是「一键迁移」入口 ——
-                    // 迁成组件之后 App 就不再依赖旧部署
+                    // not installed: install or migrate. On a legacy deployment this is the one-click migration
                     if let status = installer.status, !status.available || status.migratable,
                        status.overrideProblem == nil, case .idle = installer.phase {
                         Button(status.available ? L("迁成组件…", "Convert to Component…")

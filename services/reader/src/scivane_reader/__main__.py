@@ -1,8 +1,4 @@
-"""python -m scivane_reader —— 直接把服务跑起来。
-
-正常路径是 App 调 scripts/start_backend.sh，那个脚本会先拉 llama-server。
-单独跑这个只起编排层，适合调接口。
-"""
+"""Run the orchestration API directly, without llama-server."""
 
 from __future__ import annotations
 

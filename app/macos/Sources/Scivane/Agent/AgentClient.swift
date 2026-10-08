@@ -1,40 +1,38 @@
 import Foundation
 
-/// 与 agent 对话流的 SSE 客户端。
+/// SSE client for the agent conversation stream.
 ///
-/// **不要用 `URLSession.bytes(for:).lines`。**
-/// 那条 API 在本项目的链路上拿到 HTTP 200 之后彻底静默，一个事件都不投递，
-/// 而同一个接口用 curl 收得完全正常 —— 表现是界面永远停在等待，
-/// 排查起来毫无头绪。这里照 `OCRClient` 的 `URLSessionDataDelegate.didReceive`
-/// 写：几十字节的分片就立刻回调。
+/// Not URLSession.bytes(for:).lines: on this path it goes silent after the 200 and delivers no
+/// events, while curl receives the same stream fine. URLSessionDataDelegate.didReceive (as in
+/// OCRClient) is called for every chunk.
 ///
-/// **事件名是跨语言契约**，必须和
-/// `services/reader/src/scivane_reader/api/sse.py` 的 `AgentEvent` 一字不差。
-/// 对不上的表现同样是「界面一直转」，因为解析不出来的帧会被静静丢掉。
+/// Event names must match AgentEvent in api/sse.py exactly; frames that don't parse are dropped
+/// silently and the UI just keeps spinning.
 final class AgentClient: NSObject, @unchecked Sendable {
 
   enum Event {
-    /// 一轮（一次模型请求）开始。第一帧带 job_id，取消与批准都要用它。
+    /// First frame carries the job_id, needed to cancel and to approve.
     case messageStart(jobID: String?, step: Int, model: String)
     case text(String)
     case thinking(String)
     case toolCall(ToolCallEvent)
     case toolResult(ToolResultEvent)
     case approvalRequest(ApprovalEvent)
-    /// 沙箱执行强度不足。**这是可报告的事实，必须让用户看见**。
+    /// Partial sandbox enforcement; always shown to the user.
     case enforcement(callID: String, level: String, reason: String)
-    /// agent 经审计代理到达了一个主机。
-    ///
-    /// **与 enforcement 分开。** 那个的含义是「边界没兑现承诺」，是警告；
-    /// 联网是**正常行为**。混在一起等于给正常行为挂琥珀色警告，
-    /// 看几次之后两种都没人看了。
+    /// A host the agent reached through the audit proxy. Separate from enforcement: that one is a
+    /// warning, this is normal behaviour, and warning about it would teach people to ignore both.
     case network(NetworkEvent)
     case usage(AgentUsage)
+    /// sent before each request, after a compaction, and at the end of the turn
+    case context(ContextReport)
+    /// start / done / failed
+    case compaction(CompactionEvent)
     case done(stop: String, steps: Int, exhausted: Bool, text: String, usage: AgentUsage)
     case failed(code: String, message: String)
     case heartbeat
 
-    /// 线上的事件名（`sse.py` 的 `AgentEvent`）。给分段计时用：两边的记录按它对齐。
+    /// Wire name (AgentEvent in sse.py); timing records on both sides are aligned by it.
     var name: String {
       switch self {
       case .messageStart: return "message_start"
@@ -46,6 +44,8 @@ final class AgentClient: NSObject, @unchecked Sendable {
       case .enforcement: return "enforcement"
       case .network: return "network"
       case .usage: return "usage"
+      case .context: return "context"
+      case .compaction: return "compaction"
       case .done: return "done"
       case .failed: return "error"
       case .heartbeat: return "heartbeat"
@@ -53,20 +53,19 @@ final class AgentClient: NSObject, @unchecked Sendable {
     }
   }
 
-  /// 一次出网。**只有主机与端口** —— 路径与查询串在后端就不存在
-  /// （凭据常藏在查询串里）。
+  /// Host and port only: the backend never has the path or query string (where credentials hide).
   struct NetworkEvent {
     let callID: String
     let host: String
     let port: Int
     let method: String
     let allowed: Bool
-    /// 被拒时的稳定 code（LOOPBACK / PRIVATE / NO_GRANT …），放行时为空。
+    /// stable code when refused (LOOPBACK / PRIVATE / NO_GRANT ...); empty when allowed
     let reason: String
-    /// 这次工具调用的第一个主机 —— 界面据此决定出显眼的卡还是收进折叠行。
+    /// first host of this tool call: gets a visible card, later ones fold into a row
     let first: Bool
 
-    /// 给界面的一行：`example.com:443`。443 与 80 不必显示端口。
+    /// 443 and 80 are shown without the port
     var target: String {
       (port == 443 || port == 80) ? host : "\(host):\(port)"
     }
@@ -75,7 +74,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
   struct ToolCallEvent {
     let callID: String
     let name: String
-    /// 人类读得懂的一句话，后端生成（「搜索 对比损失」「取回 X，放进 code/Y」）。
+    /// written by the backend for people
     let summary: String
     let arguments: [String: Any]
   }
@@ -86,34 +85,31 @@ final class AgentClient: NSObject, @unchecked Sendable {
     let preview: String
     let truncated: Bool
     let isError: Bool
-    /// 取消之后补的合成结果 —— 界面要能分辨「工具报错了」和「工具根本没跑」。
+    /// filled in after a cancel; the UI must tell "the tool failed" from "the tool never ran"
     let synthetic: Bool
     let enforcement: String?
     let enforcementReason: String
-    /// 改文件时后端带回来的结构化 diff。**只有 edit / write 有。**
+    /// edit and write only
     let diff: FileDiff?
   }
 
-  /// 一次改动，拆成行 —— 界面据此画增删着色与行号。
-  ///
-  /// 后端给的是结构化的行而不是一段 unified diff 文本：文本只能当等宽字块
-  /// 贴上去，行号、着色、折叠都做不了。
+  /// A change as structured rows, so the UI can draw line numbers, colours and folds; a unified diff
+  /// could only be pasted as a monospaced block.
   struct FileDiff {
     struct Row {
-      /// same / add / remove / gap
       let kind: String
       let oldNo: Int?
       let newNo: Int?
       let text: String
-      /// `gap` 那一行略过了几行。有它时界面按当前语言说；没有（这个字段之前的日志）就照 `text` 显示 ——
-      /// 后端在工具执行期说中文，`text` 总是中文
+      /// Lines skipped by a `gap` row, phrased in the UI language. Missing in older logs: show `text`,
+      /// which is always Chinese since tools run in Chinese.
       var skipped: Int? = nil
     }
     let path: String
     let rows: [Row]
     let added: Int
     let removed: Int
-    /// 后端按 `DIFF_MAX_LINES` 截断过 —— 界面要说出来，不能假装这就是全部。
+    /// cut at DIFF_MAX_LINES; the UI must say so
     let truncated: Bool
 
     init?(_ raw: [String: Any]?) {
@@ -137,13 +133,13 @@ final class AgentClient: NSObject, @unchecked Sendable {
   }
 
   private let base: URL
-  /// 这一轮的分段计时（`AgentTiming`）。没开计时时是 nil。
+  /// nil unless timing is enabled
   var timing: AgentTiming?
   private var session: URLSession!
   private var task: URLSessionDataTask?
   private var continuation: AsyncThrowingStream<Event, Error>.Continuation?
   private var buffer = Data()
-  /// 非 200 时响应体不是 SSE，而是一段 JSON 错误。收进这里，收尾时翻成 error 事件。
+  /// A non-200 body is a JSON error, not SSE; collected here and turned into an error event at the end.
   private var httpStatus = 200
   private var errorBody = Data()
 
@@ -151,7 +147,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
     self.base = base
     super.init()
     let config = URLSessionConfiguration.ephemeral
-    // 有心跳保活，这里只是兜底。一轮里可能跑几个几十秒的沙箱命令。
+    // a fallback only: heartbeats keep the stream alive, and a turn may run sandbox commands for minutes
     config.timeoutIntervalForRequest = 900
     config.timeoutIntervalForResource = 3 * 3600
     config.waitsForConnectivity = false
@@ -161,8 +157,8 @@ final class AgentClient: NSObject, @unchecked Sendable {
 
   deinit { session?.invalidateAndCancel() }
 
-  /// 在一个项目里对话（读者那层）。
-  /// - Parameter conversation: 这一轮说给哪条对话听。传 nil 时后端接最近那条。
+  /// Chat inside a project (the reader).
+  /// - Parameter conversation: nil means the most recent one.
   func chat(
     projectID: String, question: String, provider: String,
     confirmed: [String] = [], conversation: String? = nil
@@ -174,9 +170,19 @@ final class AgentClient: NSObject, @unchecked Sendable {
     return stream(path: "projects/\(projectID)/agent/chat", body: body)
   }
 
-  /// 和书房对话（只见清单那层）。
+  /// Chat with the librarian.
   func deskChat(question: String, provider: String) -> AsyncThrowingStream<Event, Error> {
     stream(path: "agent/chat", body: ["question": question, "provider": provider])
+  }
+
+  /// Compact a conversation by hand. Same stream shape as chat (job_id first, same /cancel,
+  /// done / error); progress arrives as `compaction` events and done's stop is `compacted`.
+  func compact(projectID: String, provider: String, conversation: String? = nil)
+    -> AsyncThrowingStream<Event, Error>
+  {
+    var body: [String: Any] = ["provider": provider]
+    if let conversation { body["conversation"] = conversation }
+    return stream(path: "projects/\(projectID)/agent/compact", body: body)
   }
 
   private func stream(path: String, body: [String: Any]) -> AsyncThrowingStream<Event, Error> {
@@ -200,10 +206,10 @@ final class AgentClient: NSObject, @unchecked Sendable {
     }
   }
 
-  // MARK: - 旁路请求
+  // MARK: - Side requests
   //
-  // 批准与取消都是**另起一个请求**，不能占着对话那条流 ——
-  // 循环正挂在 Future 上等裁决，用同一条连接回答等于自己等自己。
+  // Approval and cancel are separate requests: the loop is blocked waiting for the verdict, so
+  // answering on the chat stream would wait on itself.
 
   func approve(projectID: String?, jobID: String, callID: String, approved: Bool, reason: String)
     async
@@ -219,11 +225,9 @@ final class AgentClient: NSObject, @unchecked Sendable {
     await post(path, ["job_id": jobID])
   }
 
-  /// 恢复这个项目此前的对话记录。
-  ///
-  /// 走后端的投影接口，**不在这里重写一套「缺结果要补」的配对逻辑** ——
-  /// 写两份必然漂移，而漂移的那份会让用户看到一段和模型看到的不一样的历史。
-  /// - Parameter conversation: 要恢复哪条对话。传 nil 时后端给最近那条。
+  /// Restore a conversation from the backend's projection, rather than re-implementing the pairing
+  /// of missing results here; a second copy would drift from what the model sees.
+  /// - Parameter conversation: nil means the most recent one.
   func transcript(projectID: String, conversation: String? = nil) async -> [[String: Any]] {
     var components = URLComponents(
       url: base.appendingPathComponent("projects/\(projectID)/agent/transcript"),
@@ -242,6 +246,26 @@ final class AgentClient: NSObject, @unchecked Sendable {
     return items
   }
 
+  /// Context occupancy before the next question; during a turn it comes from `context` events.
+  /// nil when unavailable.
+  func context(projectID: String, conversation: String?, provider: String?) async -> ContextReport? {
+    var components = URLComponents(
+      url: base.appendingPathComponent("projects/\(projectID)/agent/context"),
+      resolvingAgainstBaseURL: false)
+    var query: [URLQueryItem] = []
+    if let conversation { query.append(URLQueryItem(name: "conversation", value: conversation)) }
+    if let provider { query.append(URLQueryItem(name: "provider", value: provider)) }
+    components?.queryItems = query.isEmpty ? nil : query
+    guard let url = components?.url else { return nil }
+    var request = URLRequest(backend: url)
+    request.timeoutInterval = 15
+    guard let (data, response) = try? await URLSession.shared.data(for: request),
+      (response as? HTTPURLResponse)?.statusCode == 200,
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    return ContextReport(root)
+  }
+
   private func post(_ path: String, _ body: [String: Any]) async {
     var request = URLRequest(backend: base.appendingPathComponent(path))
     request.httpMethod = "POST"
@@ -256,9 +280,9 @@ final class AgentClient: NSObject, @unchecked Sendable {
     continuation?.finish()
   }
 
-  // MARK: - 分帧
+  // MARK: - Framing
 
-  /// SSE 以空行分帧。按 \n\n 切，切不完整就留在缓冲里等下一片。
+  /// Frames end with a blank line; an incomplete one stays buffered for the next chunk.
   private func drain() {
     let separator = Data("\n\n".utf8)
     while let range = buffer.range(of: separator) {
@@ -267,7 +291,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
       guard let text = String(data: frame, encoding: .utf8) else { continue }
       if let event = Self.decode(frame: text) {
         if let timing {
-          // 正文与推理另记字数（UTF-8 字节），和 pacer 发布的字数是同一把尺子
+          // UTF-8 bytes, the same unit the pacer publishes
           var chars = 0
           if case .text(let piece) = event { chars = piece.utf8.count }
           if case .thinking(let piece) = event { chars = piece.utf8.count }
@@ -331,6 +355,10 @@ final class AgentClient: NSObject, @unchecked Sendable {
         first: d["first"] as? Bool ?? false))
     case "usage":
       return .usage(AgentUsage(d))
+    case "context":
+      return .context(ContextReport(d))
+    case "compaction":
+      return .compaction(CompactionEvent(d))
     case "done":
       return .done(
         stop: d["stop"] as? String ?? "stop", steps: d["steps"] as? Int ?? 0,
@@ -347,8 +375,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
   }
 }
 
-/// token 用量。缓存命中与写入分开记 —— 缓存是否生效是本产品最关心的指标，
-/// 合成一个数字就看不出来了。
+/// Cache reads and writes are kept apart: whether caching works is the number that matters most.
 struct AgentUsage: Equatable {
   var input = 0
   var output = 0
@@ -365,7 +392,6 @@ struct AgentUsage: Equatable {
 
   var isEmpty: Bool { input == 0 && output == 0 && cacheRead == 0 }
 
-  /// 「读了多少、出了多少、其中多少是缓存」。缓存比例是省钱的关键指标。
   var label: String {
     var parts = ["↓\(input + cacheRead)", "↑\(output)"]
     if cacheRead > 0 { parts.append(L("缓存 \(cacheRead)", "cache \(cacheRead)")) }
@@ -375,8 +401,8 @@ struct AgentUsage: Equatable {
 
 extension AgentClient: URLSessionDataDelegate {
 
-  /// 先看状态码。非 200 的响应体是一段 JSON 错误，不是 SSE ——
-  /// 当成 SSE 去分帧只会静静地什么都解析不出来，界面一直转。
+  /// Non-200 bodies are JSON errors, not SSE; framing them as SSE would parse nothing and the UI
+  /// would spin forever.
   func urlSession(
     _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse
   ) async -> URLSession.ResponseDisposition {
@@ -396,8 +422,8 @@ extension AgentClient: URLSessionDataDelegate {
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     if httpStatus != 200 {
-      // 最常见的是 409（正文没确认 / 项目还没有正文）与 404（provider 没注册）。
-      // 只显示「请求失败」的话，用户根本不知道该去点什么，所以把 detail 带出来。
+      // Mostly 409 (text not confirmed, or none yet) and 404 (unknown provider). Show the detail, or the
+      // user has no idea what to fix.
       let detail =
         (try? JSONSerialization.jsonObject(with: errorBody) as? [String: Any])?["detail"] as? String
       continuation?.yield(.failed(code: "HTTP_\(httpStatus)",

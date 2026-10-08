@@ -1,7 +1,5 @@
-"""HTTP 路由。
-
-只做编排：参数校验、线程/事件循环之间的搬运、SSE 成帧。
-识别逻辑在 scivane_reader.ocr，任务状态在 scivane_reader.jobs。
+"""HTTP routes: validation, hand-off between threads and the event loop, SSE framing.
+Recognition lives in scivane_reader.ocr and job state in scivane_reader.jobs.
 """
 
 from __future__ import annotations
@@ -32,16 +30,11 @@ logger = logging.getLogger("scivane.api")
 router = APIRouter()
 
 
-# --------------------------------------------------------------------------
-# 健康检查
-# --------------------------------------------------------------------------
 @router.get("/health")
 async def health():
-    """App 启动时轮询这里，两层都就绪才解锁 UI。
+    """Polled by the app at startup.
 
-    `ok` 仍然只反映**本地 OCR 引擎**是否就绪 —— App 侧的 BackendManager
-    读的就是这个字段，语义不能动。云端问答的状态单独放在 `llm` 段里：
-    两条链路彼此独立，读论文只做问答时不该被 2.8GB 的 OCR 模型拖住。
+    `ok` reflects only the local OCR engine (BackendManager reads it); cloud Q&A is under `llm`.
     """
     llama_ok = False
     detail = "unreachable"
@@ -60,9 +53,9 @@ async def health():
         "llama": {"ok": llama_ok, "url": config.LLAMA_BASE_URL, "detail": detail},
         "pipeline_version": config.PIPELINE_VERSION,
         "layout_device": config.LAYOUT_DEVICE,
-        # 本地 OCR 在哪一档；没装时是 None（它是可选组件，完整状态见 /runtime/status）
+        # None when OCR is not installed (it is optional)
         "runtime_root": str(ocr.root) if ocr else None,
-        # 已配置的 provider 概览。不含任何凭据原文。
+        # never includes credentials
         "llm": {
             "providers": [
                 {
@@ -78,24 +71,20 @@ async def health():
 
 @router.get("/runtime/status")
 async def runtime_status():
-    """本地 OCR 组件的分项状态：在用哪一档、每一档缺什么、能不能从旧部署迁。
-
-    OCR 是可选组件，界面据此决定是「开始识别」还是「先装」。
-    每次现查文件系统 —— 装完不用重启后端就看得见。
-    """
+    """Per-tier OCR status, read fresh so an install shows up without a restart."""
     return runtime.status()
 
 
 class InstallRequest(BaseModel):
-    #: download：从网上装（上游优先、失败或太慢换镜像）；migrate：从旧部署本机迁移
+    #: download: fetch online; migrate: copy a local legacy deployment
     method: Literal["download", "migrate"] = "download"
 
 
-# 同一时刻只许一个安装在跑：两个安装抢同一个 .partial 与下载缓存，谁也装不成
+# One install at a time: two would fight over the same .partial dir and cache.
 _install_lock = threading.Lock()
 _install_job: dict[str, str | None] = {"id": None}
 
-# 安装器报的是种类，事件名归 sse.py 管（跨语言契约），映射只在这里一处
+# Installer kinds -> SSE event names (the contract lives in sse.py).
 _RUNTIME_KINDS = {
     "step": RuntimeEvent.STEP, "progress": RuntimeEvent.PROGRESS,
     "source": RuntimeEvent.SOURCE, "log": RuntimeEvent.LOG,
@@ -104,9 +93,9 @@ _RUNTIME_KINDS = {
 
 @router.post("/runtime/install")
 async def runtime_install(req: InstallRequest):
-    """装本地 OCR 组件。走 `jobs` 登记（能取消），进度走 `RuntimeEvent` 流。
+    """Install the OCR component as a cancellable job, streaming RuntimeEvents.
 
-    客户端断开即取消 —— 已下载的部分留在缓存里，下次从断点接着下，不必 2 GB 从头来。
+    Disconnecting cancels; downloaded data stays cached for the next attempt.
     """
     if config.RUNTIME_OVERRIDE is not None:
         raise HTTPException(
@@ -146,7 +135,7 @@ async def runtime_install(req: InstallRequest):
             })
         except installer.InstallError as exc:
             emit(RuntimeEvent.ERROR, {"code": exc.code, "message": str(exc)})
-        except Exception as exc:  # 让 App 能显示出真实原因，而不是无声失败
+        except Exception as exc:  # surface the real reason to the app
             logger.exception("install %s failed", job_id)
             emit(RuntimeEvent.ERROR, {"code": "INTERNAL", "message": f"{type(exc).__name__}: {exc}"})
         finally:
@@ -155,7 +144,7 @@ async def runtime_install(req: InstallRequest):
             _install_lock.release()
             emit(EOF_SENTINEL, {})
 
-    # 线程不会自己带上这个请求的上下文（界面语言在里面，`i18n.py`）—— 显式复制一份
+    # Threads don't inherit the request context (UI language); copy it explicitly.
     threading.Thread(target=contextvars.copy_context().run, args=(worker,),
                      name=f"install-{job_id}", daemon=True).start()
 
@@ -186,16 +175,13 @@ async def runtime_install(req: InstallRequest):
 
 @router.post("/runtime/install/{job_id}/cancel")
 async def runtime_install_cancel(job_id: str):
-    """界面上的「取消」。只认正在跑的那一个 —— 取消一个早就结束的号没有意义。"""
+    """Cancel the running install; stale job ids are ignored."""
     if _install_job["id"] != job_id:
         return {"cancelled": False}
     jobs.cancel(job_id)
     return {"cancelled": True}
 
 
-# --------------------------------------------------------------------------
-# 识别（SSE 流式）
-# --------------------------------------------------------------------------
 class OCRRequest(BaseModel):
     path: str
 
@@ -245,7 +231,7 @@ async def ocr_stream(req: OCRRequest):
                 "elapsed": elapsed(),
                 "cancelled": jobs.is_cancelled(job_id),
             })
-        except Exception as exc:  # 让 App 能显示出真实原因，而不是无声失败
+        except Exception as exc:  # surface the real reason to the app
             logger.exception("job %s failed", job_id)
             emit(Event.ERROR, {"message": f"{type(exc).__name__}: {exc}"})
         finally:
@@ -273,11 +259,10 @@ async def ocr_stream(req: OCRRequest):
                 yield encode(event, payload)
         finally:
             if state["finished"]:
-                # 正常收尾，别把已完成的任务留在取消集合里
                 jobs.forget(job_id)
             else:
-                # 客户端断开（关窗、超时、Ctrl-C）后 worker 线程不会自己停，
-                # 会继续占着 llama-server 空跑。标记取消，让它在页边界退出。
+                # The worker thread outlives a disconnected client and would keep llama-server busy;
+                # mark it cancelled so it stops at the next page.
                 logger.info("client gone, cancelling job %s", job_id)
                 state["disconnected"] = True
                 jobs.cancel(job_id)
@@ -295,9 +280,6 @@ async def cancel(job_id: str):
     return {"cancelled": job_id}
 
 
-# --------------------------------------------------------------------------
-# 抠图静态资源
-# --------------------------------------------------------------------------
 @router.get("/assets/{job_id}/{asset_path:path}")
 async def asset(job_id: str, asset_path: str):
     target = jobs.asset_path(job_id, asset_path)

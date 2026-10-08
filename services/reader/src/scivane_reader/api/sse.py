@@ -1,7 +1,4 @@
-"""SSE 事件的编码与名字。
-
-事件名是 App 和服务端之间的契约，改名字要同步改 OCRClient.swift。
-"""
+"""SSE event names and encoding. Event names are a contract with the Swift client."""
 
 from __future__ import annotations
 
@@ -10,114 +7,97 @@ from typing import Final
 
 
 class Event:
-    META: Final = "meta"            # 开头一次：job_id、总页数、文件名
-    PROGRESS: Final = "progress"    # 开始处理第 N 页
-    PAGE: Final = "page"            # 第 N 页出结果
-    HEARTBEAT: Final = "heartbeat"  # 5 秒一次，见下方说明
-    DONE: Final = "done"            # 全部完成，带整理后的完整 Markdown
-    ERROR: Final = "error"          # 失败，带可读原因
+    META: Final = "meta"            # once at start: job_id, page count, file name
+    PROGRESS: Final = "progress"    # page N started
+    PAGE: Final = "page"            # page N result
+    HEARTBEAT: Final = "heartbeat"  # every 5 s
+    DONE: Final = "done"            # all pages, with the restructured Markdown
+    ERROR: Final = "error"          # failure with a readable reason
 
 
 class LlmEvent:
-    """大模型问答流的事件名。
+    """Event names for the raw model stream (/llm/chat).
 
-    与 OCR 那套分开命名，因为两条链路的语义完全不同：OCR 是「一份文档逐页
-    出结果」，问答是「一次回答逐 token 出内容」。共用事件名会让客户端难以
-    分辨自己在听哪条流。
-
-    终态只有 FINISH 一个 —— 正常结束与失败走同一个出口，客户端不必分别处理
-    「流结束了」和「流出错了」两种收尾。这条契约来自 llm/types.py 的
-    终止分片协议，改这里必须同步改那边。
+    FINISH is the only terminal event, for success and failure alike
+    (the terminal-chunk protocol in llm/types.py).
     """
 
-    DELTA: Final = "delta"          # 正文增量
-    THINKING: Final = "thinking"    # 推理过程增量（支持的模型才有）
-    USAGE: Final = "usage"          # token 用量上报，可能多次
-    FINISH: Final = "finish"        # 唯一终态：kind + 可选 failure + 用量
+    DELTA: Final = "delta"        # answer text
+    THINKING: Final = "thinking"  # reasoning text, when the model provides it
+    USAGE: Final = "usage"        # token usage, possibly reported more than once
+    FINISH: Final = "finish"      # terminal: kind, optional failure, usage
 
 
 class AgentEvent:
-    """**agent 对话流的事件名 —— 跨语言契约，定下之后不要改。**
+    """Event names for the agent stream. A contract with the Swift client: a mismatch does not
+    error, the UI just waits forever.
 
-    这是 App 与服务端之间的契约：改这里必须同步改
-    Swift 侧的客户端。对不上的表现不是报错，而是界面永远停在等待，
-    所以命名一次定死。
-
-    与 `LlmEvent` 分开命名：那一套是「裸的模型问答流」（`/llm/chat`，
-    给命令行调试用），这一套是「agent 在项目里干活」，多出工具、批准、
-    沙箱强度三类语义。共用名字会让客户端分不清自己在听哪条流。
-
-    终态是 DONE 与 ERROR 两个，而不是 LlmEvent 那样只有一个 FINISH ——
-    理由是 agent 一轮里可能既成功产出了内容又在某个工具上失败，客户端要能
-    区分「整轮走完了」和「整轮没走完」。`DONE` 里带 stop 字段说明怎么停的
-    （stop / max_steps / aborted）。
+    Terminal events are DONE (stop: stop / max_steps / aborted) and ERROR.
     """
 
-    #: 一轮（一次模型请求）开始：step、provider、model
+    #: a model request begins: step, provider, model
     MESSAGE_START: Final = "message_start"
-    #: 正文增量
+    #: answer text
     TEXT: Final = "text"
-    #: 推理过程增量（支持的模型才有）
+    #: reasoning text, when supported
     THINKING: Final = "thinking"
-    #: 模型要调工具：call_id、name、arguments、人类可读摘要
+    #: call_id, name, arguments, human-readable summary
     TOOL_CALL: Final = "tool_call"
-    #: 工具结果：call_id、预览、是否出错、**是否是取消后补的合成结果**
+    #: call_id, preview, error flag, synthetic flag (filled in after a cancel)
     TOOL_RESULT: Final = "tool_result"
-    #: 需要用户批准：call_id、tool、summary、还有多少秒过期
+    #: call_id, tool, summary, seconds until it expires
     APPROVAL_REQUEST: Final = "approval_request"
-    #: 沙箱执行强度不足（partial）。**这是可报告的事实，必须冒到界面上**，
-    #: 否则它只报告给了日志。
+    #: sandbox enforcement was only partial; must reach the UI, not just the log
     ENFORCEMENT: Final = "enforcement"
-    #: agent 经审计代理到达了一个主机：call_id、host、port、method、
-    #: allowed、reason、**first**（这次调用的第一个主机，界面据此出一张显眼的卡）。
-    #:
-    #: **刻意不复用 ENFORCEMENT。** 那个事件的含义是「边界没兑现承诺」，
-    #: 是一条警告；而 agent 联网是**正常行为**。混在一起等于给正常行为挂上
-    #: 琥珀色警告，看几次之后两种都没人看了（狼来了喊多了）。
-    #: **绝不带路径与查询串** —— 查询串是凭据最常见的藏身处。
+    #: the agent reached a host through the audit proxy: call_id, host, port, method, allowed,
+    #: reason, first. Separate from ENFORCEMENT because networking is normal, not a warning.
+    #: Never carries paths or query strings.
     NETWORK: Final = "network"
-    #: token 用量，含缓存命中与写入。缓存是否生效是本产品最关心的指标。
+    #: per-step token usage including cache reads and writes; the turn total is in DONE
     USAGE: Final = "usage"
-    #: 整轮结束：stop、steps、exhausted、完整回答文本
+    #: how full the context is (projects/meter.ContextReport): before each step, after
+    #: compaction, and at the end of a turn
+    CONTEXT: Final = "context"
+    #: phase start/done/failed, trigger auto/overflow/manual; done carries summary, turns,
+    #: kept, before, after; failed carries code and message
+    COMPACTION: Final = "compaction"
+    #: turn finished: stop, steps, exhausted, full answer text
     DONE: Final = "done"
-    #: 整轮失败：稳定 code + 可读原因（**绝不含凭据**）
+    #: turn failed: stable code and a readable reason, never credentials
     ERROR: Final = "error"
-    #: 5 秒一次，同 OCR 那条链路的理由
+    #: every 5 s
     HEARTBEAT: Final = "heartbeat"
 
 
 class RuntimeEvent:
-    """**安装本地 OCR 组件那条流的事件名 —— 跨语言契约，定下之后不要改。**
+    """Event names for the OCR install stream (POST /runtime/install). A Swift contract.
 
-    `POST /runtime/install`。与 `AgentEvent` 分开：那一套是「agent 在项目里干活」，
-    这一套是「装一个 2 GB 的组件」，语义没有交集，共用名字只会让客户端分不清
-    自己在听哪条流（同 `AgentEvent` 与 `LlmEvent` 分开的理由）。
-    终态同样是 DONE 与 ERROR 两个；取消是 ERROR 里 code=CANCELLED。
+    Terminal events are DONE and ERROR; cancellation is ERROR with code=CANCELLED.
     """
 
-    #: 开头一次：job_id、method（download / migrate）
+    #: once at start: job_id, method (download / migrate)
     META: Final = "meta"
-    #: 进入第 N 步：index、total、key、label
+    #: step N begins: index, total, key, label
     STEP: Final = "step"
-    #: 一步里的进度（节流到每秒约 4 次）：key、done、total、source；pip 那一步的单位是「包」
+    #: progress within a step, about 4 per second: key, done, total, source
     PROGRESS: Final = "progress"
-    #: **换了下载来源**：key、from、to、reason。上游不通或太慢换镜像时发，界面要让人看得见
+    #: switched download source: key, from, to, reason
     SOURCE: Final = "source"
-    #: 一行说明（校验、pip 的进展），界面可以折起来
+    #: one line of detail (verification, pip)
     LOG: Final = "log"
-    #: 装好了：root、tier、elapsed
+    #: installed: root, tier, elapsed
     DONE: Final = "done"
-    #: 没装成：稳定 code（DISK_FULL / DOWNLOAD_FAILED / DEPS_FAILED / CANCELLED …）+ 可读原因
+    #: failed: stable code (DISK_FULL, DOWNLOAD_FAILED, DEPS_FAILED, CANCELLED...) and a reason
     ERROR: Final = "error"
-    #: 5 秒一次：elapsed
+    #: every 5 s: elapsed
     HEARTBEAT: Final = "heartbeat"
 
 
-# worker 线程用它通知流该收尾了，不发给客户端
+# internal: tells the stream to close; never sent to the client
 EOF_SENTINEL: Final = "__eof__"
 
-# 密集版面的单页可能要跑十几秒。定时发心跳，一是让客户端的空闲超时不会
-# 误杀连接，二是界面上的已用时间能一直在走。
+# Dense pages can take over ten seconds. Heartbeats keep idle timeouts from killing the
+# connection and keep the elapsed timer moving.
 HEARTBEAT_SECONDS: Final = 5.0
 
 

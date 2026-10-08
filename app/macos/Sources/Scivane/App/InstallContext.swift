@@ -1,46 +1,40 @@
 import Foundation
 
-/// 后端从哪来。
-///
-/// 从前的答案是写死在代码里的一个开发机路径。在那台机器上永远对，
-/// 在别人的机器上永远错 —— 而错的样子是「找不到后端脚本，请在设置里指定项目目录」，
-/// 用户根本不知道要去哪找一个仓库。
-///
-/// 现在按这条链找，**第一个命中的算数**：
-///   1. 显式覆盖：设置页填的目录，或环境变量 `SCIVANE_PROJECT_ROOT`
-///   2. 本 App 包里的 `Contents/Resources/backend/`（带 `scivane-package.json`）
-///   3. 开发源码：从可执行文件往上找 `app/macos/Package.swift` ——
-///      与 `paths.py` 是**同一个标志物**，两边对「仓库长什么样」只有一种说法
-///   4. 都没有 → **带名字地失败**，说清楚找过哪几处。绝不回落到某个人的路径。
+/// Where the backend comes from. The first match wins:
+///   1. explicit override: the Settings field or SCIVANE_PROJECT_ROOT
+///   2. Contents/Resources/backend/ in this app bundle (with scivane-package.json)
+///   3. a source tree, found by walking up from the executable to app/macos/Package.swift (the
+///      same marker as paths.py)
+///   4. otherwise, fail and name every place that was tried; never fall back to a fixed path
 struct InstallContext: Equatable {
     enum Layout: String {
-        case package   // 安装包里的 backend/
-        case source    // 源码树，root 是仓库根
+        case package   // backend/ inside an installed app
+        case source    // source tree; root is the repository root
     }
 
     enum Origin: String {
-        case override  // 设置页或环境变量指定
-        case bundle    // 本 App 包里自带
-        case source    // 从可执行文件的位置认出来的源码树
+        case override  // Settings or environment variable
+        case bundle    // bundled with this app
+        case source    // source tree found from the executable's location
     }
 
     let layout: Layout
     let origin: Origin
-    /// 包目录（`…/Contents/Resources/backend`）或仓库根。
+    /// the bundle's backend directory or the repository root
     let root: URL
 
-    /// 启动脚本。两种形态是同一份脚本 —— 构建时从 `scripts/` 原样拷进包。
+    /// The same script in both layouts; the build copies it from scripts/ unchanged.
     var launcher: URL {
         root.appendingPathComponent(layout == .package ? "bin/start_backend.sh" : "scripts/start_backend.sh")
     }
 
     static let manifestName = "scivane-package.json"
     static let packageSchema = "scivane.package/1"
-    /// 与 `services/reader/src/scivane_reader/paths.py` 的 `_MARKER` 相同。
+    /// must match _MARKER in paths.py
     static let sourceMarker = "app/macos/Package.swift"
 
     struct Failure: Error, Equatable {
-        /// 两种说法都存着：它会进后端状态、一直显示在侧栏与设置页，切换语言之后要跟着换。
+        /// shown in the sidebar and Settings, so it must follow a language switch
         let text: UIText
         init(_ text: UIText) { self.text = text }
         var message: String { text.text }
@@ -67,8 +61,8 @@ struct InstallContext: Equatable {
         case .success(.package?):
             return .success(InstallContext(layout: .package, origin: .bundle, root: packaged))
         case .failure(let failure):
-            // 包里有清单但对不上：找对了地方，是包和 App 不匹配。继续往下找只会
-            // 找到一个更让人困惑的答案（比如恰好旁边有个仓库）。
+            // A manifest that doesn't match means the right place but the wrong bundle. Searching on would
+            // only find a more confusing answer, such as a repository next to it.
             return .failure(failure)
         default:
             break
@@ -89,10 +83,10 @@ struct InstallContext: Equatable {
             """)))
     }
 
-    /// 认一个目录：安装包、源码树，还是都不是（nil）。
+    /// Classify a directory as a bundle, a source tree, or neither (nil).
     ///
-    /// 有清单但 schema 或架构不认识时返回**失败**而不是 nil —— 把一个认不出的包
-    /// 当成「这里没有包」，会让排查的人以为是路径错了。
+    /// An unknown schema or architecture is a failure, not nil: treating an unrecognised bundle as
+    /// "no bundle here" would send whoever debugs it after the wrong path.
     static func classify(_ dir: URL) -> Result<Layout?, Failure> {
         let manifest = dir.appendingPathComponent(manifestName)
         if let data = try? Data(contentsOf: manifest) {
@@ -121,8 +115,8 @@ struct InstallContext: Equatable {
         return .success(nil)
     }
 
-    /// 从可执行文件往上找仓库根。`swift build` 的产物在 `<仓库>/app/macos/.build/…`，
-    /// 没带后端的旧包在 `<仓库>/var/app/Scivane.app/…`，两者都能认出来。
+    /// `swift build` output lives under <repo>/app/macos/.build/ and older bundles without a backend
+    /// under <repo>/var/app/Scivane.app/; both are recognised.
     private static func sourceRoot(above executable: URL) -> URL? {
         var dir = executable.deletingLastPathComponent().standardizedFileURL
         while true {

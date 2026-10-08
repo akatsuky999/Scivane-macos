@@ -1,30 +1,14 @@
 import SwiftUI
 
-/// 与 agent 对话的面板。
-///
-/// 设计取向：**内容优先，chrome 归零**。切到这一栏本身就说明了「这是 Agent」，
-/// 所以面板内没有标题栏、状态点、省略号菜单这类只占位不做事的模块。
-/// 视觉重心落在两处 —— 对话流本身，和底部那张浮起来的输入卡。
-///
-/// **它同时是两层 agent 的界面。** 没打开项目时这里是**书房**（只见清单、
-/// 没有 shell、读不到任何正文），打开项目后换成**读者**。两层各持一个会话，
-/// 记录不混在一起 —— 打开项目是换一个 agent 实例，不是换上下文。
-/// 解析出当前这一层的会话，再交给面板。
-///
-/// **这一层不能省。** 面板要观察的是**会话对象内部**（消息来了没有、还在不在跑），
-/// 而那不是 AppModel 的变更 —— 只传 model 的话，`session.items` 变了界面
-/// 一个字都不会重画，表现就是「发了消息一直没反应」。
-/// 所以在这里把会话取出来，由面板用 @ObservedObject 持有它。
-///
-/// `activeProjectID` 是 @Published，所以换一层时这里会重跑、
-/// 面板会重新绑到另一个会话上 —— 两层的记录因此各归各的。
+/// Resolves the current level's session (librarian outside a project, reader inside) and hands it
+/// to the panel, which holds it as an @ObservedObject. The panel must observe the session itself:
+/// its changes aren't AppModel changes, so passing only the model would never redraw a reply.
 struct AgentPane: View {
   @ObservedObject var model: AppModel
 
   var body: some View {
-    // **id 里必须带上对话**：换一条对话是换另一个会话实例，
-    // 只换 projectID 的话 SwiftUI 会复用同一棵视图，新对话的输入框
-    // 仍然绑在旧会话上 —— 症状是「切过去了，发的话却进了上一条」。
+    // The id must include the conversation: otherwise SwiftUI reuses the view and the composer stays
+    // bound to the previous conversation's session.
     AgentPanel(
       model: model,
       session: model.session(
@@ -35,39 +19,34 @@ struct AgentPane: View {
 
 struct AgentPanel: View {
   @ObservedObject var model: AppModel
-  /// **必须是 @ObservedObject。** 见 `AgentPane` 的说明。
+  /// must be @ObservedObject; see AgentPane
   @ObservedObject var session: AgentSession
   @State private var draft = ""
   @FocusState private var composing: Bool
-  /// 有文件悬在输入区上方。边框据此给反馈。
   @State private var dropping = false
 
-  /// 用户拖出来的输入框高度。0 表示跟随内容自动增高。
-  ///
-  /// 存进偏好而不是 @State：调好的高度是个人习惯，不该每次开 App 都退回默认。
+  /// 0 = grow with content. Stored as a preference so a tuned height survives relaunches.
   @AppStorage("agentComposerHeight") private var composerHeight: Double = 0
-  /// 一次拖拽开始时的基准高度。拖的是增量，不是绝对位置。
+  /// height when the drag began; drags are relative
   @State private var dragBaseline: Double?
 
-  private static let minComposerHeight: Double = 22    // 一行
+  private static let minComposerHeight: Double = 22    // one line
   private static let maxComposerHeight: Double = 340
 
-  /// 拖高之后要能真的显示那么多行，否则框变大了字还是挤在 7 行里。
+  /// a taller box must actually show more lines
   private var lineCap: Int {
     composerHeight > 0 ? max(7, Int(composerHeight / 18)) : 7
   }
 
-  /// 这一层是书房还是读者。
   private var isDesk: Bool { model.activeProject == nil }
 
-  /// 上下文的四种状态。界面与后端必须说同一套话：
-  /// 后端 `context.assemble()` 对未确认的正文直接拒绝装配，
-  /// 所以这里也绝不能显示成「已加载」。
+  /// Must agree with the backend: context.assemble() refuses unconfirmed text, so it is never shown
+  /// as loaded.
   private enum ContextState {
-    case ready(Project)            // 可用
-    case awaitingConfirm(Project)  // 有正文，但没人认账
-    case empty(Project)            // 有项目，没正文
-    case desk                      // 书房那一层
+    case ready(Project)
+    case awaitingConfirm(Project)  // has text, not yet confirmed
+    case empty(Project)            // no text yet
+    case desk
   }
 
   private var contextState: ContextState {
@@ -76,7 +55,7 @@ struct AgentPanel: View {
     return project.hasUsableContext ? .ready(project) : .empty(project)
   }
 
-  /// 能不能发问。书房那层不需要正文，但两层都需要一个配好的模型。
+  /// The librarian needs no text, but both levels need a configured model.
   private var canAsk: Bool {
     guard !model.agentProvider.isEmpty else { return false }
     switch contextState {
@@ -87,11 +66,11 @@ struct AgentPanel: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      // 书房那层没有对话的概念，所以这条只在项目里出现
+      // the librarian has no conversations
       if !isDesk { ConversationBar(model: model) }
       if session.isEmpty {
-        // 有空间就居中，空间不够再滚动。ScrollView 里的 Spacer 撑不开
-        // （内容高度不受限），所以要用容器高度兜一个 minHeight。
+        // Centre when there is room, scroll otherwise; a Spacer can't expand inside a ScrollView, hence
+        // the minHeight.
         GeometryReader { geo in
           ScrollView {
             welcome.padding(.horizontal, 28).frame(minHeight: geo.size.height)
@@ -105,8 +84,16 @@ struct AgentPanel: View {
       composer(session)
     }
     .background(Palette.paper)
+    // Warm up the math typesetter. Creating its WebView blocks the main thread for over 100 ms (first
+    // time only) and loading takes a few tenths more; do it after the panel settles rather than when
+    // the first `$` streams in.
+    .task {
+      try? await Task.sleep(for: .milliseconds(700))
+      guard !Task.isCancelled else { return }
+      MathRenderer.shared.prepare()
+    }
     .task(id: AppModel.sessionKey(model.activeProjectID, model.activeConversationID)) {
-      // 换了一层或换了一条对话，就把那一段历史补回来（第一次进来才拉）
+      // restore history when the level or conversation changes (fetched once)
       model.restoreAgentHistory()
       await model.refreshProviders()
     }
@@ -114,15 +101,24 @@ struct AgentPanel: View {
       guard let projectID = model.activeProjectID else { return }
       await model.refreshProjectFiles(projectID)
     }
+    // refetch on opening a conversation, switching cards or changing the window; during a turn it
+    // comes from events (AgentSession)
+    .task(id: contextKey) {
+      await model.refreshAgentContext()
+    }
     .onChange(of: session.running) { _, running in
-      // 一轮跑完再拉一次清单：第一句话之后后端才会给这条对话起名字
-      // （标题取自第一句提问），条数也变了。
+      // Refresh the list after each turn: the backend names a conversation after its first question.
       guard !running, let projectID = model.activeProjectID else { return }
       Task { await model.refreshConversations(projectID) }
     }
   }
 
-  // MARK: - 空态
+  private var contextKey: String {
+    "\(AppModel.sessionKey(model.activeProjectID, model.activeConversationID))|"
+      + "\(model.activeProviderID)|\(model.activeContextWindow ?? 0)"
+  }
+
+  // MARK: - Empty state
 
   private var welcome: some View {
     VStack(spacing: 0) {
@@ -151,10 +147,8 @@ struct AgentPanel: View {
     }.frame(maxWidth: .infinity)
   }
 
-  /// 两层的起手问题不一样 —— 书房那层问正文是问不出东西的，
-  /// 它根本读不到。提示词里也是这么写的，界面要和它说同一套话。
-  /// 起手问题跟着界面语言：点一下就是一句那种语言的提问，而 agent 用提问的语言回答 ——
-  /// 英文界面的人点下去，得到的就是英文回答。
+  /// The librarian can't read any text, so its starters differ (matching its prompt). Starters
+  /// follow the UI language, and the agent answers in the language it is asked in.
   private var starters: [String] {
     isDesk
       ? [L("我都有哪些论文", "What papers do I have?"),
@@ -211,10 +205,10 @@ struct AgentPanel: View {
     }
   }
 
-  // MARK: - 输入区
+  // MARK: - Composer
   //
-  // **不用分割线**，靠一张浮起来的圆角卡片与对话流分开 ——
-  // 线是硬边界，阴影是软边界，后者才不打断阅读。
+  // Separated from the transcript by a floating card, not a divider: a shadow doesn't cut the
+  // reading flow the way a line does.
 
   private func composer(_ session: AgentSession) -> some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -238,8 +232,9 @@ struct AgentPanel: View {
           attachButton
         }
         ComposerStatusBar(
-          model: model, usage: session.usage,
-          locked: session.running || session.preparing)
+          model: model, usage: session.usage, context: isDesk ? nil : session.context,
+          locked: session.running || session.preparing,
+          onCompact: { model.compactAgentContext() })
         Spacer(minLength: 0)
         if canAsk && !draft.isEmpty && !session.running && !session.preparing {
           Text(L("⏎ 发送", "⏎ Send")).font(.system(size: 10)).foregroundStyle(Palette.inkFaint)
@@ -248,8 +243,7 @@ struct AgentPanel: View {
         sendButton(session)
       }
     }
-    // 拖进来就放进项目的 files/ —— 这是最短的那条路，比「点按钮、开面板、
-    // 找文件」少三步，而拖拽本来就是用户手边已有文件时的第一反应。
+    // Dropped files go straight into the project's files/.
     .dropDestination(for: URL.self) { urls, _ in
       guard !isDesk, !urls.isEmpty else { return false }
       Task { await model.addProjectFiles(urls) }
@@ -266,8 +260,6 @@ struct AgentPanel: View {
             : (composing ? Palette.accent.opacity(0.5) : Palette.rule.opacity(0.55)),
           lineWidth: dropping ? 1.8 : (composing ? 1.2 : 1))
     )
-    // 浮起来而不是划条线：线是硬边界，会把面板切成两块；阴影是软的，
-    // 对话滚到底下也不会被一刀截断。
     .shadow(color: .black.opacity(composing ? 0.10 : 0.05), radius: composing ? 14 : 9, y: 3)
     .padding(.horizontal, 16).padding(.bottom, 16).padding(.top, 4)
     .animation(.easeOut(duration: 0.16), value: composing)
@@ -275,9 +267,8 @@ struct AgentPanel: View {
     .animation(.easeOut(duration: 0.14), value: dropping)
   }
 
-  /// 已经放进 `files/` 的材料。**列的是项目里真实存在的东西**，
-  /// 不是「这次要上传的暂存区」—— 拖进来那一刻就已经落盘了，
-  /// 再做一个待提交状态只会让人搞不清到底传没传。
+  /// Files already in files/, not a staging area: they were written when dropped, and a pending
+  /// state would only raise the question whether they were uploaded.
   private var attachments: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 6) {
@@ -322,18 +313,15 @@ struct AgentPanel: View {
     model.askAgent(question)
   }
 
-  /// 顶边的拖拽手柄。
-  ///
-  /// 平时几乎看不见，指过去才浮出来 —— 它是个「需要时才存在」的控件，
-  /// 常驻一条明显的横杠会把输入框切成两半。双击回到自动高度。
+  /// Nearly invisible until hovered. Double-click restores automatic height.
   private var resizeGrabber: some View {
     ResizeGrabber(
       isDragging: dragBaseline != nil,
       onChanged: { translation in
         let base = dragBaseline ?? max(Self.minComposerHeight, composerHeight)
         if dragBaseline == nil { dragBaseline = base }
-        // 往上拖变高：translation 向上为负，所以取减
-        // 取整到整点：亚像素高度会让上方内容每帧重排一次，看着发毛
+        // dragging up is a negative translation; rounded to whole points, since sub-pixel heights
+        // relayout the content above on every frame
         composerHeight = (min(
           Self.maxComposerHeight, max(Self.minComposerHeight, base - translation))).rounded()
       },
@@ -342,8 +330,7 @@ struct AgentPanel: View {
     )
   }
 
-  /// 跑起来之后按钮变成「停」。同一个位置换语义，而不是再挤一个按钮进来 ——
-  /// 那个位置在跑的时候唯一有意义的动作就是停下。
+  /// While running, the same button stops; that is the only meaningful action there.
   private func sendButton(_ session: AgentSession) -> some View {
     let live = canAsk && !draft.isEmpty && !session.preparing
     return Button {
@@ -358,8 +345,7 @@ struct AgentPanel: View {
           in: Circle())
     }
     .buttonStyle(.plain)
-    // 按过一次就不再接受第二次 —— 重复 POST /cancel 没有意义，
-    // 而按钮继续亮着会让人反复点，更像是坏的。
+    // one cancel is enough; a button that stays live invites repeated clicks
     .disabled(session.cancelRequested || (!session.running && !live))
     .help(session.running
           ? (session.cancelRequested ? L("正在停下…", "Stopping…") : L("停下这一轮", "Stop this turn"))
@@ -368,10 +354,8 @@ struct AgentPanel: View {
     .animation(.easeOut(duration: 0.16), value: session.running)
   }
 
-  /// 上下文行：标题一枚 chip，状态另起。
-  ///
-  /// 关键是**标题按尾部截断**。之前拼成「「长标题…」尚无正文」再中间截断，
-  /// 结果是一串读不出来的碎片 —— 用户既认不出是哪篇，也看不清状态。
+  /// The title is truncated at the tail on its own chip; a middle-truncated combined string was
+  /// unreadable.
   @ViewBuilder
   private func contextRow(_ session: AgentSession) -> some View {
     switch contextState {
@@ -398,8 +382,7 @@ struct AgentPanel: View {
     }
   }
 
-  /// 当前用的模型。点它直接去设置换 —— 换模型是个高频动作，
-  /// 不该逼用户去菜单里找。
+  /// Clicking the model opens Settings to change it.
   @ViewBuilder
   private var modelChip: some View {
     if let provider = model.providers.first(where: { $0.id == model.agentProvider }) {
@@ -433,8 +416,7 @@ struct AgentPanel: View {
   }
 }
 
-/// 空态里的引导问题。安静的一行，悬停才浮出来 —— 不用填色卡片，
-/// 免得三条建议在视觉上压过真正的主角（输入框）。
+/// A quiet row that lights up on hover, so the suggestions don't outweigh the composer.
 private struct SuggestionRow: View {
   let text: String
   let pick: (String) -> Void
@@ -460,17 +442,11 @@ private struct SuggestionRow: View {
 }
 
 
-/// 输入框顶边的高度手柄。
+/// Height handle on the composer's top edge.
 ///
-/// **手势必须用全局坐标系。** 这个手柄贴在输入框顶边，而输入框长高时顶边是
-/// 向上移动的（面板里 GeometryReader 占弹性空间，composer 在底部）——
-/// 也就是说，手柄会被自己这次拖拽推着走。
-///
-/// `DragGesture` 默认在 `.local` 坐标系里算 `translation`：视图一移动，
-/// 同一个鼠标位置对应的局部坐标就变了，位移被重复计入，于是
-/// 「变高 → 手柄上移 → 位移变大 → 更高」形成自激回路，表现就是拖的时候页面震荡。
-/// 换成 `.global` 之后 startLocation 与 location 都在屏幕坐标里，
-/// 只反映真实的鼠标移动，回路断开。
+/// The gesture uses global coordinates: the handle moves up as the composer grows, so in local
+/// coordinates the same mouse position yields a growing translation, a feedback loop that made
+/// the panel shake while dragging.
 private struct ResizeGrabber: View {
   let isDragging: Bool
   let onChanged: (CGFloat) -> Void
@@ -478,7 +454,7 @@ private struct ResizeGrabber: View {
   let onReset: () -> Void
 
   @State private var hovering = false
-  /// 光标是否已入栈。push/pop 必须配对，否则拖到手柄外面松手会把栈弄乱。
+  /// push and pop must pair up, or releasing outside the handle corrupts the cursor stack
   @State private var cursorPushed = false
 
   var body: some View {
@@ -487,7 +463,7 @@ private struct ResizeGrabber: View {
       .frame(width: 34, height: 3.5)
       .opacity(isDragging ? 0.7 : (hovering ? 0.42 : 0))
       .padding(.top, 5)
-      // 命中区比视觉大得多：3.5pt 高的东西直接拖是拖不住的
+      // much larger hit area: a 3.5 pt bar can't be grabbed
       .frame(maxWidth: .infinity).frame(height: 16)
       .contentShape(Rectangle())
       .onHover { inside in
@@ -500,14 +476,14 @@ private struct ResizeGrabber: View {
           .onEnded { _ in onEnded() }
       )
       .onChange(of: isDragging) { _, dragging in
-        // 拖动中光标可能已经移出手柄（手柄自己在动），这时不能把光标收回去
+        // the handle itself moves, so the cursor may leave it mid-drag; keep the cursor until the drag ends
         syncCursor(active: dragging || hovering)
       }
       .onDisappear { syncCursor(active: false) }
       .onTapGesture(count: 2) { onReset() }
       .help(L("拖动调整高度，双击恢复自动", "Drag to resize; double-click to reset"))
-      // 只给不影响布局的属性上动画。高度本身绝不能带动画 ——
-      // 拖动时每帧都在改它，动画会让它永远在追上一帧的值，看起来就是发飘。
+      // Animate only properties that don't affect layout. The height changes every frame while
+      // dragging; animating it would always trail the pointer.
       .animation(.easeOut(duration: 0.14), value: hovering)
       .animation(.easeOut(duration: 0.14), value: isDragging)
   }
@@ -519,14 +495,8 @@ private struct ResizeGrabber: View {
   }
 }
 
-/// 项目内的对话切换条。
-///
-/// **这是面板里唯一一处 chrome，它是挣来的。** 面板的设计取向是「内容优先、
-/// chrome 归零」，不放只占位不做事的模块；而这一条做的是三件没有别处可放的事：
-/// 现在在哪条对话、切到别条、开一条新的，所以收成一行，细节藏进菜单。
-///
-/// 视觉上刻意压到最轻：没有背景块、字号 11、只有一条底边发丝线 ——
-/// 它是索引，不该和对话内容抢注意力。
+/// Conversation switcher: current conversation, switch, new. The only chrome in the panel, kept to
+/// one light row with the details in a menu.
 struct ConversationBar: View {
   @ObservedObject var model: AppModel
   @State private var renaming = false
@@ -537,10 +507,8 @@ struct ConversationBar: View {
     return model.activeConversations.first { $0.id == id }
   }
 
-  /// 还没开过对话时显示什么。
-  ///
-  /// **不在这里替它建一条。** 建在发问那一刻（后端的 `ensure_conversation`
-  /// 会接上），否则光是点开 Agent 栏就会在磁盘上留下一条空对话。
+  /// Never creates one here: the backend does on the first question, otherwise opening the pane
+  /// would leave an empty conversation on disk.
   private var currentTitle: String { current?.displayTitle ?? L("新对话", "New Chat") }
 
   var body: some View {
@@ -591,7 +559,7 @@ struct ConversationBar: View {
     }
   }
 
-  /// 只有一条时不报条数 —— 「1 条对话」是句废话。
+  /// no count for a single conversation
   private var countLabel: String? {
     let total = model.activeConversations.count
     return total > 1 ? L("\(total) 条", "\(total) chats") : nil
@@ -605,7 +573,7 @@ struct ConversationBar: View {
         Button {
           model.selectConversation(conversation.id)
         } label: {
-          // 勾出当前这条。菜单里没有别的办法说明"你在这儿"
+          // checkmark: the menu has no other way to say "you are here"
           Label(
             conversation.displayTitle,
             systemImage: conversation.id == model.activeConversationID ? "checkmark" : "")
@@ -627,42 +595,18 @@ struct ConversationBar: View {
   }
 }
 
-// MARK: - 用量与上下文余量
+// MARK: - Usage
 
-/// 输入区底部那一行：**这一轮花了多少、窗口还剩多少**。
-///
-/// 三个数字的分量不一样，所以长相也不一样：
-///
-/// - **余量**最要紧 —— 它决定「这段对话还能不能继续」，所以给它一条真的进度条，
-///   并且过了七成变琥珀、过了九成变红。数字本身反而次要，一眼看条就够。
-/// - **缓存命中**报**比例**而不是绝对值。「缓存 54848」要和输入量心算一下才有意义，
-///   「缓存 97%」直接就是结论 —— 而这正是这个产品最该盯的一个指标
-///   （一篇论文当静态前缀，命中率高才谈得上便宜）。
-/// - **进出量**用紧凑写法（56.4K），它只是量级参考，占不了主位。
-///
-/// 窗口没配就**不画条**，只报用量。猜一个窗口比不显示更糟：用户会照着一个
-/// 假的余量规划对话，直到某次突然撞上 CONTEXT_WINDOW_EXCEEDED。
+/// Totals for this turn: tokens in, out, and cached. This is cost; window occupancy is ContextMeter.
+/// Cache hits are shown as a ratio, which is the conclusion people want; amounts are compact
+/// (56.4K) since they are only for scale.
 struct UsageMeter: View {
   let usage: AgentUsage
-  /// 当前 provider 声明的上下文窗口。nil 表示没配。
-  var window: Int?
 
-  /// 这一轮实际送进模型的量（缓存命中的那部分也占窗口）。
+  /// everything sent to the model this turn, cached part included
   private var consumed: Int { usage.input + usage.cacheRead }
 
-  private var ratio: Double {
-    guard let window, window > 0 else { return 0 }
-    return min(1, Double(consumed) / Double(window))
-  }
-
-  /// 七成之前是安静的绿，之后开始提醒 —— 颜色是这里唯一的告警手段。
-  private var tint: Color {
-    if ratio >= 0.9 { return Palette.danger }
-    if ratio >= 0.75 { return ActivityCard.amber }
-    return Palette.accent
-  }
-
-  /// 紧凑记数：56400 → 56.4K，1200000 → 1.2M。
+  /// 56400 -> 56.4K, 1200000 -> 1.2M
   static func compact(_ value: Int) -> String {
     if value >= 1_000_000 {
       let millions = Double(value) / 1_000_000
@@ -677,57 +621,30 @@ struct UsageMeter: View {
     return "\(value)"
   }
 
-  /// 缓存命中率：命中的 token 占送进去总量的比例。
+  /// cached share of all input tokens
   private var cacheHit: Int? {
     guard consumed > 0, usage.cacheRead > 0 else { return nil }
     return Int((Double(usage.cacheRead) / Double(consumed) * 100).rounded())
   }
 
   var body: some View {
-    HStack(spacing: 8) {
-      if let window, window > 0 {
-        HStack(spacing: 5) {
-          gauge
-          Text("\(Self.compact(consumed)) / \(Self.compact(window))")
-            .font(.system(size: 9.5, design: .monospaced))
-            .foregroundStyle(ratio >= 0.75 ? tint : Palette.inkFaint)
-            .monospacedDigit()
-        }
-        .help(L("这一轮送进模型 \(consumed.formatted()) token，窗口 \(window.formatted()) —— 已用 \(Int(ratio * 100))%",
-                "This turn sent \(consumed.formatted()) tokens; the window is \(window.formatted()) — "
-                  + "\(Int(ratio * 100))% used"))
-      }
-
-      if !usage.isEmpty {
-        HStack(spacing: 6) {
-          // 配了窗口时**不再报一遍输入量** —— 「56K / 1.0M」左边那个数
-          // 就是它，两处说同一件事只是在窄栏里抢宽度。
-          if window == nil || window == 0 {
-            flow("arrow.down", Self.compact(consumed))
-          }
-          flow("arrow.up", Self.compact(usage.output))
-          if let cacheHit {
-            Text(L("缓存 \(cacheHit)%", "Cache \(cacheHit)%"))
-              .font(.system(size: 9, weight: .medium))
-              .foregroundStyle(Palette.accent)
-              .padding(.horizontal, 5).padding(.vertical, 1.5)
-              .background(Palette.accent.opacity(0.12), in: Capsule())
-              .help(L("送进去的 \(consumed.formatted()) token 里有 \(usage.cacheRead.formatted()) 命中了 prompt 缓存",
-                      "\(usage.cacheRead.formatted()) of the \(consumed.formatted()) tokens sent hit the prompt cache"))
-          }
+    if !usage.isEmpty {
+      HStack(spacing: 6) {
+        flow("arrow.down", Self.compact(consumed))
+        flow("arrow.up", Self.compact(usage.output))
+        if let cacheHit {
+          Text(L("缓存 \(cacheHit)%", "Cache \(cacheHit)%"))
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(Palette.accent)
+            .padding(.horizontal, 5).padding(.vertical, 1.5)
+            .background(Palette.accent.opacity(0.12), in: Capsule())
+            .help(L("送进去的 \(consumed.formatted()) token 里有 \(usage.cacheRead.formatted()) 命中了 prompt 缓存",
+                    "\(usage.cacheRead.formatted()) of the \(consumed.formatted()) tokens sent hit the prompt cache"))
         }
       }
+      .animation(.easeOut(duration: 0.25), value: consumed)
+      .animation(.easeOut(duration: 0.25), value: usage.output)
     }
-    .animation(.easeOut(duration: 0.25), value: consumed)
-    .animation(.easeOut(duration: 0.25), value: usage.output)
-  }
-
-  private var gauge: some View {
-    ZStack(alignment: .leading) {
-      Capsule().fill(Palette.inkFaint.opacity(0.16))
-      Capsule().fill(tint).frame(width: max(2, 52 * ratio))
-    }
-    .frame(width: 52, height: 4)
   }
 
   private func flow(_ symbol: String, _ text: String) -> some View {
@@ -739,10 +656,7 @@ struct UsageMeter: View {
   }
 }
 
-/// `files/` 里一份材料的小标签。
-///
-/// 指过去才露出叉号 —— 常驻一个删除按钮会让这一排看起来像待办清单，
-/// 而它其实只是「项目里有这些东西」的陈述。
+/// The remove button only shows on hover, so the row reads as contents rather than a to-do list.
 struct AttachmentChip: View {
   let file: ProjectFile
   let onRemove: () -> Void
@@ -755,8 +669,7 @@ struct AttachmentChip: View {
       Text(file.name)
         .font(.system(size: 10.5)).foregroundStyle(Palette.ink)
         .lineLimit(1).truncationMode(.middle)
-        // 上限给**文字**，不是给整张标签 —— 给标签的话短名字也会被撑到
-        // 190pt 宽，一排下来中间全是空，看着像没对齐。
+        // cap the text, not the chip, or short names get stretched to the full width
         .frame(maxWidth: 130)
         .fixedSize(horizontal: true, vertical: false)
       if hovering {
@@ -777,7 +690,7 @@ struct AttachmentChip: View {
     .animation(.easeOut(duration: 0.12), value: hovering)
   }
 
-  /// 按扩展名给个图标。认不出来就是一张纸 —— 不必穷举。
+  /// unknown types get a plain page
   static func icon(for name: String) -> String {
     switch (name as NSString).pathExtension.lowercased() {
     case "pdf": return "doc.richtext"

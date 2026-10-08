@@ -1,8 +1,8 @@
 import SwiftUI
 
-// MARK: - 错误与提示
+// MARK: - Errors and notices
 
-/// 失败卡片。**每一类都要有自己的下一步建议**，不要都退化成「出错了」。
+/// Each kind of failure gets its own next step, never just "something went wrong".
 struct FailureCard: View {
   let code: String
   let message: String
@@ -72,8 +72,6 @@ struct FailureCard: View {
   }
 }
 
-// 原先是 file-private。拆文件之后用它的视图在别的文件里，
-// 只能收窄到模块内可见。
 struct NoticeLine: View {
   let text: String
   var body: some View {

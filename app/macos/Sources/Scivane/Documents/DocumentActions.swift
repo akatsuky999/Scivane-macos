@@ -22,14 +22,8 @@ struct DocumentActions: View {
     }
 }
 
-/// 字号。**两档分开**：正文是论文，对话是回答。
-///
-/// 两者的舒适字号本来就不同 —— 论文要长时间读、对话是一眼扫完再往下；
-/// 而且正文那栏是衬线、对话那栏是无衬线，同一个数字在两边看起来也不一样大。
-/// 共用一个滑块的结果必然是"调好了一边、另一边变难看"。
-///
-/// 范围都比先前宽（正文 14–22 → 13–28）：14 起跳对 4K 屏上的老花眼是不够的，
-/// 而 22 封顶让"想只看一小段、把字调很大"这种读法根本做不到。
+/// Two separate sizes: the paper is read at length in a serif face, answers are scanned in a sans
+/// one. A shared slider always leaves one side looking wrong.
 struct ReadingOptions: View {
     @AppStorage("readerFontSize") private var readerSize = 17.0
     @AppStorage("agentFontSize") private var agentSize = 13.5
@@ -44,7 +38,7 @@ struct ReadingOptions: View {
         }.padding(18).frame(width: 248).tint(Palette.accent)
     }
 
-    /// 两条滑块共用一种排布：标题 + 当前值、大小两个 A、双击标题恢复默认。
+    /// title and value, small and large A, double-click the title to reset
     private func slider(
         title: String, value: Binding<Double>, range: ClosedRange<Double>,
         serif: Bool, reset: Double
@@ -53,7 +47,7 @@ struct ReadingOptions: View {
             HStack {
                 Text(title).font(.uiTitle)
                 Spacer()
-                // 半号也要显示得出来（对话默认就是 13.5），所以不取整
+                // not rounded: half sizes occur (the conversation default is 13.5)
                 Text(value.wrappedValue == value.wrappedValue.rounded()
                      ? "\(Int(value.wrappedValue))" : String(format: "%.1f", value.wrappedValue))
                     .font(.uiMeta).foregroundStyle(Palette.inkFaint)

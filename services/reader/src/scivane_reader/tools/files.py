@@ -1,15 +1,8 @@
-"""项目内的文件工具：read / write / edit / glob / grep。
+"""File tools inside a project: read / write / edit / glob / grep.
 
-**五个工具一条入口**：全部走 `projects/workspace.py` 的 `resolve()`，
-没有任何一个自己拼路径。那个函数是 agent 侧文件访问的唯一边界 ——
-一旦这里有第二条路，边界就只在其中一条上成立，而漏掉的那条不会报错。
-
-越界一律拒绝，**绝不静默截断回项目内**：把路径悄悄夹回来会让 agent 以为
-自己写成功了，实际写去了别处。拒绝的错误文本会作为结果交回模型，
-模型看到「越界」通常下一轮就改对了。
-
-`notes/` 的写入需要用户确认，这条由 `resolve()` 判定，确认状态从
-`ToolContext.confirmed` 里来 —— 按调用携带，和沙箱策略同一个路子。
+All five go through workspace.resolve(), never building paths themselves. Out-of-bounds paths
+are refused, never clamped back into the project (that would report success for a write that
+went elsewhere). Writes to notes/ need confirmation, carried per call in ToolContext.confirmed.
 """
 
 from __future__ import annotations
@@ -30,12 +23,10 @@ from .definition import (
 
 __all__ = ["file_tools", "READ_MAX_LINES", "GREP_MAX_HITS", "DIFF_MAX_LINES"]
 
-#: `read` 自己的上限。它是「自带上限」那类工具，所以结果不落盘
-#: （落盘会造成读文件又读回自己的循环，见 results.py）。
+#: read limits itself, so its results never spill (see results.py)
 READ_MAX_LINES = 2_000
 GREP_MAX_HITS = 200
-#: 单个文件读取上限。论文正文十万 token 也就几百 KB，超过这个数的八成是
-#: 二进制或日志，整块读进上下文没有意义。
+#: a paper's text is a few hundred KB; anything much larger is usually binary or a log
 READ_MAX_BYTES = 2_000_000
 
 
@@ -46,10 +37,8 @@ def _root(context: ToolContext) -> Path:
 
 
 def _resolve(context: ToolContext, raw: object, *, write: bool = False) -> Path:
-    """解析并检查一个 agent 给的路径。
-
-    `WorkspaceError` 带稳定 code（OUT_OF_BOUNDS / READ_DENIED / WRITE_DENIED /
-    NEEDS_CONFIRMATION），原样转成 `ToolError` —— 码不变，上层与模型都据码判断。
+    """Resolve and check an agent-supplied path. WorkspaceError codes pass through unchanged as
+    ToolError codes.
     """
     if not isinstance(raw, str) or not raw.strip():
         raise ToolError("path 必须是非空字符串", "INVALID_ARGS")
@@ -82,7 +71,7 @@ async def _read(arguments: dict[str, object], context: ToolContext) -> ToolOutco
     offset = _as_int(arguments.get("offset"), 0)
     limit = _as_int(arguments.get("limit"), READ_MAX_LINES)
     window = lines[offset : offset + min(limit, READ_MAX_LINES)]
-    # 带行号 —— edit 要靠它定位，模型引用正文时也需要说得出位置
+    # line numbers: edit locates text by them and citations need positions
     body = "\n".join(f"{offset + i + 1:>6}\t{line}" for i, line in enumerate(window))
     more = len(lines) - (offset + len(window))
     if more > 0:
@@ -90,25 +79,16 @@ async def _read(arguments: dict[str, object], context: ToolContext) -> ToolOutco
     return ToolOutcome(body or "[空文件]", detail={"lines": len(lines)})
 
 
-#: 一次改动最多回传多少行 diff。
-#:
-#: 这不是省流量，是**护界面**：`write` 覆盖一份两万行的正文时，全量 diff
-#: 会让对话流里塞进两万行、每行一个 Text —— 那正是把主线程占满的那条路
-#: （见 Swift 侧 `ActivityCard.detail` 的实测表）。超出就截断并标明。
+#: Cap on diff lines returned per change. Protects the UI: overwriting a 20,000-line text would
+#: otherwise push 20,000 rows into the transcript. Truncation is marked.
 DIFF_MAX_LINES = 400
-#: 改动前后各留几行上下文。三行是 `diff -u` 的默认值，够认出位置又不喧宾夺主。
+#: context lines around a change, as in `diff -u`
 DIFF_CONTEXT = 3
 
 
 def _diff(before: str, after: str, path: str) -> dict[str, object]:
-    """把一次改动译成**给界面画的**结构化 diff。
-
-    为什么不直接给 unified diff 文本：那样界面只能当成一段等宽文字贴上去，
-    行号、增删着色、折叠都做不了。拆成 `(kind, old_no, new_no, text)` 之后，
-    渲染端才有东西可画，界面可以据此显示行号、增删和折叠。
-
-    只带**变化附近**的行（前后各 `DIFF_CONTEXT` 行）。整文件回传的话，
-    改一个字也要传一整份正文，而用户想看的从来只是变了什么。
+    """A change as a structured diff for the UI: (kind, old_no, new_no, text) rows, so it can show line
+    numbers, colours and folds. Only lines near the change, never the whole file.
     """
     old_lines = before.splitlines()
     new_lines = after.splitlines()
@@ -120,15 +100,14 @@ def _diff(before: str, after: str, path: str) -> dict[str, object]:
 
     def push(kind: str, old_no: int | None, new_no: int | None, text: str,
              skipped: int | None = None) -> bool:
-        """返回 False 表示已经到顶，别再加了。"""
+        """False when the cap is reached."""
         nonlocal truncated
         if len(rows) >= DIFF_MAX_LINES:
             truncated = True
             return False
         row: dict[str, object] = {"kind": kind, "old": old_no, "new": new_no, "text": text}
         if skipped is not None:
-            # 这一行只给界面看。工具执行期语言钉在中文，`text` 因而总是中文 ——
-            # 带上数字，界面按自己的语言说；`text` 留给日志与不认这个字段的旧界面
+            # for the UI only: tool execution is pinned to Chinese, so the number lets the UI phrase it
             row["skipped"] = skipped
         rows.append(row)
         return True
@@ -136,7 +115,7 @@ def _diff(before: str, after: str, path: str) -> dict[str, object]:
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             span = i2 - i1
-            # 只留贴着改动的那几行：块很短就整段留下，长了就掐头去尾
+            # keep only lines next to a change: short hunks whole, long ones trimmed
             keep: list[int] = []
             if span <= DIFF_CONTEXT * 2:
                 keep = list(range(i1, i2))
@@ -176,8 +155,7 @@ async def _write(arguments: dict[str, object], context: ToolContext) -> ToolOutc
     if not isinstance(content, str):
         raise ToolError("content 必须是字符串", "INVALID_ARGS")
     existed = target.is_file()
-    # 覆盖之前先读一份 —— 界面要画的是「变了什么」，而不是「现在是什么」。
-    # 读失败不该让写失败：diff 是附加信息，不是这次调用的目的。
+    # read the old content first so the UI can show what changed; a failed read never fails the write
     before = ""
     if existed:
         try:
@@ -212,13 +190,9 @@ async def _edit(arguments: dict[str, object], context: ToolContext) -> ToolOutco
         raise ToolError("old_text 在文件里找不到 —— 先 read 确认原文", "NO_MATCH")
     every = arguments.get("replace_all") is True
     if hits > 1 and not every:
-        # **默认只改唯一的那一处。** 审校正文时「改掉所有同样的串」多数时候
-        # 是错的，而错了之后很难发现改坏了哪里。
-        #
-        # 但错误消息必须给出**两条**出路。早先只说「多带一些上下文」，
-        # 模型遇到「整篇都拼错的术语」这种本该全量替换的情况就没路可走，
-        # 于是转头去 reocr 重跑整页 —— 代价大三个数量级，而且会覆盖掉
-        # 用户手工修过的行。实机报过这个。
+        # Only a unique match is replaced by default: replacing every occurrence while proofreading is
+        # usually wrong and hard to spot. The error offers both ways out (more context, or replace_all);
+        # with only the first, models re-ran OCR on whole pages to fix a misspelt term.
         raise ToolError(
             f"old_text 出现了 {hits} 次，不唯一。两条路："
             f"要改的只是其中一处就多带几行上下文让它唯一；"
@@ -238,22 +212,11 @@ async def _edit(arguments: dict[str, object], context: ToolContext) -> ToolOutco
 
 
 def normalise_glob(pattern: str) -> str:
-    """把 `**` 翻成 pathlib 听得懂的样子。
+    """Make a trailing `**` match files, as bash (globstar), git and ripgrep do.
 
-    **实机踩过（2026-09-21）。** 模型写 `glob("code/**")` 想列出 `code/` 下所有文件，
-    拿到「没有匹配」，于是告诉用户「`code/` 是空的」—— 而那里躺着一个 11 个文件的
-    git 克隆。下一步 `fetch_repo` 报 `EXISTS` 才拆穿。
-
-    根因是 **pathlib 的 `**` 只匹配目录**，而这个工具只收 `is_file()`：
-
-        Path.glob("code/**")    → ['code', 'code/SOTER', 'code/SOTER/soter', …]  全是目录
-        Path.glob("code/**/*")  → 目录 + 文件
-
-    而模型的直觉来自 bash（开了 globstar）、git、ripgrep —— 那几家的 `code/**`
-    **都匹配文件**。工具的语义和模型的直觉对不上时，该改的是工具：
-    一个「找文件」的工具，不该在最自然的写法上回答「没有文件」。
-
-    只动末尾那一段 `**`，中间的 `code/**/*.py` 原样不碰。
+    pathlib's `**` only matches directories, and this tool keeps only files, so `code/**` found
+    nothing and the model reported a cloned repository as empty. Only a trailing `**` is changed;
+    `code/**/*.py` stays as is.
     """
     cleaned = pattern.rstrip("/")
     if not cleaned:
@@ -262,7 +225,7 @@ def normalise_glob(pattern: str) -> str:
 
 
 async def _glob(arguments: dict[str, object], context: ToolContext) -> ToolOutcome:
-    # 走一整个 code/ 仓库可能要几百毫秒，别占着事件循环
+    # walking a whole repository can take hundreds of ms; keep it off the event loop
     return await asyncio.to_thread(_glob_sync, arguments, context)
 
 
@@ -272,13 +235,13 @@ def _glob_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
     if not isinstance(pattern, str) or not pattern:
         raise ToolError("pattern 必须是非空字符串", "INVALID_ARGS")
     hits: list[str] = []
-    #: 匹配上但不是文件的。**空结果时必须把它说出来** —— 「没有匹配」会被读成
-    #: 「这个目录是空的」，而那正是实机上误导过模型的那句话。
+    #: Matches that aren't files. An empty result must mention them, or "no matches" reads as
+    #: "this directory is empty".
     folders: list[str] = []
     effective = normalise_glob(pattern)
     for path in sorted(root.glob(effective)):
         try:
-            # 每一条都过一遍边界：glob 可能顺着符号链接走到项目外
+            # check every match: glob can follow a symlink out of the project
             workspace.resolve(root, path.relative_to(root))
         except (workspace.WorkspaceError, ValueError):
             continue
@@ -299,7 +262,7 @@ def _glob_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
 
 
 async def _grep(arguments: dict[str, object], context: ToolContext) -> ToolOutcome:
-    # 走一整个 code/ 仓库可能要几百毫秒，别占着事件循环
+    # walking a whole repository can take hundreds of ms; keep it off the event loop
     return await asyncio.to_thread(_grep_sync, arguments, context)
 
 
@@ -317,8 +280,7 @@ def _grep_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
     base = _resolve(context, where) if isinstance(where, str) and where else root
     glob_pattern = arguments.get("glob")
     candidates = (
-        # 同 glob 工具：`code/**` 在 pathlib 下只匹配目录，不规范化的话
-        # 这里会静默地一个文件都不搜。
+        # as in glob: without normalising, `code/**` would silently search no files
         base.glob(normalise_glob(glob_pattern))
         if isinstance(glob_pattern, str) and glob_pattern
         else base.rglob("*")
@@ -382,7 +344,7 @@ def file_tools() -> tuple[ToolDef, ...]:
             run=_read,
             read_only=True,
             concurrency_safe=True,
-            # 自带行数上限，结果绝不落盘 —— 否则就是读文件又读回自己
+            # limits itself; never spills, or read would end up reading its own spill file
             max_result_chars=UNLIMITED_RESULT,
         ),
         ToolDef(

@@ -1,15 +1,13 @@
 import SwiftUI
 import WebKit
 
-/// 右栏：Markdown 渲染。
-/// 用 WKWebView 而不是原生 Text —— PaddleOCR-VL 会吐 LaTeX 公式和 HTML 表格，
-/// 这两样纯 SwiftUI 排不出来。
+/// Text pane: rendered Markdown in a WKWebView, since the OCR output contains LaTeX and HTML
+/// tables that SwiftUI can't lay out.
 struct MarkdownWebView: NSViewRepresentable {
 
     @ObservedObject var model: AppModel
-    /// 界面语言（空态那两句、每页的页码标签）。**由父视图显式传进来**：它一变，
-    /// 这个值就不同，SwiftUI 一定会走一遍 `updateNSView` —— 不去赌 Observation
-    /// 对 AppKit 视图的追踪。
+    /// Passed in explicitly so a change always goes through updateNSView, rather than relying on
+    /// Observation tracking inside an AppKit view.
     var language: AppLanguage = .zh
     @AppStorage("readerFontSize") private var fontSize = 17.0
     @Environment(\.colorScheme) private var colorScheme
@@ -25,18 +23,18 @@ struct MarkdownWebView: NSViewRepresentable {
 
         let web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = context.coordinator
-        web.setValue(false, forKey: "drawsBackground")   // 让 body 背景透出来，避免白闪
+        web.setValue(false, forKey: "drawsBackground")   // let the body background show through; avoids a white flash
         web.allowsMagnification = true
         web.allowsBackForwardNavigationGestures = false
 
         context.coordinator.web = web
         context.coordinator.load()
 
-        // 把「调 JS」的能力交给 model，视图层不持有渲染逻辑
+        // the model calls JS through this; the view holds no rendering logic
         model.renderBridge = { [weak coordinator = context.coordinator] fn, args in
             coordinator?.call(fn, args)
         }
-        // WebView 建好之前到达的页要补回来
+        // replay pages that arrived before the WebView existed
         model.replayIntoRenderer()
         return web
     }
@@ -63,14 +61,14 @@ struct MarkdownWebView: NSViewRepresentable {
 
         func load() {
             guard let html = WebResources.viewerHTML else {
-                assertionFailure("viewer.html 没打进 bundle")  // 不翻：开发者看的
+                assertionFailure("viewer.html 没打进 bundle")  // 不翻: developer-facing
                 return
             }
-            // 授予同目录读权限，vendor/ 下的 KaTeX 与 markdown-it 才加载得到
+            // read access to the directory, so KaTeX and markdown-it under vendor/ can load
             web?.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
         }
 
-        /// 页面还没 ready 的调用先攒着，ready 后按序补发 —— 否则首页结果会丢
+        /// Calls before the page is ready are queued and replayed in order, or the first page is lost.
         func call(_ fn: String, _ args: [Any]) {
             guard ready else { pending.append((fn, args)); return }
             let encoded = args.map(Self.jsLiteral).joined(separator: ", ")
@@ -92,7 +90,7 @@ struct MarkdownWebView: NSViewRepresentable {
             call("setTheme", [newTheme])
         }
 
-        /// 页面模板本身是中文那一套，所以起点记成中文：中文界面一次都不用调。
+        /// the page template starts in Chinese
         private var language: AppLanguage = .zh
 
         func apply(language newLanguage: AppLanguage) {
@@ -125,7 +123,7 @@ struct MarkdownWebView: NSViewRepresentable {
             }
         }
 
-        /// JS 字面量编码。字符串走 JSON 序列化，反斜杠和引号都能安全穿过。
+        /// Strings go through JSON serialisation, so backslashes and quotes pass safely.
         private static func jsLiteral(_ value: Any) -> String {
             switch value {
             case let s as String:

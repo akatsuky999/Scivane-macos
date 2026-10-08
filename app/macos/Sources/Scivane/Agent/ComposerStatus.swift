@@ -1,18 +1,18 @@
 import SwiftUI
 
-/// 输入框底下那一行：**在用哪张卡 · 想多久 · 窗口还剩多少 · 缓存命中多少**。
-///
-/// **为什么放在这里而不是设置里**：这四件事都是「这一轮要花多少时间和钱」的
-/// 直接因素，而决定要不要换的那一刻，人正盯着输入框。塞进设置页的代价是
-/// 每次都要离开对话、翻两层、再回来 —— 于是实际上没人会去调。
-///
-/// 一行装得下，是因为每项都压成了最短形态：卡片名 + 模型名、四个字的档位、
-/// `56K/1.0M` 的余量、一个百分数。**想知道细节就 hover**（都挂了 help）。
+/// The line under the composer: card, reasoning level, context occupancy, this turn's usage.
+/// These drive a turn's time and cost and are decided while looking at the composer, so they live
+/// here rather than in Settings. Each item is in its shortest form; details are in the help
+/// tooltips and the context breakdown.
 struct ComposerStatusBar: View {
   @ObservedObject var model: AppModel
   let usage: AgentUsage
-  /// 跑动中不给换 —— 换了也只在下一轮生效，而界面上看起来像是立刻换了。
+  /// nil for the librarian, which draws nothing
+  var context: ContextReport? = nil
+  /// locked while running: a change would only apply next turn but look immediate
   let locked: Bool
+  /// only for project conversations
+  var onCompact: () -> Void = {}
 
   private var current: AppModel.ProviderSummary? {
     model.providers.first { $0.id == model.activeProviderID }
@@ -22,11 +22,12 @@ struct ComposerStatusBar: View {
     HStack(spacing: 10) {
       picker
       if current != nil { reasoning }
-      UsageMeter(usage: usage, window: model.activeContextWindow)
+      ContextMeter(report: context, busy: locked, onCompact: onCompact)
+      UsageMeter(usage: usage)
     }
   }
 
-  // MARK: - 换卡
+  // MARK: - Card
 
   private var picker: some View {
     Menu {
@@ -34,9 +35,7 @@ struct ComposerStatusBar: View {
         Button {
           model.useProvider(entry.id)
         } label: {
-          // 只报昵称。**模型 id 又长又像乱码**（`~deepseek/deepseek-flash-latest`），
-          // 挂在菜单里把一行撑到不可读，而昵称是用户自己在设置里起的、
-          // 本来就是给自己认的那个名字。
+          // Nickname only: model ids are long and unreadable in a menu.
           Label(
             AppModel.hasKey(entry)
               ? entry.displayName : L("\(entry.displayName) · 未配置 key", "\(entry.displayName) · no key"),
@@ -48,10 +47,8 @@ struct ComposerStatusBar: View {
       }
     } label: {
       HStack(spacing: 4) {
-        // **「不能用」必须写进图标和这一行字本身。** macOS 的 Menu 标签
-        // 会被系统的按钮样式接管：自定义前景色不生效，而且**只认第一个图标
-        // 加第一个文本**，再多一个 Text 会被静静丢掉（两条都是实测踩的）。
-        // 所以警告并进 `title` 里，而不是另起一段。
+        // macOS Menu labels take only the first image and the first Text and ignore custom colours, so
+        // the warning goes into the icon and the title itself.
         Image(systemName: usable ? "cpu" : "exclamationmark.triangle.fill")
           .font(.system(size: 9.5))
         Text(title).font(.system(size: 10)).lineLimit(1)
@@ -87,10 +84,9 @@ struct ComposerStatusBar: View {
              "This chat uses “\(current.displayName)” · \(current.model)")
   }
 
-  // MARK: - 推理预算
+  // MARK: - Reasoning
 
-  /// 四档直接点，不进设置页。**这是等待时间最大的那个旋钮** ——
-  /// 实测一轮 121 秒里模型生成占 113 秒（93.3%）。
+  /// Four levels right here, not in Settings: generation is most of the wait.
   private var reasoning: some View {
     Menu {
       ForEach(AppModel.reasoningLevels, id: \.value) { level in
@@ -104,8 +100,7 @@ struct ComposerStatusBar: View {
               credentialRef: current.credentialRef)
           }
         } label: {
-          // 菜单里只给档位名。**一行一句解释会把选择变成阅读** ——
-          // 要细节的人 hover 整个控件就有（见 help）。
+          // level names only; the explanation is in the help tooltip
           Label(level.label, systemImage: level.value == current?.reasoning ? "checkmark" : "")
         }
       }
@@ -128,8 +123,7 @@ struct ComposerStatusBar: View {
             "Reasoning budget · currently “\(reasoningLabel)”: \(reasoningDetail)"))
   }
 
-  /// 只写档位本身（关 / 低 / 中 / 高）。加前缀试过「想中」，读起来像半句话；
-  /// 旁边那个脑子图标已经说清楚这是什么了。
+  /// just the level; the brain icon says what it is
   private var reasoningLabel: String {
     let value = current?.reasoning ?? AppModel.ProviderDefaults.reasoning
     return AppModel.reasoningLevels.first { $0.value == value }?.label ?? value

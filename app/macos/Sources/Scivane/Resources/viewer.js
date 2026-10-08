@@ -1,14 +1,14 @@
-/* Scivane 渲染桥。Swift 侧通过 evaluateJavaScript 调用 window.Scivane.*，
-   页面反过来用 webkit.messageHandlers.scivane 汇报滚动位置。 */
+/* Rendering bridge. Swift calls window.Scivane.* through evaluateJavaScript; the page reports
+   its scroll position back through webkit.messageHandlers.scivane. */
 
 (function () {
   "use strict";
 
   const md = window.markdownit({
-    html: true,        // PaddleOCR-VL 会直接吐 HTML 表格，必须放行
+    html: true,        // the OCR model emits HTML tables
     linkify: true,
     breaks: false,
-    typographer: false // 关掉智能标点，OCR 结果要保真
+    typographer: false // no smart punctuation: OCR output must stay faithful
   });
 
 // Parse TeX before Markdown consumes underscores, braces and backslashes.
@@ -57,9 +57,8 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
   const doc = document.getElementById("doc");
   const empty = document.getElementById("empty");
 
-  /* 界面语言 —— **不是正文的语言**。正文语言按内容判、管的是断词（见 setPage），
-     两者互不相干：英文界面读中文论文、中文界面读英文论文都是常态。
-     页面模板里写的是中文那一套，App 切到英文时调 setLanguage("en")。 */
+  /* UI language, not the paper's language (which is detected from the text and drives
+     hyphenation, see setPage). The template is in Chinese; the app calls setLanguage("en"). */
   const UI = {
     zh: {
       page: function (n) { return "第 " + n + " 页"; },
@@ -101,13 +100,13 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
   let currentPage = 0;
   let observer = null;
   let suppressReport = false;
-  /** 正文语言是否已经判定（见 setPage 里那段）。 */
+  /** whether the paper's language has been decided (see setPage) */
   let langSettled = false;
 
   function post(payload) {
     try {
       window.webkit.messageHandlers.scivane.postMessage(payload);
-    } catch (e) { /* 独立打开网页调试时没有 bridge，忽略 */ }
+    } catch (e) { /* no bridge when the page is opened on its own for debugging */ }
   }
 
   function showDoc(show) {
@@ -119,15 +118,12 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
     return doc.querySelector('.page[data-page="' + index + '"]');
   }
 
-  /** 表格归一化。
-   *
-   * 模型吐回来的是裸 HTML，带 border=1 和 style='text-align:center' 这类内联样式，
-   * 会直接盖掉样式表；表头行还用的是 <td> 而不是 <th>。这里统一洗掉、补上语义，
-   * 再套一层可横向滚动的容器，避免撑破正文宽度。
-   */
+  /** Table normalisation. The model emits bare HTML with inline styles (border=1,
+   * style='text-align:center') that override the stylesheet, and header rows made of <td>.
+   * Strip them, add the semantics, and wrap the table in a horizontally scrolling container. */
   function normaliseTables(scope) {
     scope.querySelectorAll("table").forEach(function (t) {
-      // 洗掉内联样式与老式表现属性
+      // drop inline styles and presentational attributes
       t.querySelectorAll("*").forEach(function (el) {
         el.removeAttribute("style");
         el.removeAttribute("align");
@@ -138,7 +134,7 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
         t.removeAttribute(a);
       });
 
-      // 首行提升为表头，样式表里的 thead 规则才生效
+      // promote the first row to a header so the thead rules apply
       if (!t.querySelector("thead")) {
         const first = t.querySelector("tr");
         if (first && first.children.length) {
@@ -156,10 +152,8 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
         }
       }
 
-      // 数字列右对齐。一列数字左对齐是表格里最容易看出"没排过版"的地方，
-      // 而论文表格大半是数字。判据是**整列都像数字**（允许正负号、百分号、
-      // ±标准差、括号与星号），**只要有一格是文字就整列按文字处理** ——
-      // 宁可不对齐，也不能把一列文字推到右边去。
+      // Right-align numeric columns. Only when every cell looks numeric (signs, %, ± deviation,
+      // parentheses, asterisks allowed); a single text cell keeps the whole column left-aligned.
       const numeric = /^[-+±(]?\s*\d[\d\s,.]*(\s*[%‰]|\s*±\s*[\d.]+|\s*\)|\s*\*+)?$/;
       const bodyRows = Array.from(t.tBodies).reduce(function (all, b) {
         return all.concat(Array.from(b.rows));
@@ -169,7 +163,7 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
       }, 0);
       for (let c = 0; c < columnCount; c++) {
         const cells = bodyRows.map(function (r) { return r.cells[c]; }).filter(Boolean);
-        // 一格的"列"不构成一列数字，别给它上对齐
+        // a single cell isn't a column of numbers
         if (cells.length < 2) continue;
         const allNumeric = cells.every(function (cell) {
           const text = cell.textContent.trim();
@@ -197,7 +191,7 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
         throwOnError: false,
         ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
       });
-    } catch (e) { /* 单个公式坏掉不该让整页白屏 */ }
+    } catch (e) { /* one broken formula must not blank the page */ }
   }
 
   function ensureObserver() {
@@ -234,7 +228,7 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
       assetBase = url.protocol === "scivane-asset:" ? url.href : url.origin;
       resolveImages(doc);
     },
-    /** 开始一份新文档 */
+    /** start a new document */
     reset: function (total) {
       doc.innerHTML = "";
       currentPage = 0;
@@ -244,7 +238,7 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
       this.total = total || 0;
     },
 
-    /** 写入（或覆盖）某一页 */
+    /** write (or overwrite) one page */
     setPage: function (index, markdown) {
       ensureObserver();
       showDoc(true);
@@ -255,7 +249,7 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
         el.className = "page";
         el.dataset.page = String(index);
         el.id = "page-" + index;
-        // 按页码插到正确位置，乱序到达也能排好
+        // insert by page number, so pages arriving out of order still line up
         let anchor = null;
         doc.querySelectorAll(".page").forEach(function (p) {
           if (anchor === null && parseInt(p.dataset.page, 10) > index) anchor = p;
@@ -273,11 +267,10 @@ body.querySelectorAll('*').forEach(el => Array.from(el.attributes).forEach(a => 
 }));
 resolveImages(body);
 
-      // **断词要看语言。** `hyphens: auto` 只在浏览器知道是哪门语言时才生效，
-      // 而两端对齐一旦没有断词就会拉出"河流"（长单词挤出大片空白）。
-      // 页面模板写的是 `lang="zh"`，可论文绝大多数是英文 —— 按正文实际内容判一次：
-      // 汉字占比极低就按英文处理。中文本来不靠断词，判错的代价是不对称的，
-      // 所以阈值定得很低（5%）。**太短的一页说明不了什么，留到下一页再判。**
+      // Hyphenation needs the language: `hyphens: auto` only works when the browser knows it, and
+      // justified text without hyphenation opens rivers. The template says lang="zh" but most
+      // papers are English, so decide from the text: under 5% CJK means English (Chinese doesn't
+      // hyphenate, so erring towards English is cheap). Short pages decide nothing.
       if (!langSettled) {
         const sample = body.textContent || "";
         const cjk = (sample.match(/[一-鿿]/g) || []).length;
@@ -297,7 +290,7 @@ resolveImages(body);
       el.dataset.state = "done";
     },
 
-    /** 从 PDF 侧同步过来：滚到指定页，不要再回报给 Swift 造成回环 */
+    /** scroll to a page requested by the PDF side, without reporting back (no loop) */
     setDocumentBase: function (base) { documentBase = base || null; document.body.classList.toggle("markdown-document", !!documentBase); },
     scrollToPage: function (index) {
       const el = pageEl(index);
@@ -317,7 +310,7 @@ resolveImages(body);
       document.body.style.fontSize = px + "px";
     },
 
-    /** 界面语言：空态那两句与每页的页码标签。已经画好的页原地改标签，不重排正文。 */
+    /** UI language: the empty state and page labels; existing pages relabel without relayout */
     setLanguage: function (lang) {
       ui = UI[lang] || UI.zh;
       empty.querySelector(".empty-title").textContent = ui.emptyTitle;
@@ -328,7 +321,7 @@ resolveImages(body);
       });
     },
 
-    /** 全文搜索高亮，返回命中数 */
+    /** highlight all matches; returns the count */
     find: function (query) {
       this.clearFind();
       if (!query) return 0;

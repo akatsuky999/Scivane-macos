@@ -1,25 +1,15 @@
-"""python 执行器 —— 用 App 自带的解释器建环境，在沙箱内跑脚本。
+"""Python executor: environments built from the bundled interpreter, scripts run in the sandbox.
 
-**两层环境，都不是模型部署那一个。** OCR 的三档位置都是「只装不改」的工具，
-`config.SANDBOX_DENY_READ` 把它们全部列进了拒读名单 ——
-agent 对它们连读权限都不需要。
+Two environments, split by where they live:
 
-两层按**住在哪**分两种建法：
+- the shared analysis env (~/.scivane/runtime/analysis/: numpy, pandas, matplotlib) lives
+  outside every project where the sandbox can't write, so the host builds it on first use,
+  under a lock, writing the ready marker last;
+- per-project envs (<project>/workbench/.venv), only when a paper needs its own dependencies,
+  are created and filled inside the sandbox, with pip going through the audit proxy.
 
-- **共享分析环境**（`~/.scivane/runtime/analysis/`）—— numpy / pandas / matplotlib，
-  所有项目共用，装一次。它**住在所有项目之外，沙箱写不到那里**，所以只能由宿主端建：
-  第一次有人要用时建，加锁，完成标记最后写。这一半留在宿主端是被迫的。
-- **每项目环境**（`<项目>/workbench/.venv`）—— 论文代码真的需要独立依赖时才建。
-  它在可写根里，所以**建和装都在沙箱里**：pip 经本地审计代理出网，审计簿上看得到
-  pypi.org，装坏了也只坏这一个项目。宿主端一个字节都不往项目环境里写。
-
-**解释器是 App 自带的那一份**（`start_backend.sh` 首启拷到 `~/.scivane/runtime/python/`）。
-不找 uv、不看 PATH：Finder 起的 App 里 launchd 给的 PATH 没有 homebrew，
-`shutil.which("uv")` 在别人的机器上必然是 None —— 从前这里就是这么写的。
-
-> 从前的判断是「建环境在沙箱外，跑脚本在沙箱内」，理由是沙箱内无网、装不了包。
-> 沙箱通网之后，项目环境据此搬了进来；
-> 共享环境仍在宿主端，理由换成了「它住在项目外」。
+The interpreter is the app's bundled one (staged to ~/.scivane/runtime/python/). No uv and
+no PATH lookup: an app started from Finder has no homebrew on its PATH.
 """
 
 from __future__ import annotations
@@ -42,44 +32,38 @@ __all__ = [
     "python_argv", "run_python",
 ]
 
-#: 共享分析环境预装什么。刻意只装「读论文时确实会用到」的几样 ——
-#: 装成一个大杂烩既慢又让 agent 以为自己什么都能干。
+#: Only what paper reading actually uses; a grab bag would be slow and suggest the agent can do anything.
 ANALYSIS_PACKAGES: tuple[str, ...] = ("numpy", "pandas", "matplotlib")
 
-#: 项目内按需环境的位置。放 workbench/ 下 —— 它本来就是 agent 的落点，
-#: 而且在可写区域内；放 code/ 会和论文自己的仓库混在一起。
+#: under workbench/: writable, and apart from the paper's own repo in code/
 _PROJECT_ENV_SUBDIR = "workbench/.venv"
 
-#: 产物默认落点。python 执行器的 cwd 就是它，所以脚本里
-#: `savefig("fig.png")` 这种相对路径天然落在这里。
+#: the python executor's cwd, so a relative savefig("fig.png") lands here
 _OUTPUTS_SUBDIR = "workbench/outputs"
 
-#: 共享分析环境建完之后才写的标记。**没有它就是没建完** —— 目录再全也不算，
-#: 下次整个重来（同 OCR 组件的 `runtime.json`：最后写）。
+#: Written last when the shared env is complete; without it the env counts as unfinished
+#: and is rebuilt.
 _READY_MARKER = ".scivane-ready"
 
-#: pip 装包的公共参数。
-#:
-#: `--no-input`：沙箱里没有人能回答提示，等下去只会等到超时。
-#: `--no-cache-dir`：装好的环境就是产物。宿主端那一次若带缓存，写的是用户自己的
-#: `~/Library/Caches/pip`（不是 App 的地方）；沙箱里那一次则会在项目目录里平白多存
-#: 一份 wheel（实测 sympy 6.6 MB，torch 是这个的几十倍）—— 而项目目录是用户数据。
+#: --no-input: nobody can answer a prompt in the sandbox.
+#: --no-cache-dir: the env itself is the artefact; a cache would duplicate wheels into the user's
+#: project (or into ~/Library/Caches/pip on the host).
 _PIP_INSTALL: tuple[str, ...] = (
     "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
     "--no-cache-dir", "--progress-bar", "off",
 )
 
-#: 建一个空 venv 的上限。实测 0.9 秒（含 ensurepip，不联网），给足余量。
+#: creating an empty venv takes about a second (ensurepip, offline)
 _VENV_TIMEOUT = 120.0
 
-# 两个项目的 agent 同时第一次跑 python 时，共享环境只建一份。
-# 后端是单进程（pidfile 管着），一把线程锁就够 —— 建环境跑在 to_thread 的工作线程里。
+# Two projects running python for the first time build the shared env once. The backend is a
+# single process, so a thread lock suffices.
 _ANALYSIS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
 class PythonEnv:
-    """一个 venv 的位置。"""
+    """Location of a venv."""
 
     root: Path
 
@@ -97,11 +81,9 @@ class PythonEnv:
 
 
 def interpreter() -> Path:
-    """用哪个解释器建环境。**App 自带的那一份优先**，开发模式下还没拷出来时用当前进程的底座。
-
-    不查 PATH、不找 uv（见模块说明）。退路取**底座**而不是 `sys.executable`：
-    开发用的解释器是个 venv，住在旧部署目录里 —— 那是拒读名单上的地方。项目环境
-    是在沙箱里建的，建出来的 `bin/python` 链接到哪，沙箱就得读得到哪。
+    """Interpreter used to create environments: the bundled one, else the base of the current process
+    in development. Its base rather than sys.executable: a dev venv may live in a read-denied place,
+    and a project venv's bin/python must link to something the sandbox can read.
     """
     from .. import config
 
@@ -112,7 +94,7 @@ def interpreter() -> Path:
 
 
 def analysis_env(runtime_dir: Path | None = None) -> PythonEnv:
-    """共享分析环境的位置（不保证已经建好）。"""
+    """Where the shared analysis env lives (not necessarily built yet)."""
     if runtime_dir is not None:
         return PythonEnv(runtime_dir)
     from .. import config
@@ -123,11 +105,10 @@ def analysis_env(runtime_dir: Path | None = None) -> PythonEnv:
 def analysis_ready(
     packages: tuple[str, ...] = ANALYSIS_PACKAGES, *, runtime_dir: Path | None = None
 ) -> bool:
-    """共享分析环境建完了没有，而且装的是不是这几样。
+    """Whether the shared env is complete and has the expected packages.
 
-    标记里记着当时装了什么：将来 `ANALYSIS_PACKAGES` 多一样，老环境就不算建完，
-    会重建 —— 否则工具描述说有、import 时没有，那是这个仓库最怕的那一类静默错。
-    解释器换了小版本时 `bin/python` 的链接会断，`exists` 为假，同样会重建。
+    The marker records what was installed, so adding to ANALYSIS_PACKAGES rebuilds old envs; a minor
+    interpreter upgrade breaks bin/python and also triggers a rebuild.
     """
     env = analysis_env(runtime_dir)
     if not env.exists:
@@ -145,24 +126,14 @@ def ensure_analysis_env(
     runtime_dir: Path | None = None,
     timeout: float = 600.0,
 ) -> PythonEnv:
-    """建好共享分析环境；已经建好就什么都不做。**在宿主端做** —— 它住在所有项目之外。
+    """Build the shared analysis env on the host if it isn't built yet.
 
-    三条规矩：
+    The ready marker is written last and builds are locked. The interpreter runs with -I: the
+    backend's own PYTHONPATH (which may include numpy and pandas from the OCR component) would
+    make pip skip packages and still exit 0, failing later inside the clean sandbox. No --isolated:
+    the user's pip config (a mirror, say) helps here, and this env has no hash lock.
 
-    - **完成标记最后写。** 装到一半断掉的目录下次整个重来，而不是被当成能用的环境
-      交给沙箱 —— 那样模型会撞上一个莫名其妙的 ModuleNotFoundError。
-    - **加锁。** 两个项目同时第一次跑 python，只建一份。
-    - **`-I` 起解释器。** 后端进程自己的 PYTHONPATH（安装包的 `site/`，完整模式下末尾
-      还接着 OCR 组件的 `site/`，里面就有 numpy 和 pandas）不许漏进来：漏进来 pip 会把
-      那些包当成「已经有了」跳过，**退出码照样是 0**，等到沙箱里干净的环境 import 时
-      才炸。实测不加 `-I` 跳过了 6 个包，加了之后一个不漏。
-
-    不加 `--isolated`：用户自己的 pip 配置（比如国内镜像）在这里是帮忙，不是污染 ——
-    这一份没有哈希锁，与 OCR 组件按锁文件装是两回事。
-
-    :raises subprocess.CalledProcessError: 建或装失败 —— 原样上抛，pip 的输出
-        （网络、版本冲突）对用户是有用信息，不要吞掉。
-    :raises subprocess.TimeoutExpired: 超时。
+    Raises CalledProcessError (pip's output is useful, don't swallow it) or TimeoutExpired.
     """
     env = analysis_env(runtime_dir)
     if analysis_ready(packages, runtime_dir=runtime_dir):
@@ -170,7 +141,7 @@ def ensure_analysis_env(
     with _ANALYSIS_LOCK:
         if analysis_ready(packages, runtime_dir=runtime_dir):
             return env
-        # 上次没建完的残骸（或者标记对不上的旧环境）。这个目录归 App 管，删了会重建。
+        # leftovers of an unfinished build, or an env with an outdated marker; the app owns this dir
         shutil.rmtree(env.root, ignore_errors=True)
         env.root.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
@@ -189,20 +160,19 @@ def ensure_analysis_env(
 
 
 def project_env(project_dir: Path | str) -> PythonEnv:
-    """项目内按需环境的位置（不保证已经建好）。"""
+    """Where the project env lives (not necessarily built yet)."""
     return PythonEnv(Path(project_dir).expanduser().resolve() / _PROJECT_ENV_SUBDIR)
 
 
 def create_project_env(
     project_dir: Path | str, policy: SandboxPolicy, *, runner: Runner | None = None
 ) -> ExecResult:
-    """在**沙箱里**给这个项目建一个空 venv（带 pip，ensurepip 不联网）。
+    """Create an empty venv for the project inside the sandbox (with pip; ensurepip is offline).
 
-    实测 `(deny file-link)` 不拦 venv 的解释器链接 —— 它只管硬链接；
-    链接指向 `interpreter()`，那里在拒读名单之外。沙箱里的环境本来就是从零搭的，
-    所以这里**不加 `-I`**：加了反而会丢掉 `build_env` 特意给的 `PYTHONIOENCODING`。
+    (deny file-link) doesn't block the venv's interpreter symlink. No -I here: the sandbox env is
+    already built from scratch, and -I would drop PYTHONIOENCODING.
 
-    :raises SandboxUnavailable: 沙箱不可用 —— 不建，也不退回宿主端建。
+    Raises SandboxUnavailable when there is no sandbox; never builds on the host instead.
     """
     env = project_env(project_dir)
     active = runner if runner is not None else Runner()
@@ -219,12 +189,10 @@ def install_into_project(
     runner: Runner | None = None,
     timeout: float = 900.0,
 ) -> ExecResult:
-    """在**沙箱里**给这个项目装包：环境不在就先建，然后 pip install。
+    """Install packages into the project env inside the sandbox, creating it first if needed.
 
-    两步用的是同一份策略 —— 这一次调用的边界与联网凭据，所以 pip 的流量在审计簿上
-    归到这一次 python 调用名下。返回 pip 那一步的结果；建环境失败就返回建环境那一步。
-
-    :raises SandboxUnavailable: 沙箱不可用 —— 不装，也不退回宿主端装。
+    Both steps use this call's policy and network credential, so pip's traffic is attributed to
+    this python call. Returns pip's result, or the venv step's when that failed.
     """
     env = project_env(project_dir)
     active = runner if runner is not None else Runner()
@@ -236,10 +204,7 @@ def install_into_project(
 
 
 def python_argv(env: PythonEnv, script: Path | None = None) -> tuple[str, ...]:
-    """纯函数。`script` 为 None 时从 stdin 读程序。
-
-    `-u` 是必须的：缓冲住的话长任务在跑完之前一个字都看不到，界面上像死了。
-    """
+    """Pure. Reads the program from stdin when `script` is None; -u so long jobs show output as they go."""
     if script is not None:
         return (str(env.python), "-u", str(script))
     return (str(env.python), "-u", "-")
@@ -254,13 +219,9 @@ def run_python(
     script: Path | None = None,
     timeout: float | None = None,
 ) -> ExecResult:
-    """在沙箱内跑一段 Python。
+    """Run Python in the sandbox with workbench/outputs/ as cwd, so relative paths in scripts land there.
 
-    cwd 设成 `workbench/outputs/` —— 「产物默认落在工作台」这句话要真的成立，
-    就得让脚本里的相对路径天然指向那里，而不是靠提示词叮嘱模型。
-
-    :param code: 程序文本，从 stdin 喂进去（`script` 给出时忽略）。
-    :raises SandboxUnavailable: 沙箱不可用 —— 此时不执行，不降级。
+    Raises SandboxUnavailable when there is no sandbox; never runs unconfined.
     """
     target = env if env is not None else analysis_env()
     active = runner if runner is not None else Runner()
@@ -276,12 +237,9 @@ def run_python(
         timeout=timeout,
         extra_path=(str(target.bin_dir),),
         env_extra={
-            # 没有显示器，交互式后端会直接崩。这是离屏画图的唯一正确选择。
+            # no display: interactive backends crash
             "MPLBACKEND": "Agg",
-            # **不能叫 SCIVANE_PROJECT_ROOT。** 那个名字在 paths.py 与
-            # start_backend.sh 里指的是**代码仓库根**；这里指的是**论文项目根**。
-            # 同名不同义今天不炸，只因为沙箱子进程从不 import scivane_reader ——
-            # 自带解释器之后它就会 import，那时再发现就晚了。
+            # Not SCIVANE_PROJECT_ROOT, which elsewhere means the code repository root.
             "SCIVANE_WORKSPACE_ROOT": str(policy.workspace_root),
             "SCIVANE_OUTPUT_DIR": str(outputs),
         },

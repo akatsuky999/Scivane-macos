@@ -1,19 +1,16 @@
 import Foundation
 
-/// 「装本地 OCR」这件事在界面上的状态机。
+/// UI state machine for installing local OCR. A card rather than a modal: an install takes
+/// minutes and the user is probably reading.
 ///
-/// 入口不是一个模态框，而是正文栏顶上的一张卡（`OCRInstallCard`）—— 同批准卡的判断：
-/// 装一次要几分钟，这段时间用户很可能在读别的，不该被按住。
-///
-/// **视图直接观察这个对象**，不经过 AppModel 转发：安装时每秒四次进度，转发出去等于
-/// 每秒把整个窗口重算四次；而从 AppModel 的属性里「顺手取出来」的对象又是不被观察的。
-/// 所以卡片自己持有它，空闲时什么都不画。
+/// Views observe this object directly rather than through AppModel: progress arrives four times
+/// a second, and forwarding it would recompute the whole window each time.
 @MainActor
 final class OCRInstaller: ObservableObject {
 
     enum Phase: Equatable {
         case idle
-        /// 用户要识别，但本地 OCR 没装：给出「下载安装 / 从旧部署迁移」
+        /// recognition requested without local OCR: offer download or migration
         case offer(RuntimeClient.Status)
         case running(Run)
         case failed(code: String, message: String, method: RuntimeClient.Method)
@@ -25,14 +22,14 @@ final class OCRInstaller: ObservableObject {
         var jobID = ""
         var step = 0
         var steps = 0
-        /// 空串 = 还没到第一步；卡片显示「准备中…」（按界面语言）
+        /// empty until the first step; the card shows "Preparing..."
         var label = ""
         var done = 0
         var total = 0
-        /// nil 表示字节；pip 那一步是「包」
+        /// nil means bytes; the pip step counts packages
         var unit: String?
         var source = ""
-        /// 最近一次换源，说给用户听的那一句
+        /// the latest source switch, as told to the user
         var switched: String?
         var lastLog = ""
         var elapsed: Double = 0
@@ -42,17 +39,16 @@ final class OCRInstaller: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var status: RuntimeClient.Status?
-    /// 刚装完（或迁完）之后的第一次识别要一分钟左右：macOS 第一次加载新创建的二进制。
-    /// 不说出来的话，那一分钟看着像卡死。
+    /// The first recognition after an install takes about a minute while macOS loads the new binary.
     @Published var freshlyInstalled = false
 
-    /// 装好之后接着识别被挡下的那几份。由 AppModel 接上。
+    /// Resumes the jobs held back for OCR; set by AppModel.
     var onInstalled: (() -> Void)?
 
     var isRunning: Bool { if case .running = phase { return true }; return false }
 
     private let backend: BackendManager
-    /// 必须持有：RuntimeClient 内含 URLSession 与 delegate，被释放会中断流
+    /// must be retained: releasing it tears down its URLSession and ends the stream
     private var client: RuntimeClient?
     private var task: Task<Void, Never>?
 
@@ -60,7 +56,7 @@ final class OCRInstaller: ObservableObject {
         self.backend = backend
     }
 
-    /// 问一次后端。后端没起来时返回上一次的结果 —— 这里不负责拉起后端。
+    /// Asks the backend once; returns the last result when it isn't running. Never starts it.
     @discardableResult
     func refresh() async -> RuntimeClient.Status? {
         guard backend.state.isReady else { return status }
@@ -71,7 +67,7 @@ final class OCRInstaller: ObservableObject {
         return nil
     }
 
-    /// 识别被挡下了：在卡上给出选项。正在装的时候不打断它。
+    /// Show the options on the card; never interrupts a running install.
     func offer(_ status: RuntimeClient.Status) {
         self.status = status
         if isRunning { return }
@@ -102,7 +98,7 @@ final class OCRInstaller: ObservableObject {
     }
 
     private func apply(_ event: RuntimeClient.Event, method: RuntimeClient.Method) {
-        // 装的时候后端在干活：别让闲置计时把它停了（默认 5 分钟，正好是一次安装的量级）
+        // keep the idle stop away: its 5 minutes are about the length of an install
         backend.noteActivity()
         switch event {
         case .done(_, _, let elapsed):
@@ -150,7 +146,7 @@ final class OCRInstaller: ObservableObject {
     private func streamEnded(method: RuntimeClient.Method) {
         task = nil
         client = nil
-        // 流断了却没有收到终态：后端多半退出了。已下的部分在缓存里，重来会接着下
+        // stream ended without a final state: the backend probably exited. Retrying resumes from the cache
         if isRunning {
             phase = .failed(code: "INTERRUPTED", message: L("安装中断了（本地服务退出了？）。已下载的部分留着，重来会接着下。", "The install was interrupted (did the local service quit?). What was downloaded is kept; trying again resumes it."),
                             method: method)

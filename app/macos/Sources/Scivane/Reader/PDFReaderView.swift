@@ -1,8 +1,7 @@
 import PDFKit
 import SwiftUI
 
-/// 左栏：原文阅读。PDFKit 是 Apple 自家框架，预览.app 就用它 ——
-/// 连续滚动、文字选择、缩略图、搜索这些都是白送的。
+/// Source pane, on PDFKit.
 struct PDFReaderView: NSViewRepresentable {
 
     @ObservedObject var model: AppModel
@@ -13,7 +12,7 @@ struct PDFReaderView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
 
-        let pdfView = PDFView()
+        let pdfView = AnnotatingPDFView()
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
@@ -45,6 +44,7 @@ struct PDFReaderView: NSViewRepresentable {
         context.coordinator.pdfView = pdfView
         context.coordinator.thumbWidth = thumbWidth
         context.coordinator.observe(pdfView)
+        context.coordinator.marks.attach(pdfView, in: container)
 
         model.pdfGoToPage = { [weak coordinator = context.coordinator] page in
             coordinator?.go(to: page)
@@ -55,6 +55,11 @@ struct PDFReaderView: NSViewRepresentable {
     func updateNSView(_ view: NSView, context: Context) {
         context.coordinator.show(job: job)
         context.coordinator.setThumbnails(visible: model.showThumbnails)
+        context.coordinator.marks.update(store: model.annotations, projectID: model.annotatableProject(for: job))
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.marks.detach()
     }
 
     // MARK: - Coordinator
@@ -64,6 +69,7 @@ struct PDFReaderView: NSViewRepresentable {
         let model: AppModel
         var pdfView: PDFView?
         var thumbWidth: NSLayoutConstraint?
+        let marks = AnnotationController()
 
         private var shownJobID: DocumentJob.ID?
         private var suppress = false
@@ -82,6 +88,7 @@ struct PDFReaderView: NSViewRepresentable {
             shownJobID = job.id
             suppress = true
             pdfView?.document = job.pdf
+            marks.documentChanged()
             go(to: model.currentPage)
         }
 
@@ -113,7 +120,7 @@ struct PDFReaderView: NSViewRepresentable {
     }
 }
 
-/// 图片文档没有 PDF 那套，单独给一个可缩放的查看器。
+/// Images get a separate zoomable viewer.
 struct ImageReaderView: View {
     let image: NSImage
     @State private var scale: CGFloat = 1

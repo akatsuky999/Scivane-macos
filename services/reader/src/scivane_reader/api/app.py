@@ -1,4 +1,4 @@
-"""FastAPI 应用装配。"""
+"""FastAPI application factory."""
 
 from __future__ import annotations
 
@@ -24,16 +24,11 @@ async def lifespan(app: FastAPI):
     for d in (config.JOBS_DIR, config.LOGS_DIR, config.RUN_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
-    # 运行时缺东西的话在这里一次性说清楚。不直接退出：
-    # /health 还得能应答，App 才有办法把原因显示给用户。
-    #
-    # 注意这里检查的是**本地 OCR 引擎**。云端问答不依赖它 —— 读论文时
-    # 本地负责把 PDF 变成 Markdown，云端负责在这份 Markdown 上推理，
-    # 两条链路彼此独立，缺一个不该拖垮另一个。
+    # Report missing OCR pieces once but keep serving: /health must answer so the app can show why.
+    # Cloud Q&A does not depend on local OCR.
     for problem in runtime.preflight():
         logger.warning("运行时检查未通过：%s", problem)
 
-    # 大模型层：超时与并发从 config 取，保持「配置只在一处」的纪律
     llm_registry.timeouts = Timeouts(
         connect=config.LLM_CONNECT_TIMEOUT,
         first_token=config.LLM_FIRST_TOKEN_TIMEOUT,
@@ -47,12 +42,8 @@ async def lifespan(app: FastAPI):
         "大模型 provider 已加载 %d 个（配置：%s）", loaded, config.LLM_PROVIDERS_PATH
     )
 
-    # 本地审计代理：沙箱那个针孔后面站着的东西。
-    #
-    # **起不来不是致命错误。** 第一层 fail closed 就在这里兑现：没有代理，
-    # 工具拿不到凭据，沙箱策略就是默认的「无网」—— 命令照跑，只是连不出去，
-    # 而 agent 会从错误消息里知道原因。比起让整个后端起不来（连项目列表
-    # 都没了），这是正确的失败方向。
+    # The audit proxy failing to start is not fatal: tools then get no credentials and the
+    # sandbox stays offline, which is the safe direction.
     app.state.audit = AuditLog(limit=config.NETPROXY_AUDIT_LIMIT)
     app.state.grants = GrantBook()
     app.state.proxy = AuditProxy(app.state.grants, app.state.audit)
@@ -71,20 +62,14 @@ async def lifespan(app: FastAPI):
     yield
 
     await app.state.proxy.stop()
-    # 关掉大模型层的连接池，让进程能干净退出
     await llm_registry.aclose()
 
 
 class UILanguage:
-    """把请求头里的界面语言放进 ContextVar（`i18n.py`）。
+    """Put the request's UI language into the ContextVar (i18n.py).
 
-    **纯 ASGI，不包 send / receive。** `BaseHTTPMiddleware` 会在中间插一层任务，
-    而这里全是 SSE 长连接 —— 断流即取消靠的正是那条连接的
-    原样透传，不值得为读一个请求头去冒这个险。
-
-    设在这里的值怎么跟到流里：流式响应的生成器、`create_task` 起的那一轮循环、
-    `to_thread` 跑的工具体都在这个请求的上下文里（复制过去的）；自己起的线程见
-    `api/routes.py`。
+    Pure ASGI rather than BaseHTTPMiddleware: everything here is a long-lived SSE stream and
+    cancel-on-disconnect relies on the connection passing through untouched.
     """
 
     _HEADER = i18n.HEADER.lower().encode("latin-1")
@@ -102,7 +87,7 @@ class UILanguage:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Scivane Reader", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Scivane Reader", version="0.0.2", lifespan=lifespan)
     app.add_middleware(UILanguage)
     app.include_router(router)
     app.include_router(llm_router)

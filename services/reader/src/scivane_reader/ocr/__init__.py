@@ -1,7 +1,6 @@
-"""文档解析：版面分析 + VLM 识别。
+"""Document parsing: layout analysis plus VLM recognition.
 
-- `documents` 负责纸面上的事：数页、拆页、抠图落盘
-- `pipeline` 负责模型的事：PaddleOCR-VL 封装与逐页编排
+documents handles files and pages; pipeline handles the model.
 """
 
 from .documents import PageResult, page_count

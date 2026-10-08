@@ -1,9 +1,7 @@
 import SwiftUI
 
-// **入口已下架（2026-09-16）。** 这个视图现在没有任何调用方 —— 保留是因为
-// 下架是产品决定而不是代码判决：真要把它放回去，只需要在 ContentView 里
-// 接一个分支。**不要以为它是死代码顺手删掉**，也不要往它上面加新东西。
-//
+// Currently unused: the entry point was removed as a product decision. Kept so it can be wired
+// back into ContentView; not dead code to delete, and not a place for new work.
 
 struct EmptyStateView: View {
   @ObservedObject var model: AppModel
@@ -48,7 +46,6 @@ struct EmptyStateView: View {
   }
 }
 
-/// 以书页的细线与留白呼应折页标志，避免展示卡片占据工作区。
 private struct FolioDrawing: View {
   var body: some View {
     Canvas { context, size in

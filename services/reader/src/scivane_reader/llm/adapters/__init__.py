@@ -1,11 +1,8 @@
-"""三套厂商协议，以及它们各自的能力。
+"""The three wire protocols and their capabilities.
 
-按「协议而非厂商清单」的原则组织：这里只描述**协议**能做什么，不维护会
-过期的厂商模型清单。厂商由配置表达（protocol + base_url + model），
-所以接一家新厂商通常一行配置就够，不用改代码。
-
-一套 OpenAI 兼容协议即可覆盖 OpenAI、DeepSeek、Kimi、智谱、通义、
-硅基流动、Ollama、vLLM。
+Organised by protocol, not by vendor: a vendor is configuration (protocol, base URL, model).
+The OpenAI-compatible protocol alone covers OpenAI, DeepSeek, Kimi, Zhipu, Qwen, SiliconFlow,
+Ollama and vLLM.
 """
 
 from __future__ import annotations
@@ -21,14 +18,11 @@ from .openai_compat import OpenAiCompatAdapter
 
 @dataclass(frozen=True)
 class ProtocolInfo:
-    """一套协议的能力。给设置界面显示用，让用户知道选了它能得到什么。"""
+    """What a protocol supports, shown in settings."""
 
     adapter: ProtocolAdapter
-    #: 是否能回传推理过程。
     thinking: bool
-    #: 是否支持图片输入。
     vision: bool
-    #: 流式响应里是否带用量统计。
     streaming_usage: bool
 
     @property
@@ -49,7 +43,7 @@ class ProtocolInfo:
 PROTOCOLS: dict[str, ProtocolInfo] = {
     "openai": ProtocolInfo(
         adapter=OpenAiCompatAdapter(),
-        thinking=True,   # DeepSeek reasoner 等把推理放在 reasoning_content
+        thinking=True,   # DeepSeek reasoner and others stream reasoning_content
         vision=True,
         streaming_usage=True,
     ),

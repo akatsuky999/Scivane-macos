@@ -1,17 +1,15 @@
 import SwiftUI
 
-// 跑动中的那一行状态：扫光的文字 + 一直在走的秒数。
+// Status line while running: shimmering text and a ticking counter.
 
 struct LiveStatus: View {
-  /// 这一轮到目前为止的过程（旁白、思考、工具）。可能是空的 —— 刚发出提问、
-  /// 模型还没吐第一个字的那几百毫秒就是空的。
+  /// this turn's process so far; empty until the first chunk
   let run: [TranscriptItem]
-  /// 没有推理摘要可显示时退回的那句话（会话自己算的 `activity`）。
+  /// used when there is no reasoning line to show (the session's `activity`)
   let fallback: String
-  /// 用户按过「停」。这一行要立刻改口 —— 后端收流还要一两秒，
-  /// 期间界面一动不动的话，按钮看起来就是坏的。
+  /// change at once when stop is pressed; closing takes the backend a second or two
   var stopping = false
-  /// 这一轮是什么时候发出去的。用来报已等了多久。
+  /// when the question was sent; for the elapsed time
   var since: Date?
 
   private var thoughts: [TranscriptItem] { run.filter { $0.kind == .assistant } }
@@ -19,67 +17,42 @@ struct LiveStatus: View {
     run.last { $0.kind == .tool && $0.awaitingResult }
   }
 
-  /// 截出正文的尾巴。提成静态是为了能被断言钉住 ——
-  /// 取成头部不会报错，只是"在动"的观感整个没了。
-  ///
-  /// 截到 160 字 —— 配合固定两行的框，正好是一个不断上滚的小窗口。
-  /// **先截尾再处理。** 老写法是 `text.replacingOccurrences(...)` 整串压平、
-  /// 再 `text.count` 数一遍 —— 两个都是 O(n)，而这个函数每个流式分片跑一次。
-  /// 正文长到几万字时，光这一处就够把一个核占满。
-  /// 多取一个字符是为了判断「到底截没截」，不必回头数整串。
+  /// The text's tail, up to 160 characters. Static so a check can pin it. Cut first, then process:
+  /// flattening and counting the whole string ran on every chunk and could saturate a core on long
+  /// answers. One extra character tells whether anything was cut.
   static func tail(_ text: String, limit: Int = 160) -> String {
     let flat = text.suffix(limit + 1).replacingOccurrences(of: "\n", with: " ")
     return flat.count > limit ? "…" + String(flat.suffix(limit)) : flat
   }
 
-  /// 正在跑工具就报它；否则区分「在想」和「在写答案」——
-  /// 后者要让用户知道**答案在来了**，而不是还在琢磨。
+  /// The running tool if any; otherwise thinking vs. writing, so people know the answer is coming.
   var action: String {
-    // 按了停就先说这个 —— 它比「正在跑 grep」更要紧，因为用户此刻
-    // 唯一关心的是「我按的那下到底生效没有」。
+    // after pressing stop, that is all the user wants to know
     if stopping { return L("正在停下…", "Stopping…") }
     if let currentTool {
       return currentTool.summary.isEmpty
         ? L("正在跑 \(currentTool.toolName)", "Running \(currentTool.toolName)") : currentTool.summary
     }
-    // 正文可能只是工具前的旁白，不能据此宣布“正在作答”。
-    // 只有没有待执行工具时，才把状态交给稳定的作答提示。
+    // text may just be narration before a tool call; only claim "answering" with no tool pending
     if thoughts.last?.text.isEmpty == false, tools.allSatisfy({ !$0.awaitingResult }) {
       return L("正在整理回答", "Wrapping up the answer")
     }
     if !tools.isEmpty { return L("已用 \(tools.count) 个工具", "Used " + plural(tools.count, "tool", "tools")) }
-    // 退回会话自己算的那句：它知道「正在读 md/context.md」「等你的决定」
-    // 这些比「等模型回应」具体得多的情形。**这是 fallback 唯一的落点** ——
-    // 上面那块预览窗口拆掉之后，不接回来它就成了一个没人读的参数。
+    // The session's line knows more specific states ("reading md/context.md", "waiting for you").
     return fallback.isEmpty ? L("等模型回应", "Waiting for the model") : fallback
   }
 
   private var tools: [TranscriptItem] { run.filter { $0.kind == .tool } }
 
   var body: some View {
-    // **只有一行会扫光的状态，没有别的。**
-    //
-    // 早先这上面还有一块「固定两行的窗口」，把正在生成的旁白尾巴摊在那儿。
-    // 出发点是让逐字生成看得见，代价是实机上非常难看：那块窗口是 12pt 中黑、
-    // 每个分片换一次内容，长得**和答案一模一样**，于是
-    //
-    //   - 用户以为旁白没被折叠（其实卡里那份才是正主，窗口只是复读）
-    //   - 文字每几百毫秒整段换一次，两行之间还会重排 —— 就是「字体跳动」
-    //
-    // codex desktop 跑动时屏幕上只有一个 `Thinking` 在扫光，正文一个字都不露；
-    // 中间说的话作为消息落进流里，由 `group` 收进过程卡。这里照同一个判断：
-    // **过程只报「在做什么」，不预演内容。**
+    // Just one shimmering status line. A preview window of the streaming text used to sit above it;
+    // it looked exactly like the answer, swapped its contents every few hundred ms and made the text
+    // jump. The status says what is happening without previewing content.
     HStack(spacing: 6) {
       ShimmerText(text: action, size: 10.5, weight: .medium)
-      // **一直在走的秒数。**
-      //
-      // 推理模型一想就是几十秒，那期间屏幕上其余部分完全不变 ——
-      // 用户分不清「还在想」和「卡死了」，实机就是这么报上来的
-      // （「一直是这个界面很久没有变化」）。扫光只说明动画在跑，
-      // 秒数才说明**这一轮**还在走。
-      //
-      // 每秒跳一次，用 TimelineView 自己驱动：挂在会话上的话，
-      // 整条对话流每秒都要重渲染一遍。
+      // A counter that keeps ticking: during long reasoning nothing else on screen changes, and the
+      // shimmer only shows the animation is alive. Driven by its own TimelineView; on the session it
+      // would rerender the whole transcript every second.
       if let since {
         TimelineView(.periodic(from: since, by: 1)) { timeline in
           let seconds = Int(timeline.date.timeIntervalSince(since))
@@ -97,7 +70,7 @@ struct LiveStatus: View {
   }
 }
 
-/// 转着的小环。抽出来给分组头和等待行共用。
+/// shared by group headers and the waiting line
 struct SpinnerRing: View {
   @State private var spin = false
   var body: some View {

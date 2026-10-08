@@ -13,13 +13,18 @@ enum Palette {
     static let danger = Color(light: Color(red: 0.67, green: 0.28, blue: 0.20), dark: Color(red: 0.94, green: 0.58, blue: 0.44))
     static let sidebar = Color(light: Color(red: 0.91, green: 0.935, blue: 0.905), dark: Color(red: 0.075, green: 0.12, blue: 0.10))
     static let selectedRow = Color(light: .white.opacity(0.75), dark: .white.opacity(0.085))
-    // diff 的增删两色。**不复用 accent / danger**：那两个是「品牌」与「出错」，
-    // 而一次删除既不是品牌也不是错误，借用会让用户以为改坏了什么。
-    // 明度压在正文之下 —— 整块底色的饱和度一高，代码本身就读不成句了。
+    // Diff colours. Not accent or danger: a removed line is neither branding nor an error. Kept below
+    // body text in lightness so the code stays readable.
     static let added = Color(light: Color(red: 0.13, green: 0.47, blue: 0.27), dark: Color(red: 0.51, green: 0.82, blue: 0.60))
     static let removed = Color(light: Color(red: 0.63, green: 0.24, blue: 0.24), dark: Color(red: 0.91, green: 0.56, blue: 0.54))
     static let addedWash = Color(light: Color(red: 0.13, green: 0.47, blue: 0.27).opacity(0.10), dark: Color(red: 0.32, green: 0.72, blue: 0.45).opacity(0.14))
     static let removedWash = Color(light: Color(red: 0.63, green: 0.24, blue: 0.24).opacity(0.09), dark: Color(red: 0.86, green: 0.40, blue: 0.38).opacity(0.13))
+    // Code colouring and inline code background: muted, and away from the accent and danger hues so
+    // code never looks like an error.
+    static let codeKeyword = Color(light: Color(red: 0.45, green: 0.24, blue: 0.53), dark: Color(red: 0.79, green: 0.64, blue: 0.88))
+    static let codeString = Color(light: Color(red: 0.53, green: 0.33, blue: 0.11), dark: Color(red: 0.89, green: 0.72, blue: 0.50))
+    static let codeNumber = Color(light: Color(red: 0.11, green: 0.39, blue: 0.55), dark: Color(red: 0.55, green: 0.79, blue: 0.90))
+    static let codeChip = Color(light: .black.opacity(0.055), dark: .white.opacity(0.085))
     static let forest = Color(red: 0.075, green: 0.18, blue: 0.15)
     static let cream = Color(red: 0.94, green: 0.94, blue: 0.83)
 }
@@ -43,7 +48,7 @@ struct Hairline: View {
             .frame(width: axis == .vertical ? 1 : nil, height: axis == .horizontal ? 1 : nil)
     }
 }
-/// 折页构成的 L，与桌面图标共享轮廓。
+/// The folded-page L, same outline as the app icon.
 struct ScivaneMark: View {
     var body: some View {
         GeometryReader { g in
@@ -112,11 +117,8 @@ struct ToolButtonStyle: ButtonStyle {
     }
 }
 
-/// 侧栏里一行的按压反馈。
-///
-/// **hover 一层极淡的底，按下再深一点，没有边框也没有位移。**
-/// 侧栏里所有行 ——
-/// 主动作、次动作、列表项 —— 共用同一种反馈，谁也不比谁更"隆重"。
+/// Sidebar row feedback: a faint wash on hover, a little darker when pressed, no border or
+/// movement. Every sidebar row uses it.
 struct SidebarRowStyle: ButtonStyle {
   @State private var hovering = false
 

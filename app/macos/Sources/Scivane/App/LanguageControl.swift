@@ -1,9 +1,7 @@
 import SwiftUI
 
-/// 侧栏底部的语言切换：一个地球，点开选。
-///
-/// 与 `AppearanceControl` 并排、同一种尺寸。设置页「通用」里有完整的一栏（`LanguageSettings`），
-/// 这里是随手可够的那一处 —— 与外观一样两处入口。
+/// Language switch at the bottom of the sidebar, next to AppearanceControl. Settings > General has
+/// the full version (LanguageSettings).
 struct LanguageControl: View {
   var body: some View {
     let localization = Localization.shared
@@ -30,14 +28,11 @@ struct LanguageControl: View {
   }
 }
 
-/// 设置页「通用」里的语言一栏。
-///
-/// 三个小巧思，都来自同一个念头 —— **切错了语言的人也要找得回来**：
-/// - 分节标题两种语言都写（「语言 · Language」），语言名用它自己的文字写（简体中文 / English）；
-/// - 「跟随系统」后面写明它此刻落在哪一种，不必猜；
-/// - 系统自带的菜单项要重新打开才跟上时，说出来、给一个按钮，而不是让人以为没切干净。
+/// Language section in Settings > General, findable even by someone who switched by mistake:
+/// the title is bilingual, language names use their own script, "Follow System" says what it
+/// resolves to, and a button appears when the system menus need a relaunch.
 struct LanguageSettings: View {
-  /// 有对话或识别在跑时，「现在重新打开」会把它们打断 —— 那时按钮不可点。
+  /// relaunching would interrupt a running conversation or recognition
   var busy = false
 
   var body: some View {
@@ -70,11 +65,11 @@ struct LanguageSettings: View {
       .font(.uiCaption).foregroundStyle(Palette.inkFaint)
       .fixedSize(horizontal: false, vertical: true)
     } header: {
-      Text(verbatim: "语言 · Language")  // 不翻：两种语言都写，切错了也认得出这一栏
+      Text(verbatim: "语言 · Language")  // 不翻: bilingual on purpose, so the section can be found in either language
     }
   }
 
-  /// 分段控件里的字：窄，所以「跟随系统」不带后缀。
+  /// narrow segmented control: "Follow System" without the suffix
   static func shortTitle(_ option: LanguagePreference) -> String {
     switch option {
     case .system: return L("跟随系统", "System")
@@ -83,7 +78,7 @@ struct LanguageSettings: View {
     }
   }
 
-  /// 菜单里的字：宽，「跟随系统」后面写明它此刻落在哪一种。
+  /// menu: "Follow System" names the language it resolves to
   static func menuTitle(_ option: LanguagePreference) -> String {
     guard option == .system else { return shortTitle(option) }
     let system = Localization.resolve(.system).displayName

@@ -1,14 +1,7 @@
-"""保护策略：超时、重试、退避。
+"""Timeouts, retries and backoff.
 
-参数经过真实多厂商流量检验；前台与后台不共享重试预算。
-
-**最容易踩的一条坑，写在最前面：**
-
-    重试只在「尚未产出任何内容」时安全。
-
-流已经吐出 token 之后再重试，用户会看到重复的内容 —— 而且这种 bug 只在
-网络抖动时才出现，极难复现。所以本模块的 `is_retryable()` 强制要求传入
-`emitted_content`，而不是把它做成可选参数：调用方必须正面回答这个问题。
+Retrying is only safe before any content was emitted; otherwise the user sees duplicated
+text. That is why is_retryable() requires `emitted_content`.
 """
 
 from __future__ import annotations
@@ -28,61 +21,43 @@ from .errors import (
 )
 from .types import Purpose
 
-# --- 超时 ---------------------------------------------------------------
-
 @dataclass(frozen=True)
 class Timeouts:
-    """分离的超时。
-
-    用单一总超时是不行的：论文问答的回答可能持续好几分钟，一个能容纳它的
-    总超时（比如 10 分钟）意味着一次 DNS 故障也要挂 10 分钟才报错。所以
-    连接、首 token、整流三段分开设。
+    """Separate timeouts: a total long enough for a multi-minute answer would make a DNS failure
+    hang just as long.
     """
 
-    #: 建立连接。网络正常时这一步是毫秒级，给 10 秒足够宽松。
     connect: float = 10.0
-    #: 从发出请求到收到第一个 token。厂商排队时这一段会长，给 120 秒。
+    #: providers may queue before the first token
     first_token: float = 120.0
-    #: 整个流的上限。长回答确实会很久，给 30 分钟兜底防止永久挂起。
+    #: upper bound for one stream
     total: float = 1800.0
 
 
 DEFAULT_TIMEOUTS: Final = Timeouts()
 
 
-# --- 重试策略 -----------------------------------------------------------
-
-#: 默认可重试的失败码。
-#:
-#: 共同点是「同样的请求再发一次有理由成功」：限流会过去、5xx 通常是暂时的、
-#: 超时和连接错误可能是网络抖动、空响应是厂商的退化行为。
+#: Failures where sending the same request again may succeed.
 DEFAULT_RETRYABLE: Final = frozenset({
     EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT,
 })
 
-#: 后台任务可重试的失败码 —— 刻意比前台窄。
-#:
-#: RATE_LIMIT 与 SERVER 都是「厂商现在没容量」。这种时候后台任务（生成标题、
-#: 摘要）继续重试，就是在跟用户正在等的那个问题抢配额。后台的正确行为是
-#: 干脆放弃，等下次再说。
+#: Deliberately narrower: when the provider is out of capacity, background jobs (titles,
+#: summaries) give up instead of competing with the question the user is waiting on.
 BACKGROUND_RETRYABLE: Final = frozenset({TIMEOUT, TRANSPORT, EMPTY_RESPONSE})
 
 
 @dataclass(frozen=True)
 class RetryPolicy:
-    """一条路由的重试行为。"""
-
     max_retries: int = 5
     initial_delay: float = 0.5
     max_delay: float = 10.0
-    #: 围绕每次延迟的对称抖动比例。多个客户端同时被限流时，
-    #: 没有抖动会让它们在同一毫秒一起重试，把厂商再打一次。
+    #: symmetric jitter so rate-limited clients don't retry in lockstep
     jitter_ratio: float = 0.1
     retryable_codes: frozenset[str] = field(default_factory=lambda: DEFAULT_RETRYABLE)
     background_retryable_codes: frozenset[str] = field(
         default_factory=lambda: BACKGROUND_RETRYABLE
     )
-    #: 后台任务的重试次数上限，通常远小于前台。
     background_max_retries: int = 1
 
     def budget(self, purpose: Purpose) -> int:
@@ -109,12 +84,7 @@ def is_retryable(
     policy: RetryPolicy = DEFAULT_POLICY,
     purpose: Purpose = "foreground",
 ) -> bool:
-    """这次失败该不该重试。
-
-    :param attempt: 已经进行过的尝试次数（首次请求为 1）。
-    :param emitted_content: 本次尝试是否已经向调用方产出过内容。
-        为 True 时一律不重试 —— 见模块开头那条纪律。
-    """
+    """Whether to retry this failure. Never once content has been emitted."""
     if emitted_content:
         return False
     if attempt > policy.budget(purpose):
@@ -129,16 +99,13 @@ def compute_delay(
     retry_after: float | None = None,
     rng: random.Random | None = None,
 ) -> float:
-    """算出这次该等多久。
-
-    厂商给了 `Retry-After` 就优先采纳它 —— 厂商比我们更清楚自己什么时候
-    恢复。但**必须落在 max_delay 界内**：某些厂商会返回几小时的值，直接
-    照办等于把这个请求挂死，用户只会看到界面永远转圈。超界时退回本地退避。
+    """Delay before the next attempt. Retry-After wins when it falls within max_delay;
+    some providers send hours, which would hang the request.
     """
     if retry_after is not None and 0 <= retry_after <= policy.max_delay:
         return retry_after
 
-    # 指数退避：0.5s, 1s, 2s, 4s, 8s, 封顶 10s
+    # 0.5, 1, 2, 4, 8 s, capped at 10 s
     base = min(policy.initial_delay * (2 ** max(0, attempt - 1)), policy.max_delay)
     if policy.jitter_ratio <= 0:
         return base
@@ -148,11 +115,7 @@ def compute_delay(
 
 
 def parse_retry_after(raw: str | None) -> float | None:
-    """解析 Retry-After 响应头。
-
-    HTTP 规定它既可以是秒数，也可以是一个 HTTP 日期，两种都要认。
-    解析不了就返回 None，让本地退避接手 —— 绝不让一个畸形的头把请求搞崩。
-    """
+    """Parse Retry-After (seconds or an HTTP date); None lets the local backoff take over."""
     if not raw:
         return None
     text = raw.strip()

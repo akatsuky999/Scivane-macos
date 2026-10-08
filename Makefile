@@ -1,10 +1,10 @@
-# Scivane —— 常用命令入口。所有路径都相对本文件所在目录解析。
-# 装 App 只需要一条：make app（编译、打包、放到桌面）。
+# Scivane: common commands. Paths resolve relative to this file.
+# Installing the app takes one command: make app (build, package, copy to the Desktop).
 
 SHELL        := /bin/bash
 ROOT         := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 API          := http://127.0.0.1:8710
-# 运行期产物在用户目录下，不在仓库里 —— 与 config.py 的默认值一致
+# runtime output lives in the home dir, not the repository; same default as config.py
 VAR_DIR      ?= $(HOME)/.scivane/var
 LLAMA        := http://127.0.0.1:8111
 
@@ -40,8 +40,8 @@ clean:  ## 清掉仓库里的编译中间产物（不动用户目录，也不动
 	@echo "已清理（var/app/Scivane.app 保留，桌面那份实体拷贝不受影响）"
 	@echo "下次打包会重新下载自带的解释器（约 25MB，按 sha256 校验）"
 
-# 运行期产物现在在用户目录下，所以**单独一条、且要确认**。
-# 让 `make clean` 顺手删 ~/.scivane 下的东西是危险的：同一个目录下就是项目数据。
+# A separate target that asks first: ~/.scivane also holds project data, so make clean never
+# touches it.
 .PHONY: clean-runtime
 clean-runtime:  ## 清掉运行期产物（日志 / 抠图 / 沙箱策略，在用户目录下）
 	@echo "将删除：$(VAR_DIR)/{logs,run,jobs}"
@@ -55,5 +55,5 @@ distclean: clean  ## 连成品 App 一起删
 	@rm -rf $(ROOT)/var/app
 	@echo "已删除 var/app —— 跑 make app 重建"
 
-# 本机的附加命令：同目录下有 dev.mk（本地文件，不纳入版本控制）就一并引入，没有也不影响上面任何一条
+# local extra targets: dev.mk is included when present (not under version control)
 -include $(ROOT)/dev.mk

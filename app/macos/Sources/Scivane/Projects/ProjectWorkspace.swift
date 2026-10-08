@@ -2,25 +2,18 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-/// 项目相关的操作。状态属性在 AppModel 里，这里只放行为。
-///
-/// 三条流程决定了这一层的形状：
-///
-/// 1. **构建项目** → 复制原稿、快猜标题、进入项目；已经识别过就沿用现成的正文
-/// 2. **项目内 OCR 完成** → 结果写回项目上下文，标题精确化
-/// 3. **项目内导入 Markdown** → 落为待确认，由人点头后才作数
+/// Project actions; state lives in AppModel, this holds behaviour only.
+/// 1. build a project: copy the source, guess a title, enter it; reuse existing OCR text
+/// 2. OCR finishes inside a project: the result becomes its context and refines the title
+/// 3. Markdown imported into a project: pending until a person confirms it
 @MainActor
 extension AppModel {
 
-  // MARK: - 后端就绪
+  // MARK: - Backend
 
-  /// 确保后端起到够用的层级。
-  ///
-  /// 项目管理不需要 OCR 模型，所以默认只起轻量模式（0.4 秒、58MB）。
-  /// 为了列一下项目就加载 2.8GB 权重是说不过去的。
-  /// - Parameter quiet: 失败时不打扰用户。
-  ///   启动时那次拉取项目列表要用它 —— 没装运行时的人本来只想读 Markdown，
-  ///   一开 App 就弹一条「启动失败」是纯粹的骚扰，让项目区空着就好。
+  /// Projects don't need the OCR model, so the light mode is the default.
+  /// - Parameter quiet: no error on failure. Used for the launch-time list, where someone without
+  ///   the runtime would only be annoyed by a startup error.
   @discardableResult
   func awaitBackend(mode: BackendManager.Mode = .lite, quiet: Bool = false) async -> Bool {
     backend.ensureRunning(mode: mode)
@@ -40,9 +33,9 @@ extension AppModel {
     noticeID = UUID()
   }
 
-  // MARK: - 列表
+  // MARK: - List
 
-  /// - Parameter quiet: 启动时那次拉取用 true，失败就静静地空着。
+  /// - Parameter quiet: true at launch; a failure just leaves the list empty.
   func refreshProjects(quiet: Bool = false) async {
     guard await awaitBackend(quiet: quiet) else { return }
     do {
@@ -52,39 +45,30 @@ extension AppModel {
     }
   }
 
-  // MARK: - 构建
+  // MARK: - Building
 
-  /// 这份文档能不能构建成项目。Markdown 不行 —— 项目的身份是原稿。
+  /// Markdown can't: a project's identity is its source.
   func canBuildProject(_ job: DocumentJob) -> Bool {
     !job.isMarkdown && !job.status.isRunning && job.status != .queued
       && jobProjects[job.id] == nil
   }
 
-  /// 构建项目并进入它。**不自动识别。**
-  ///
-  /// 「构建项目」与「开始 OCR」是两件独立的事：
-  ///
-  /// - 这篇**已经识别过**了 —— 直接沿用现成的正文，绝不重跑一遍。
-  ///   重跑是纯粹的浪费：同一份原稿、同一个模型，结果只会一样，
-  ///   而密集论文一页就要十几秒。
-  /// - 这篇**还没识别** —— 建完就停在这里，用户想读的时候再点「开始 OCR」。
-  ///
-  /// 早先的版本在这里自动排队识别（理由是「点它就意味着我要认真读这篇」），
-  /// 但那让两个功能纠缠在一起：先 OCR 再构建的人会被迫再等一遍。
+  /// Build a project and enter it, without starting recognition. Existing OCR text is reused, never
+  /// recomputed; otherwise it waits until the user starts OCR. Queueing it automatically made
+  /// people who had already run OCR wait again.
   func buildProject(from job: DocumentJob) async {
     guard canBuildProject(job), !projectBusy else { return }
     projectBusy = true
     defer { projectBusy = false }
 
     guard await awaitBackend() else { return }
-    // **必须在 remove(job) 之前把结果取出来。** 之后这个 job 就不在了，
-    // 而 enterProject 挂进来的是项目里的副本（pdf/source.pdf）——
-    // 那是另一个 URL，重新 adopt 出来的 job 一页结果都没有。
+    // Read the result before remove(job): enterProject attaches the project's copy
+    // (pdf/source.pdf), a different URL with no results.
     let scanned = job.hasResult ? job.markdown : ""
     do {
       let project = try await projectClient.create(sourcePath: job.url.path)
       await refreshProjects()
-      // 原文档已经"毕业"成项目，从本次文档里撤掉，避免同一篇论文出现两次
+      // the document became a project; remove it from loose documents so it doesn't appear twice
       let alreadyHadContext = project.hasUsableContext
       remove(job)
       await enterProject(project)
@@ -99,12 +83,9 @@ extension AppModel {
     }
   }
 
-  /// 把手上已经识别好的正文直接作为项目上下文。
-  ///
-  /// 走的是和「识别完成写回」同一个接口（`origin: "ocr"`），所以插图会被一并
-  /// 吸收进项目、标题也会用一级标题精确化。**不需要 jobID** ——
-  /// 后端是从正文里的 `/assets/<job>/...` 引用去 jobs 根下找图的，
-  /// jobID 只是记进元数据的一条出处。
+  /// Use already recognised text as the project's context, through the same endpoint as a finished
+  /// OCR (origin "ocr"), so figures are absorbed and the title refined. No job id needed: the
+  /// backend finds figures from the `/assets/<job>/...` references in the text.
   private func adoptScannedText(_ project: Project, markdown: String) async {
     do {
       let updated = try await projectClient.setContext(
@@ -117,13 +98,9 @@ extension AppModel {
     }
   }
 
-  // MARK: - 空项目
+  // MARK: - Empty projects
 
-  /// 新建一个还没有原稿的项目。
-  ///
-  /// **标题留空是有意义的**，原样交给后端：留空的项目叫「未命名项目」，
-  /// 导入 PDF 时会被识别出来的标题改进；打了字的则受红线保护，
-  /// 任何自动提取都不许覆盖。所以这里不替用户补一个默认名。
+  /// An empty title is passed through as is (see ProjectClient.createEmpty).
   func createEmptyProject(title: String) async {
     guard !projectBusy else { return }
     projectBusy = true
@@ -141,7 +118,7 @@ extension AppModel {
     }
   }
 
-  /// 给一个空项目挂上原稿。挂完顺带把标题精确化（由后端按可靠度决定）。
+  /// The backend refines the title afterwards, depending on how reliable it is.
   func attachSource(_ url: URL, to project: Project) async {
     guard !projectBusy else { return }
     projectBusy = true
@@ -170,7 +147,7 @@ extension AppModel {
     Task { await attachSource(url, to: project) }
   }
 
-  // MARK: - 进入与离开
+  // MARK: - Entering and leaving
 
   func projectSourceJob(_ project: Project) -> DocumentJob? {
     guard let url = project.sourceURL else { return nil }
@@ -178,23 +155,19 @@ extension AppModel {
     return jobs.first { $0.url == resolved }
   }
 
-  /// 进入项目：把原稿与正文挂进阅读区。
-  ///
-  /// 复用既有的「原稿 ↔ 正文」配对机制 —— 项目本质上就是一份持久化的配对，
-  /// 没必要为它另造一套阅读界面。
+  /// Attach the source and text to the reading area, reusing the source-text pairing: a project is
+  /// a persisted pairing.
   func enterProject(_ project: Project) async {
     guard await awaitBackend() else { return }
     activeProjectID = project.id
-    // 对话清单跟着项目走。放在这里而不是面板的 .task 里：切项目时清单必须
-    // 先到位，否则面板会先绑到一条还不存在的对话上。
+    annotations.load(project.hasSource ? project.id : nil)
+    // Conversations load here rather than in the pane's .task, so the pane never binds to one that
+    // doesn't exist yet.
     await refreshConversations(project.id)
 
-    // **空项目不是「原稿缺失」。** 它是用户有意建的一张白纸，
-    // 报错会让人以为出了问题。直接落到 Agent 那栏 ——
-    // 没有原稿也没有正文时，能做的事只在那里。
+    // An empty project is a deliberate blank page, not a missing source: go straight to the agent.
     guard project.hasSource else {
-      // 没有文档可挂，阅读区就该是空的 —— 留着上一个项目的原稿在那里
-      // 比空白更糟：用户会以为那就是这个项目的原稿。
+      // Nothing to attach, so the reading area is empty; the previous project's PDF would pass for this one's.
       selection = nil
       textMode = .chat
       singlePane = .text
@@ -211,34 +184,36 @@ extension AppModel {
 
     if let contextURL = project.contextURL, let text = adopt(url: contextURL) {
       jobProjects[text.id] = project.id
-      // 上下文可能刚被覆盖过，磁盘上的内容比 job 里缓存的新
+      // the context may have just been replaced; disk is newer than the job's copy
       reloadMarkdown(text)
       pair(source: source, text: text)
     } else {
       unpair(source: source)
     }
 
-    // **这里不碰 dualPane。** 它是用户偏好（工具栏那个开关），
-    // 导航动作替他改掉的话，"栏数永远是你以为的那个"就不成立了。
+    // dualPane is the user's preference and stays untouched
     select(source)
   }
 
-  /// 退出项目，回到「还没打开任何项目」那个状态：书房那层 agent 回来，阅读区清空。
-  ///
-  /// **阅读区必须一起清掉。** 只把 activeProjectID 置空的话，上一篇论文的原稿
-  /// 还挂在那儿，用户会以为自己根本没退出去 —— 这和 `enterProject` 里
-  /// 「留着上一个项目的原稿比空白更糟」是同一条判断。
+  /// Back to no open project: the librarian returns and the reading area is cleared, or it looks as
+  /// if leaving didn't work.
   func leaveProject() {
     activeProjectID = nil
     selection = nil
+    annotations.load(nil)
   }
 
-  // MARK: - OCR 结果回写
+  /// The project whose marks belong on this document: the open project, when this is its source.
+  func annotatableProject(for job: DocumentJob) -> String? {
+    guard let project = activeProject, project.hasSource, projectSourceJob(project)?.id == job.id
+    else { return nil }
+    return project.id
+  }
 
-  /// OCR 完成后把结果写进项目上下文。
-  ///
-  /// `serverJobID` 是服务端的任务号，缺了它插图就吸收不进项目 ——
-  /// 正文里的图会一直指着 var/jobs，`make clean` 一跑就全断。
+  // MARK: - Writing OCR results back
+
+  /// Without serverJobID figures can't be absorbed into the project, and the text keeps pointing at
+  /// var/jobs, which `make clean` wipes.
   func attachOCRResult(_ job: DocumentJob, serverJobID: String?) async {
     guard let projectID = jobProjects[job.id],
       let project = projects.first(where: { $0.id == projectID })
@@ -258,18 +233,15 @@ extension AppModel {
     }
   }
 
-  /// 重新 OCR 覆盖当前项目的上下文。
   func reOCRActiveProject() {
     guard let project = activeProject, let source = projectSourceJob(project) else { return }
     retry(source)
   }
 
-  // MARK: - 导入 Markdown 覆盖
+  // MARK: - Importing Markdown
 
-  /// 把一份 Markdown 作为项目上下文导入。
-  ///
-  /// 落地时是**待确认**状态：这份文件未必真是这篇论文的正文，
-  /// 万一不是，模型会一本正经地基于错误材料作答，比没有上下文更糟。
+  /// Lands as pending confirmation: the file may not be this paper, and wrong context is worse than
+  /// none.
   func importMarkdownIntoProject(_ url: URL, project: Project) async {
     guard !projectBusy else { return }
     projectBusy = true
@@ -301,7 +273,7 @@ extension AppModel {
     Task { await importMarkdownIntoProject(url, project: project) }
   }
 
-  /// 人工确认这份正文是否对应本项目的论文。
+  /// Whether a person accepts the text as this paper's.
   func confirmProjectContext(_ accepted: Bool) async {
     guard let project = activeProject else { return }
     guard await awaitBackend() else { return }
@@ -315,12 +287,12 @@ extension AppModel {
     }
   }
 
-  // MARK: - 重命名与删除
+  // MARK: - Rename and delete
 
   func renameProject(_ project: Project, to title: String) async {
     let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-    // 改名框里预填的是显示名（占位名会按界面语言说）—— 原样点保存不算改名，
-    // 否则一个「未命名」的占位项目会被悄悄钉成手动命名，之后再也不跟着识别改进。
+    // The field is prefilled with the display name; saving it unchanged must not pin a placeholder
+    // title as manual, or it would stop improving from OCR.
     guard !trimmed.isEmpty, trimmed != project.title, trimmed != project.displayTitle else { return }
     guard await awaitBackend() else { return }
     do {
@@ -333,7 +305,7 @@ extension AppModel {
 
   func deleteProject(_ project: Project) async {
     guard await awaitBackend() else { return }
-    // 项目里有对话历史，删掉不可撤销 —— 必须问一次
+    // the project holds conversation history; deleting is irreversible, so ask
     let alert = NSAlert()
     alert.messageText = L("删除项目「\(project.displayTitle)」？", "Delete the project “\(project.displayTitle)”?")
     alert.informativeText = L("项目里的原稿副本、正文与会话历史都会被删除，无法撤销。", "The copy of the original, its text and all chat history will be deleted. This can't be undone.")

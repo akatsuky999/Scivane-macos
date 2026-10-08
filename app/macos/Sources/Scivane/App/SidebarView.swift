@@ -1,28 +1,21 @@
 import SwiftUI
 
-/// 侧栏的尺寸表。
-///
-/// **行高、缩进、留白必须一起看。** 三者散在各视图里各写一个数字，改其中一个
-/// 就把整列的节奏破掉了 —— 不报错、没有断言会红，只是看起来"不太对"。
-/// 宽度也只在这里定一次，别处都从这里取。
+/// Sidebar metrics. Row heights, indents and spacing are tuned together and live only here;
+/// changing one in isolation breaks the column's rhythm without any check failing.
 enum SidebarMetrics {
-  /// 264 → 236。论文标题一行本来就装不下（完整标题在 tooltip 里），
-  /// 靠加宽救不动它，只会把右边真正在读的那半边挤窄。
+  /// Paper titles don't fit on one line at any sane width (the full title is in the tooltip);
+  /// widening only squeezes the reading area.
   static let width: CGFloat = 236
-  /// **外侧留白小、行内内边距大**：hover 的底色因此铺满一整行，
-  /// 而不是缩在一个盒子里，让侧栏与主内容保持清晰的层次。
+  /// Small outer gutter, generous row padding: hover fills the whole row instead of a boxed inset.
   static let gutter: CGFloat = 8
   static let inset: CGFloat = 10
-  /// 顶上两个动作比树里的行高一点 —— 它们是这一列里唯二的主动作。
+  /// The two actions at the top are a little taller: they are the column's only primary actions.
   static let actionRow: CGFloat = 32
   static let actionGap: CGFloat = 2
   static let treeRow: CGFloat = 28
-  /// 品牌与分节标题的**整块高度**，由各自的留白推出来。
-  ///
-  /// 写成推导量而不是散在视图里的 padding，是为了能从这里算出
-  /// 第一条项目行在哪。
-  /// 直接写死坐标的话，改一次行高就对不上了，而且不会报错。
-  static let brandTop: CGFloat = 30      // 红绿灯净空，不能再小
+  /// Block heights derived from their spacing, so the first project row's position can be computed
+  /// here instead of hard-coded.
+  static let brandTop: CGFloat = 30      // clearance for the traffic lights; no smaller
   static let brandContent: CGFloat = 27
   static let brandBottom: CGFloat = 14
   static var brandBlock: CGFloat { brandTop + brandContent + brandBottom }
@@ -31,13 +24,13 @@ enum SidebarMetrics {
   static let sectionBottom: CGFloat = 4
   static var sectionBlock: CGFloat { sectionTop + sectionContent + sectionBottom }
   static let corner: CGFloat = 8
-  /// 折叠箭头的宽度，同时也是项目标题的起点。
+  /// also where project titles start
   static let disclosure: CGFloat = 20
-  /// 对话行的缩进。圆点落在箭头的右下方，两级之间自然接成一条竖线。
+  /// the dot sits below and right of the chevron, so the two levels line up
   static let childIndent: CGFloat = 20
 }
 
-/// 项目与对话共用一棵导航树；展开只影响浏览，不改变当前工作区。
+/// Projects and conversations share one tree; expanding only browses, it never changes the workspace.
 struct SidebarView: View {
   @ObservedObject var model: AppModel
   @ObservedObject var backend: BackendManager
@@ -70,15 +63,11 @@ struct SidebarView: View {
     }
   }
 
-  /// 品牌压到这一列里最小的可辨识尺寸。
-  ///
-  /// 它是每次开 App 都在、但**一次都不会被点**的东西；先前 23pt 的字加一块
-  /// 大色块占掉顶上 90pt，等于把最贵的位置给了不干活的元素。
-  /// 上留白 30pt 是红绿灯的净空，不能再小。
+  /// Brand at the smallest legible size: always present, never clicked. 30 pt top clears the
+  /// traffic lights.
   private var brand: some View {
     HStack(spacing: 9) {
-      // 色块给一层极浅的投影：纯平的方块在这片淡绿上会"浮"不起来，
-      // 一点点阴影就能让它像一枚压在纸上的印章。半径压到 2.5，再多就脏了。
+      // a faint shadow so the flat mark doesn't sink into the tinted background; radius above 2.5 looks dirty
       ScivaneMark().frame(width: 14, height: 17).padding(5)
         .background(Palette.forest, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .shadow(color: .black.opacity(0.14), radius: 2.5, y: 1)
@@ -106,17 +95,14 @@ struct SidebarView: View {
     .buttonStyle(SidebarRowStyle())
   }
 
-  /// 同一种控件、图标槽与文字槽，避免 SF Symbol 的固有宽度改变两行起点。
-  ///
-  /// **只有主动作那个图标着色。** 两行都是绿的时候，绿色不再表示"这是主动作"，
-  /// 只表示"这是图标"；次动作退回墨色之后，视线第一下才落得到「新建项目」上。
+  /// Fixed icon and text slots, so SF Symbols' intrinsic widths don't shift where the rows start.
+  /// Only the primary action's icon is tinted; otherwise the accent stops meaning anything.
   private func actionRow(_ symbol: String, _ title: String, accent: Bool) -> some View {
     HStack(spacing: 10) {
       Image(systemName: symbol).font(.system(size: 13, weight: accent ? .semibold : .regular))
         .foregroundStyle(accent ? Palette.accent : Palette.inkSoft)
         .frame(width: 18, height: 18)
-      // 字距开 0.15：这两行是整列里字号最大的文字，中文在小字号下挤在一起
-      // 会显得"闷"，开一点点就松下来了 —— 再多就散，不成词。
+      // slight tracking: at this size CJK text otherwise looks cramped
       Text(title).font(.system(size: 13, weight: .medium)).tracking(0.15)
       Spacer(minLength: 0)
     }
@@ -125,7 +111,6 @@ struct SidebarView: View {
     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
   }
 
-  /// 分节标题：安静、小、带一点字距 —— 它是路标，不是按钮。
   private var sectionHeader: some View {
     HStack(spacing: 4) {
       Text(L("项目", "Projects")).font(.system(size: 10.5, weight: .medium)).tracking(0.4)
@@ -205,7 +190,7 @@ struct SidebarView: View {
 
   private var footer: some View {
     VStack(alignment: .leading, spacing: 7) {
-      // 横贯整列，与右侧那条竖线接上；缩在留白里的短线看着像没画完。
+      // full width, meeting the vertical rule on the right
       Rectangle().fill(Palette.ruleSoft).frame(height: 1)
         .padding(.horizontal, -SidebarMetrics.gutter)
       HStack(spacing: 6) {
@@ -229,8 +214,7 @@ struct SidebarView: View {
         }
         .buttonStyle(SidebarRowStyle())
         Spacer(minLength: 0)
-        // 语言与外观同一种形态、并排：两件都是「这台 App 长什么样」，
-        // 一个在设置里有完整的一栏，这里是随手可够的那一处（与外观一样两处入口）。
+        // Same entry points as appearance: a quick one here, the full one in Settings.
         LanguageControl()
         AppearanceControl()
       }.foregroundStyle(Palette.inkSoft)
@@ -256,7 +240,8 @@ struct SidebarView: View {
   }
 }
 
-/// 多个项目可以同时展开；只在展开时读取清单，不为浏览创建空对话。
+/// Several projects can be expanded at once; the list loads on expand, and browsing never creates
+/// an empty conversation.
 struct SidebarProjectGroup: View {
   @ObservedObject var model: AppModel
   let project: Project
@@ -311,12 +296,12 @@ struct SidebarProjectGroup: View {
       }
     }
     .task(id: expanded) {
-      // 离屏画廊只消费夹具，不应为了渲染启动用户的后端。
+      // offscreen galleries use fixtures and must not start the user's backend
       if expanded && model.isLiveApp { await load() }
     }
   }
 
-  /// 与对话行同一个文字起点 —— 占位文字缩在别处会让人以为它属于另一层。
+  /// same text start as conversation rows, so it reads as part of that level
   private func placeholder(_ text: String) -> some View {
     Text(text).font(.system(size: 11)).foregroundStyle(Palette.inkFaint)
       .padding(.leading, SidebarMetrics.childIndent + 13).frame(height: 26)
@@ -357,9 +342,8 @@ struct SidebarConversationRow: View {
       .padding(.leading, SidebarMetrics.childIndent).padding(.trailing, SidebarMetrics.inset)
       .frame(height: SidebarMetrics.treeRow)
       .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-      // **不用 `Palette.selectedRow`。** 那是一块近白的实底，在这片淡绿上像
-      // 贴了张纸；选中该是"比 hover 再深一点"的同一族底色，配上实心圆点与
-      // 加重的字就够认了，避免再加一层装饰。
+      // Not Palette.selectedRow: its near-white fill looks pasted on over the tint. A slightly darker
+      // hover tone, a filled dot and heavier text are enough.
       .background(isCurrent ? Palette.ink.opacity(0.08) : .clear,
                   in: RoundedRectangle(cornerRadius: SidebarMetrics.corner, style: .continuous))
     }

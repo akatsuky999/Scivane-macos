@@ -1,32 +1,15 @@
-"""本地 OCR 组件：它是什么、在哪、齐不齐。
+"""Local OCR component: what it is, where it lives, whether it is complete.
 
-本地 OCR 是**可选组件**：没装时项目管理、阅读、云端问答照常，读者 agent 的
-`reocr` 退出工具注册表（给它看见再拒绝执行更糟）。
+OCR is optional. Without it projects, reading and cloud Q&A still work and `reocr` is not
+registered. COMPONENTS is the single source of truth for paths, sizes and hashes.
 
-**`COMPONENTS` 是事实来源**：一件东西叫什么、在两种布局里的位置、有固定内容的
-那几个文件多大、sha256 多少、从哪下载。`preflight()`、`status()`、启动脚本要的
-路径都由它渲染出来 —— 同一个事实只在一处。
+Discovery order, first complete tier wins:
 
-三档发现（位置在 config.py，逻辑在这里），第一个**齐的**算数：
+    override   SCIVANE_RUNTIME_ROOT        when set, the only place searched
+    component  ~/.scivane/runtime/ocr      installed or migrated by the app
+    legacy     SCIVANE_LEGACY_RUNTIME_DIR  only when set; can be migrated
 
-    覆盖    SCIVANE_RUNTIME_ROOT            设了就只看它 —— 不齐就是不齐，不往下找
-    组件    ~/.scivane/runtime/ocr          带 runtime.json；App 装的，或从旧部署迁来的
-    旧部署  SCIVANE_LEGACY_RUNTIME_DIR      设了才有；报成 legacy，可以一键迁成组件
-
-组件排在旧部署前面，但**齐的优先**：装到一半断掉的组件目录，不该让一套能用的
-旧部署跟着失效。
-
-两种布局：
-
-    component  runtime.json · site/（Python 依赖）· bin/ · models/ · layout/PP-DocLayoutV3/
-    legacy     .venv/（Python 依赖在 venv 里）· bin/ · models/ · 版面模型在 ~/.paddlex 下
-
-命令行：
-
-    python -m scivane_reader.runtime shell     给 start_backend.sh eval 的一组赋值
-    python -m scivane_reader.runtime status    人读的一段体检
-    python -m scivane_reader.runtime migrate   把旧部署迁成组件（见 runtime_install.py）
-    python -m scivane_reader.runtime install   从网上装组件（上游优先，失败或太慢换镜像）
+CLI: python -m scivane_reader.runtime {shell|status|migrate|install}
 """
 
 from __future__ import annotations
@@ -43,9 +26,9 @@ from typing import Mapping
 from . import config
 from .i18n import ui
 
-#: runtime.json 的格式。改结构就升版本号 —— 用户磁盘上已经装好的组件得认得出来。
+#: Bump when runtime.json changes shape; components already installed must stay readable.
 SCHEMA = "scivane.ocr/1"
-#: 这一版组件的身份。换了模型、llama.cpp 或 paddle 的版本就改它，status 据此报「过期」。
+#: Identity of this component build; status reports older ones as outdated.
 BUNDLE = "paddleocr-vl-1.6+llama-b10852+paddle-3.3.1"
 
 COMPONENT = "component"
@@ -54,9 +37,9 @@ LEGACY = "legacy"
 
 @dataclass(frozen=True)
 class Artifact:
-    """一个内容固定的文件：装的时候按它校验，迁移的时候也按它校验。"""
+    """A fixed-content file, verified on install and on migration."""
 
-    path: str  #: 相对于所属那一项的位置；"" 表示那一项本身就是这个文件
+    path: str  # relative to its item; empty means the item itself is the file
     size: int
     sha256: str
     url: str = ""
@@ -66,23 +49,21 @@ class Artifact:
 class Component:
     key: str
     label: str
-    #: 布局 → 这一项的位置（相对于根）。以 "$PADDLEX/" 开头的相对于 config.PADDLEX_CACHE_DIR
+    #: layout -> location relative to the root; "$PADDLEX/" paths are relative to PADDLEX_CACHE_DIR
     paths: Mapping[str, str]
-    #: 布局 → 「在不在」看位置下的哪个文件；没列的布局看位置本身
+    #: layout -> file whose presence marks the item installed; defaults to the location itself
     probe: Mapping[str, str] = field(default_factory=dict)
     executable: bool = False
     artifacts: tuple[Artifact, ...] = ()
-    #: 下载安装时取的压缩包（装好之后里面的文件不逐个校验，校验的是包本身）
+    #: archive fetched on install; its contents are not verified file by file
     archive: Artifact | None = None
     note: str = ""
-    #: 英文界面里的名字与备注（`i18n.py`）。`label` / `note` 本身仍是中文 ——
-    #: 命令行与日志照旧用它们。
+    #: English UI names; label and note stay Chinese for CLI output and logs.
     label_en: str = ""
     note_en: str = ""
 
     @property
     def display_label(self) -> str:
-        """给人看的名字，按这一次请求的界面语言。"""
         return ui(self.label, self.label_en or self.label)
 
     @property
@@ -92,8 +73,8 @@ class Component:
 
 _HF = "https://huggingface.co/PaddlePaddle"
 
-# 大小与 sha256 都是 2026-09-18 实测：与上游的文件逐字节核对过
-# （HuggingFace 的 LFS 哈希、GitHub release 的 digest、小文件的 git blob 哈希）。
+# Sizes and sha256 were checked byte for byte against upstream
+# (HuggingFace LFS hashes, GitHub release digests).
 COMPONENTS: tuple[Component, ...] = (
     Component(
         key="python",
@@ -133,7 +114,6 @@ COMPONENTS: tuple[Component, ...] = (
         artifacts=(Artifact(
             "", 881_770_560, "204d757d7610d9b3faab10d506d69e5b244e32bf765e2bab2d0167e65e0a058a",
             f"{_HF}/PaddleOCR-VL-1.6-GGUF/resolve/main/PaddleOCR-VL-1.6-GGUF-mmproj.gguf"),),
-        # 这个缺了不会报错，只会让模型吐一堆重复字符，排查起来很费时间
         note="缺它的表现是输出重复字符，不是报错",
         note_en="without it the output is repeated characters, not an error",
     ),
@@ -164,11 +144,11 @@ def component(key: str) -> Component:
 
 @dataclass(frozen=True)
 class Candidate:
-    """一档候选：某个根目录，按某种布局去看。"""
+    """One discovery tier: a root directory read with a given layout."""
 
-    tier: str  #: "override" | "component" | "legacy"
+    tier: str  # "override" | "component" | "legacy"
     root: Path
-    layout: str  #: COMPONENT | LEGACY
+    layout: str  # COMPONENT | LEGACY
 
     def location(self, item: Component) -> Path:
         raw = item.paths[self.layout]
@@ -185,7 +165,7 @@ class Candidate:
         return target.exists()
 
     def manifest(self) -> dict | None:
-        """runtime.json 的内容；旧布局没有它。读不懂也当没有 —— 由 problem() 说清楚。"""
+        """Parsed runtime.json, or None (legacy layout, or unreadable)."""
         try:
             data = json.loads((self.root / "runtime.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -193,7 +173,7 @@ class Candidate:
         return data if isinstance(data, dict) else None
 
     def problem(self) -> str | None:
-        """为什么这一档用不了；能用返回 None。"""
+        """Why this tier is unusable, or None."""
         if not self.root.is_dir():
             return ui(f"{self.root} 不存在", f"{self.root} doesn't exist")
         if self.layout == COMPONENT:
@@ -223,8 +203,6 @@ class Candidate:
     def usable(self) -> bool:
         return self.problem() is None
 
-    # --- 启动与识别要的路径 ---------------------------------------------------
-
     @property
     def llama_server(self) -> Path:
         return self.location(component("llama"))
@@ -243,12 +221,12 @@ class Candidate:
 
     @property
     def venv_python(self) -> Path | None:
-        """旧布局：OCR 依赖装在这个 venv 里，完整模式只能用它跑编排层。"""
+        """Legacy layout: the venv holding the OCR dependencies."""
         return self.location(component("python")) if self.layout == LEGACY else None
 
     @property
     def site(self) -> Path | None:
-        """组件布局：OCR 依赖所在的目录，完整模式时接在 PYTHONPATH 末尾。"""
+        """Component layout: OCR dependencies, appended to PYTHONPATH in full mode."""
         return self.location(component("python")) if self.layout == COMPONENT else None
 
 
@@ -257,19 +235,18 @@ def _layout_of(root: Path) -> str:
 
 
 def candidates() -> tuple[Candidate, ...]:
-    """按优先级列出要看的几档。每次现算 —— 装完不重启后端也看得见。"""
+    """Tiers in priority order, recomputed on every call so a fresh install shows up without a restart."""
     if config.RUNTIME_OVERRIDE is not None:
         root = config.RUNTIME_OVERRIDE
         return (Candidate("override", root, _layout_of(root)),)
     tiers = [Candidate("component", config.OCR_COMPONENT_DIR, COMPONENT)]
-    # 旧部署没有默认位置：没设就没有这一档，而不是报一个不存在的目录
+    # No setting means no legacy tier, rather than reporting a missing directory.
     if config.LEGACY_RUNTIME_DIR is not None:
         tiers.append(Candidate("legacy", config.LEGACY_RUNTIME_DIR, LEGACY))
     return tuple(tiers)
 
 
 def resolve() -> Candidate | None:
-    """第一个齐的那一档；都不齐返回 None。"""
     return next((c for c in candidates() if c.usable), None)
 
 
@@ -278,10 +255,7 @@ def available() -> bool:
 
 
 def preflight() -> list[str]:
-    """OCR 用不了的原因；空列表表示能用。
-
-    宁可在启动前一次性说清哪里不对，也不要等到识别到一半才炸。
-    """
+    """Why OCR is unavailable; empty when usable. Checked up front instead of failing mid-recognition."""
     if available():
         return []
     reasons = []
@@ -300,7 +274,6 @@ def unavailable_reason() -> str:
 
 
 def status() -> dict:
-    """给 `/runtime/status` 与界面用的结构化状态。"""
     active = resolve()
     listed = []
     for c in candidates():
@@ -329,26 +302,22 @@ def status() -> dict:
             "bundle": (active.manifest() or {}).get("bundle") if active.layout == COMPONENT else None,
         },
         "expected_bundle": BUNDLE,
-        # 旧部署齐、组件还没有 —— 界面可以提供「一键迁移」（不下载，本机拷贝并校验）
-        # （在用的是旧部署，就说明组件那一档不齐；覆盖生效时不提供迁移）
+        # Offer one-click migration only while the legacy tier is the active one.
         "migratable": active is not None and active.tier == "legacy",
         "candidates": listed,
     }
 
 
 def describe() -> str:
-    """给日志用的一行摘要。"""
     active = resolve()
     if active is None:
         return "ocr=未安装"
     return f"ocr={active.tier}:{active.root}"
 
 
-# --- 命令行 ---------------------------------------------------------------------
-
 
 def _shell() -> str:
-    """给 start_backend.sh `eval` 的赋值。每个值都 shlex.quote 过 —— 路径里有空格也不会拆开。"""
+    """Assignments for start_backend.sh to eval; every value is shlex-quoted."""
     active = resolve()
     values: dict[str, str] = {
         "OCR_TIER": "", "OCR_LAYOUT": "", "OCR_ROOT": "", "OCR_VENV_PYTHON": "", "OCR_SITE": "",
@@ -399,7 +368,6 @@ def main(argv: list[str]) -> int:
 
         def report(kind: str, payload: dict) -> None:
             if kind == "progress":
-                # 终端里每 5 秒报一次就够；界面那边另有节流
                 key = payload["key"]
                 if time.monotonic() - shown.get(key, 0) < 5 and payload["done"] != payload["total"]:
                     return

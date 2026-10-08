@@ -1,13 +1,11 @@
-"""沙箱与执行：让 agent 能在项目目录里安全地跑命令。
+"""Sandboxed execution of the agent's commands inside a project directory.
 
-分三层，换实现时只动中间那层：
-
-    policy.py    只定义接口与词汇 —— 不知道 Seatbelt，也不知道「论文」
-    seatbelt.py  当前实现：生成 .sb 并用 sandbox-exec 起进程
-    runner.py    对上的统一执行接口
-    bash.py      shell 执行器（最小环境、不读 dotfiles、cwd=项目根）
-    python.py    Python 执行器（自带解释器建环境、产物落 workbench/outputs/）
-    git.py       git 执行器（只走 https 的浅克隆，hook 不跑）
+    policy.py    interface and vocabulary only; knows neither Seatbelt nor papers
+    seatbelt.py  the current backend: writes an .sb profile, runs sandbox-exec
+    runner.py    the execution interface consumers use
+    bash.py      shell executor (minimal env, no dotfiles, cwd = project root)
+    python.py    Python executor (bundled interpreter, outputs in workbench/outputs/)
+    git.py       git executor (https-only shallow clones, hooks never run)
 """
 
 from __future__ import annotations

@@ -1,16 +1,13 @@
 import SwiftUI
 
-/// 扫描进度。
-///
-/// 每页要 3–15 秒，几十页的文档就是几分钟 —— 光有一根进度条不够，
-/// 必须给出页码、已用时间和预计剩余，用户才知道该不该走开。
+/// Scan progress. Pages take 3-15 s each, so a bar alone isn't enough: page, elapsed time and
+/// time left tell people whether to walk away.
 struct ScanProgressBar: View {
 
     @ObservedObject var job: DocumentJob
     var onCancel: () -> Void
     var onRetry: (() -> Void)? = nil
-    /// 本地 OCR 刚装好（或刚迁好）：第一次加载新装的引擎要一分钟左右。
-    /// 不说出来，这一分钟里界面只有一根往复的微光，看着像卡死
+    /// first run after an install loads the new engine for about a minute; say so
     var firstRun = false
 
     @State private var showFinished = true
@@ -24,7 +21,7 @@ struct ScanProgressBar: View {
         .animation(.smooth(duration: 0.3), value: job.status)
         .onChange(of: job.status) { _, new in
             guard case .finished = new else { return }
-            // 完成态停留几秒再淡出，让用户来得及看见耗时
+            // keep the finished state a few seconds so the time can be read
             showFinished = true
             Task {
                 try? await Task.sleep(nanoseconds: 4_500_000_000)
@@ -33,14 +30,14 @@ struct ScanProgressBar: View {
         }
     }
 
-    // MARK: - 进度轨
+    // MARK: - Track
 
     @ViewBuilder
     private var track: some View {
         switch job.status {
         case .running(let done, _):
             if done == 0 {
-                // 首页还没回来，进度未知，用往复的微光而不是假装有进度
+                // no page back yet: an indeterminate shimmer rather than fake progress
                 IndeterminateBar()
             } else {
                 GeometryReader { geo in
@@ -61,7 +58,7 @@ struct ScanProgressBar: View {
         }
     }
 
-    // MARK: - 状态行
+    // MARK: - Status line
 
     private var shouldShowStatusLine: Bool {
         switch job.status {
@@ -77,8 +74,7 @@ struct ScanProgressBar: View {
         HStack(spacing: 8) {
             switch job.status {
             case .running(let done, let total):
-                // 显示「正在处理第几页」而不是「已完成几页」——
-                // 单页要十几秒，只报完成数的话界面看起来是卡死的
+                // the page in progress, not pages done: a page takes over ten seconds
                 Text(job.activePage == 0 ? (firstRun ? L("第一次加载新装的识别引擎，大约一分钟…", "Loading the newly installed engine for the first time — about a minute…") : L("正在分析版面…", "Analyzing the layout…")) : L("识别中", "Recognizing"))
                     .foregroundStyle(Palette.inkSoft)
                 if job.activePage > 0 {
@@ -171,7 +167,8 @@ struct ScanProgressBar: View {
             .background(Palette.panel, in: Capsule())
     }
 
-    /// 用已完成页的平均耗时外推。首页没回来之前不给数字 —— 瞎猜的 ETA 比没有更糟。
+    /// Extrapolated from finished pages; nothing until the first one is back. A guessed ETA is worse
+    /// than none.
     private var remaining: Double? {
         guard case .running(let done, let total) = job.status,
               done > 0, total > done, job.elapsed > 0 else { return nil }
@@ -187,7 +184,7 @@ struct ScanProgressBar: View {
     }
 }
 
-/// 进度未知时的往复微光。比转圈安静，也不占地方。
+/// quieter than a spinner and takes no room
 private struct IndeterminateBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var shift: CGFloat = -0.35

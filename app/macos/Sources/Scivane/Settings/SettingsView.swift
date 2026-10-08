@@ -4,32 +4,29 @@ struct SettingsView: View {
     @ObservedObject var backend: BackendManager
     @ObservedObject var model: AppModel
     @AppStorage("appearance") private var appearance: AppAppearance = .system
-    /// 打开时停在哪一页。正常使用一律从 0 开始；渲染检查时可以直接停在别的页。
+    /// normally 0; offscreen checks can open another tab
     var initialTab = 0
-    /// 打开时哪张卡是展开的。**同样只为渲染检查** —— 展开态是这一页最容易
-    /// 排版塌掉的地方（一列输入框加一排按钮），得能直接打开到这个状态来看。
+    /// for offscreen checks: the expanded card is the layout most likely to break
     var initialExpanded: String?
     @State private var tab = 0
     @State private var projectPath: String = ""
     @State private var runtimePath: String = ""
     @State private var idleMinutes: Double = 5
 
-    // --- 模型 ---
+    // Models
     @State private var secretDraft = ""
     @State private var testing = false
     @State private var testResult: (ok: Bool, message: String)?
     @State private var saveResult: (ok: Bool, message: String)?
 
-    /// 正在编辑的那份配置。**不直接改 model.providers** ——
-    /// 那是后端的事实，编辑中的草稿是另一回事；混在一起的话打字打到一半
-    /// 列表就跳了。
+    /// Not model.providers: that is the backend's state, and editing it directly would make the list
+    /// jump while typing.
     @State private var draft = ProviderDraft()
     @State private var creating = false
     @State private var confirmingDelete = false
-    /// 哪张卡是展开的。**只展开一张** —— 同时摊开三份表单，人会分不清
-    /// 正在改的是哪一张，而它们的字段长得一模一样。
+    /// one at a time: several identical forms make it unclear which one is being edited
     @State private var expanded: String?
-    /// 共享 key 的索引（**不含秘密**，只有编号、备注、掩码）。
+    /// id, note and mask only; no secrets
     @State private var macroKeys: [MacroKeys.Entry] = MacroKeys.all
 
     private struct ProviderDraft {
@@ -38,18 +35,22 @@ struct SettingsView: View {
         var proto = AppModel.ProviderDefaults.proto
         var model = ""
         var baseURL = ""
-        /// 上下文窗口，**可留空**。填了输入区才画余量条。
+        /// optional; empty uses the endpoint's reported window
         var window = ""
-        /// 推理预算档位。
         var reasoning = AppModel.ProviderDefaults.reasoning
-        /// key 从哪来：`own` 或 `macro:<编号>`。
+        /// `own` or `macro:<id>`
         var credentialRef = "own"
     }
 
-    /// 把某一张卡读进草稿。展开、刚保存完都要走一遍。
-    ///
-    /// **不直接改 model.providers**：那是后端的事实，编辑中的草稿是另一回事；
-    /// 混在一起的话打字打到一半列表就跳了。
+    /// the reported window when there is one (empty keeps it), otherwise an example
+    private var windowPrompt: String {
+        if let detected = model.providers.first(where: { $0.id == draft.id })?.detectedWindow {
+            return L("自动 \(detected)", "Auto \(detected)")
+        }
+        return L("可留空，例如 1000000", "Optional, e.g. 1000000")
+    }
+
+    /// Load a card into the draft, on expanding and after saving.
     private func loadDraft(_ id: String) {
         guard let found = model.providers.first(where: { $0.id == id }) else { return }
         draft = ProviderDraft(
@@ -67,7 +68,7 @@ struct SettingsView: View {
 
     private func startNew(_ preset: (id: String, label: String, model: String,
                                      baseURL: String, window: Int?)? = nil) {
-        // 已经有同名卡时给个后缀，不然「创建」会静默覆盖掉那一张
+        // suffix an existing id, or Create would silently overwrite that card
         var identifier = preset?.id ?? ""
         if !identifier.isEmpty, model.providers.contains(where: { $0.id == identifier }) {
             var n = 2
@@ -88,16 +89,8 @@ struct SettingsView: View {
         saveResult = nil
     }
 
-    /// 模型这一页。
-    ///
-    /// **不是「选一个厂商」，是填「协议 + 地址 + 模型名」。** 这个系统里
-    /// 「厂商」不是一个概念：接 DeepSeek 是 openai + api.deepseek.com/v1，
-    /// 接本地 Ollama 是 openai + localhost:11434/v1，两者共用同一个适配器。
-    /// 所以只要能给出 URL 和 key，填上模型名就能用。
-    ///
-    /// 红线：**key 不进日志、不进错误消息、不回显**。
-    /// 所以只有「填一个新的」，没有「看一眼现在填的是什么」，也没有复制按钮 ——
-    /// 想确认填对没有就点「测试连接」。
+    /// Models: protocol, address and model name rather than a vendor list. Keys can only be replaced,
+    /// never shown or copied; Test connection checks them.
     @ViewBuilder
     private var modelTab: some View {
         Section(L("共享 key", "Shared Keys")) {
@@ -110,9 +103,8 @@ struct SettingsView: View {
             if model.providers.isEmpty && !creating {
                 Text(L("还没有模型卡", "No model cards yet")).font(.uiCaption).foregroundStyle(Palette.inkFaint)
             }
-            // **不给每张卡再套一层圆角框。** Form 的分组本身就是一个容器，
-            // 里面再画框就是「框里的框」，最显廉价。
-            // 卡与卡之间用一条细线分开；当前默认那张只做一层极淡的底。
+            // No frame per card: the Form section is already a container. Hairlines between cards, a faint
+            // background on the default one.
             ForEach(Array(model.providers.enumerated()), id: \.element.id) { index, entry in
                 VStack(alignment: .leading, spacing: 0) {
                     if index > 0 { Hairline() }
@@ -137,9 +129,8 @@ struct SettingsView: View {
                     editor(creatingNew: true)
                 }
             } else {
-                // 三个预置接入点也从这里拿得到 —— 首启那次只在「一张卡都没有」时
-                // 建，已经配过卡的人本来永远碰不到它们，而**地址正是最不该让人
-                // 去翻文档的东西**。
+                // The presets stay reachable here; the first launch only creates them when there are no cards,
+                // and base URLs shouldn't require reading docs.
                 Menu {
                     ForEach(AppModel.presets, id: \.id) { preset in
                         Button(preset.label) { startNew(preset) }
@@ -154,7 +145,7 @@ struct SettingsView: View {
         }
     }
 
-    /// 展开的那张卡的编辑区。
+    /// Editor of the expanded card.
     @ViewBuilder
     private func editor(creatingNew: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -187,7 +178,7 @@ struct SettingsView: View {
                     .font(.system(size: 11.5, design: .monospaced))
             }
             labelled(L("上下文窗口", "Context")) {
-                TextField("", text: $draft.window, prompt: Text(L("可留空，例如 1000000", "Optional, e.g. 1000000")))
+                TextField("", text: $draft.window, prompt: Text(windowPrompt))
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11.5, design: .monospaced))
             }
@@ -238,7 +229,7 @@ struct SettingsView: View {
         .background(Palette.sunk.opacity(0.35))
     }
 
-    /// key 从哪来：共享的那把，还是这张卡自己填。
+    /// Shared key, or one stored on this card.
     @ViewBuilder
     private func keyEditor() -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -284,17 +275,16 @@ struct SettingsView: View {
         }
     }
 
-    /// 编辑区里「标签 + 控件」的统一排法。Form 自带的那套在窄栏里会把
-    /// 占位文字挤到框外面去，看着像排版塌了。
+    /// Label and control laid out by hand: Form's own layout pushes placeholders out of the field in a
+    /// narrow window.
     private func labelled<Content: View>(
         _ title: String, @ViewBuilder content: () -> Content
     ) -> some View {
         HStack(spacing: 10) {
             Text(title).font(.uiCaption).foregroundStyle(Palette.inkSoft)
                 .frame(width: 60, alignment: .leading)
-            // Form 会把控件推到右边、里面的文字也跟着右对齐 ——
-            // 一列右对齐的输入框读起来像排版塌了。两件都要钉：
-            // 控件本身占满剩余宽度，文字在控件内部靠左。
+            // Form right-aligns controls and their text; pin the control to the remaining width and the
+            // text to the leading edge.
             content()
                 .labelsHidden()
                 .multilineTextAlignment(.leading)
@@ -312,7 +302,7 @@ struct SettingsView: View {
         return Keychain.has(provider: entry.id) ? .own : .missing
     }
 
-    /// 每把共享 key 被几张卡引用。删之前要让人看见这个数。
+    /// cards using each shared key; shown before deleting
     private var macroUsage: [String: Int] {
         var counts: [String: Int] = [:]
         for entry in model.providers where entry.credentialRef.hasPrefix("macro:") {
@@ -349,9 +339,7 @@ struct SettingsView: View {
     private func saveSecret() {
         let secret = secretDraft
         secretDraft = ""
-        // 存进**这张展开的卡**名下，不是「当前默认那张」——
-        // 两者早先是同一个值，改成卡片之后就不是了，照旧写的话
-        // 会把 key 存到另一张卡上，而两张卡都显示得好好的。
+        // Save under the expanded card, not the default one; they used to be the same.
         let target = draft.id
         Task {
             let ok = await model.saveCredential(secret, provider: target)
@@ -380,7 +368,7 @@ Picker(L("设置分类", "Settings Section"), selection: $tab) {
 Form {
 if tab == 0 {
 
-            // 语言放在最前：切错了语言的人第一眼就要看得到它（分节标题两种语言都写）
+            // language first, so someone who switched by mistake finds it (the title is bilingual)
             LanguageSettings(busy: model.hasBackendWork)
 
             Section(L("外观", "Appearance")) {
@@ -396,8 +384,7 @@ if tab == 0 {
             }
             if tab == 2 {
                 modelTab
-                    // 每次进这一页都重读一次共享 key —— 它存在 UserDefaults 里，
-                    // 别处（比如另一个窗口）改过的话这里要跟上。
+                    // reread shared keys on every visit: they live in UserDefaults and may have changed elsewhere
                     .onAppear {
                         macroKeys = MacroKeys.all
                         if let initialExpanded, expanded == nil { toggle(initialExpanded) }

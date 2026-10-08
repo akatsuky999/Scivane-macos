@@ -1,17 +1,9 @@
-"""把工具调用与结果写进会话日志。
+"""Writes tool calls and results into the conversation log.
 
-遵守一条纪律：**凡是进入过模型请求的东西都必须能从日志重建**。
-对工具而言就是：调用了什么、
-参数是什么、返回了什么、用户批准还是拒绝，全部落盘。
-
-科研场景尤其需要这个 —— 一个结论往往来自某次 grep 命中的某一行，
-「这是怎么得出来的」必须能回答。
-
-**结果与调用用 call_id 配对，且结果事件记下它对应的调用。** 这样即使中途
-取消、日志尾部不完整，也能看出哪次调用没有结果。
-
-安全：参数与结果原样落盘，但**日志里不会出现凭据** —— 工具参数里没有
-API key（模型层的凭据走 credentials.py，从不经过工具），这一条有测试钉着。
+Everything that went into a model request must be rebuildable from the log: what was called,
+with which arguments, what came back, approved or refused. Results record their call_id, so
+a call without a result is visible even after a cancel. Credentials never appear here: tool
+arguments never carry API keys, and a test checks it.
 """
 
 from __future__ import annotations
@@ -23,7 +15,7 @@ from ..projects.model import ProjectEvent
 
 __all__ = ["Journal", "NullJournal", "StoreJournal", "ABORTED_BEFORE_DISPATCH"]
 
-#: 取消后给未派发调用补的合成结果所用的稳定码。
+#: stable code for synthetic results added after a cancel
 ABORTED_BEFORE_DISPATCH = "TOOL_ABORTED_BEFORE_DISPATCH"
 
 
@@ -35,7 +27,7 @@ class EventSink(Protocol):
 
 
 class Journal(Protocol):
-    """日志写入口。做成协议是为了让书房层（没有项目）也能用 NullJournal。"""
+    """Log sink. A protocol so the librarian (no project) can use NullJournal."""
 
     def tool_call(self, call_id: str, name: str, arguments: dict) -> None: ...
     def tool_result(self, call_id: str, name: str, content: str, *, is_error: bool,
@@ -46,7 +38,7 @@ class Journal(Protocol):
 
 
 class NullJournal:
-    """不落盘。书房层用 —— 它不属于任何项目，没有 session.jsonl 可写。"""
+    """Writes nothing; the librarian belongs to no project."""
 
     def tool_call(self, call_id: str, name: str, arguments: dict) -> None: ...
     def tool_result(self, call_id: str, name: str, content: str, *, is_error: bool,
@@ -58,11 +50,8 @@ class NullJournal:
 
 @dataclass
 class StoreJournal:
-    """写进项目里**某一条对话**的日志（沿用既有的 append-only 约定）。
-
-    `conversation` 是必填的：一个项目可以有多条对话，而「这一轮发生的事
-    属于哪一次谈话」不是这一层能猜的 —— 路由层装配请求时就已经定下了
-    （`store.ensure_conversation`），带着它进来即可。
+    """Writes into one conversation's log. `conversation` is required: the route settled it when
+    assembling the request (store.ensure_conversation).
     """
 
     store: EventSink
@@ -87,8 +76,7 @@ class StoreJournal:
         if detail:
             data["detail"] = detail
         if synthetic:
-            # 标出这条不是工具跑出来的，是取消后补的。回放时要能分辨
-            # 「工具报错了」和「工具根本没跑」。
+            # marks a result added after a cancel, so replays tell "tool failed" from "tool never ran"
             data["synthetic"] = True
         self._append(ProjectEvent.TOOL_RESULT, data)
 
@@ -98,10 +86,19 @@ class StoreJournal:
             **({"reason": reason} if reason else {}),
         })
 
-    def assistant_message(self, text: str, *, stop: str) -> None:
-        self._append(ProjectEvent.ASSISTANT_MESSAGE, {
-            "text": text, "stop": stop,
-        })
+    def assistant_message(
+        self, text: str, *, stop: str,
+        usage: dict | None = None, estimate: int | None = None,
+    ) -> None:
+        """`usage` and `estimate` are this step's reported usage and estimate
+        (Compactor.step_record); numbers only, used to calibrate the context next time.
+        """
+        data: dict[str, object] = {"text": text, "stop": stop}
+        if usage:
+            data["usage"] = usage
+        if estimate:
+            data["estimate"] = estimate
+        self._append(ProjectEvent.ASSISTANT_MESSAGE, data)
 
     def user_message(self, text: str) -> None:
         self._append(ProjectEvent.USER_MESSAGE, {"text": text})

@@ -1,11 +1,7 @@
-"""大模型接入的 HTTP 路由。
+"""HTTP routes for the model layer: validation, SSE framing, provider CRUD. No vendor knowledge.
 
-只做编排：参数校验、把统一分片译成 SSE 帧、provider 的增删查。真正的调用
-逻辑在 scivane_reader.llm，这一层不含任何厂商知识。
-
-**取消是自动的**：客户端断开 → StreamingResponse 的迭代被取消 →
-CancelledError 传进 registry 的生成器 → httpx 的 async with 断开上游连接。
-不让请求在后台空跑烧钱，与 OCR 那条链路「SSE 断流即标记取消」同一个思路。
+Cancellation is automatic: a client disconnect cancels the StreamingResponse iteration,
+which closes the upstream connection.
 """
 
 from __future__ import annotations
@@ -41,9 +37,6 @@ logger = logging.getLogger("scivane.api.llm")
 router = APIRouter(prefix="/llm", tags=["llm"])
 
 
-# --------------------------------------------------------------------------
-# 请求模型
-# --------------------------------------------------------------------------
 class BlockIn(BaseModel):
     type: Literal["text", "image"] = "text"
     text: str = ""
@@ -53,7 +46,7 @@ class BlockIn(BaseModel):
 
 class MessageIn(BaseModel):
     role: Literal["user", "assistant"]
-    #: 纯文本直接给字符串；要带图时给块数组。
+    #: plain text as a string, or blocks when images are attached
     content: str | list[BlockIn]
 
     def to_message(self) -> Message:
@@ -75,8 +68,8 @@ class ChatRequest(BaseModel):
     system: str | None = None
     max_tokens: int | None = None
     temperature: float | None = None
-    #: 前 N 条消息属于静态上下文（论文 Markdown 就放在这里）。
-    #: 详见 llm/cache.py —— 这是 prompt 缓存能否命中的关键。
+    #: The first N messages are static context (the paper); this decides whether the prompt
+    #: cache hits. See llm/cache.py.
     cacheable_prefix: int = 0
     purpose: Literal["foreground", "background"] = "foreground"
 
@@ -87,11 +80,10 @@ class ProviderIn(BaseModel):
     model: str
     base_url: str = ""
     label: str = ""
-    #: 上下文窗口（token）。可选 —— 给了才画余量条，**不猜**。
+    #: hand-filled window; otherwise the endpoint is asked. Never guessed.
     context_window: int | None = Field(default=None, gt=0)
-    #: 推理预算档位。留空 = 用默认（medium）。
     reasoning: str | None = Field(default=None, pattern="^(none|low|medium|high)$")
-    #: key 从哪来：own 或 macro:<编号>。**不是秘密**，见 ProviderConfig。
+    #: where the key comes from: own or macro:<id>; not a secret
     credential_ref: str = Field(default="own", pattern=r"^(own|macro:[A-Za-z0-9_-]{1,32})$")
 
 
@@ -99,29 +91,17 @@ class CredentialIn(BaseModel):
     api_key: str
 
 
-# --------------------------------------------------------------------------
-# provider 管理
-# --------------------------------------------------------------------------
 @router.get("/providers")
 async def list_providers():
-    """列出已配置的 provider 及其凭据状态。
-
-    响应里**没有任何凭据原文** —— 只有「配没配」「来自哪里」和一个指纹，
-    指纹用来回答「我现在配的还是上次那把吗」。
-    """
+    """Configured providers and their credential status. Never key material, only a fingerprint."""
     return {"providers": registry.describe_all()}
 
 
 @router.post("/providers")
 async def add_provider(body: ProviderIn):
-    """新增或改写一个 provider。**立刻生效，并落盘。**
+    """Create or replace a provider; takes effect immediately and is persisted.
 
-    同一个 id 再 POST 一次就是改写 —— 设置界面改地址、改模型名都走这里。
-
-    落盘在后端做而不是让 App 去写 providers.json：路径只在
-    `config.LLM_PROVIDERS_PATH` 这一处定义，让 Swift 再硬编码一份
-    `~/.scivane/providers.json` 必然漂移，而漂移之后的症状是
-    「设置里明明改了，重启就回到旧的」，极难查。
+    The backend owns providers.json so its path is defined in one place.
     """
     if not body.id.strip():
         raise HTTPException(status_code=400, detail=ui("id 不能为空", "The id can't be empty"))
@@ -150,15 +130,11 @@ async def remove_provider(provider_id: str):
 
 @router.post("/providers/{provider_id}/credential")
 async def set_credential(provider_id: str, body: CredentialIn):
-    """设置凭据（仅本进程内存，**不落盘**）。
-
-    持久化交给 App 侧的 Keychain：那里有系统级加密，也不会被误提交进 Git。
-    后端只负责「现在能用」。
-    """
+    """Set a credential in memory only; the app persists keys in the Keychain."""
     try:
         registry.credentials.set_runtime(provider_id, body.api_key)
     except LlmError as exc:
-        # 这里绝不能把 api_key 回显进错误消息
+        # never echo the api_key into the error message
         raise HTTPException(status_code=400, detail=exc.failure.message) from exc
     return {"provider": provider_id, **registry.credentials.describe(provider_id)}
 
@@ -171,16 +147,13 @@ async def clear_credential(provider_id: str):
 
 @router.post("/providers/{provider_id}/test")
 async def test_provider(provider_id: str):
-    """打一次最小请求确认真的能用。设置界面「测试连接」背后就是它。"""
+    """Send one minimal request to prove the provider works (Settings > Test)."""
     try:
         return await registry.test(provider_id)
     except LlmError as exc:
         return {"ok": False, "code": exc.code, "message": exc.failure.message}
 
 
-# --------------------------------------------------------------------------
-# 问答（SSE 流式）
-# --------------------------------------------------------------------------
 @router.post("/chat")
 async def chat(body: ChatRequest):
     try:
@@ -219,8 +192,7 @@ async def chat(body: ChatRequest):
                         payload["usage"] = chunk.usage.as_dict()
                     yield encode(LlmEvent.FINISH, payload)
         except LlmError as exc:
-            # 凭据缺失这类失败发生在建连之前，拿不到流，这里补一个终态，
-            # 保证客户端无论如何都能收到恰好一个 finish
+            # Failures before the stream exists (missing credentials) still get exactly one finish.
             logger.info("llm 请求未能开始：%s", exc.code)
             yield encode(
                 LlmEvent.FINISH,

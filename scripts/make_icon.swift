@@ -1,8 +1,6 @@
-// 生成 Scivane.icns：墨绿方砖 + 象牙折页 L 标志。
-// 用法： swift scripts/make_icon.swift <输出目录>
-// 产物：<输出目录>/ 下的 Scivane.iconset/、Scivane.icns、icon_1024.png
-//
-// 取代了早期的 make_icon.py（暖炭底+琥珀扇形），那版已随品牌更新弃用。
+// Generates Scivane.icns: dark green tile with the ivory folded-page L.
+// Usage: swift scripts/make_icon.swift <output dir>
+// Writes Scivane.iconset/, Scivane.icns and icon_1024.png into <output dir>.
 import AppKit
 
 let out = URL(fileURLWithPath: CommandLine.arguments[1])

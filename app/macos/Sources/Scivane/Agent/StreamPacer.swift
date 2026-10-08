@@ -2,37 +2,26 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
-/// 正在生成的那一条：**已经收到的**和**屏幕上显示到哪了**分开记，屏幕逐帧追上去。
+/// The streaming message: what has been received and what is on screen are kept apart, and the
+/// screen catches up every frame.
 ///
-/// ## 为什么要有这一层
+/// Chunks arrive in bursts, with pauses of a few hundred ms in between. Updating the transcript
+/// every 50 ms left most frames unchanged and the rest jumping by dozens of bytes.
 ///
-/// 模型的分片是成簇来的 —— 平时每秒上百个，偶尔停一两百毫秒再一口气涌来一串
-/// （经代理转发的流就是这个样子）。从前攒到 50ms 落一次记录，实测
-/// （本地流式基准，M5/16GB）：**83% 的帧屏幕上一个字都不动**，
-/// 动的那一帧平均跳 38 个字节、最多 160 个 —— 「一卡一卡」里「一」的那一半。
-/// 主线程再闲也救不了它：节奏本身就是一顿一顿的。
+/// 1. Only the streaming row observes this. Per-frame changes never touch AgentSession.items,
+///    whose updates recompute the whole panel at a cost that grows with history. The transcript
+///    changes only at structural moments: first text, and finish().
+/// 2. The screen always shows a prefix of what was received and catches up exponentially: each
+///    frame reveals a fixed share of the backlog (time constant `catchUp`), at least one
+///    character. Bursts unroll fast then slow, pauses settle smoothly.
 ///
-/// ## 两条纪律
-///
-/// 1. **只有正在生成的那一行观察它。** 逐帧的变化不经过 `AgentSession.items`：
-///    从前每落一次记录，整个面板（对话流里的每一行、输入框、状态栏）都要重算一遍，
-///    而且历史越长越贵（12 轮历史下思考阶段主线程 28%，空对话 11%）。
-///    记录只在结构性的时刻改：这一路第一次有字、以及定稿（`finish()`）。
-/// 2. **屏幕上永远是已收到的前缀，追赶是指数式的。** 每帧露出积压的一个固定比例
-///    （时间常数 `catchUp`），至少一个字：一簇涌来时先快后慢地铺开，停顿时平滑地收住，
-///    平均滞后约等于时间常数。这是 codex TUI「平滑 / 追赶」两档
-///    （`streaming/chunking.rs`）在逐字显示上的对应物 —— 它按行、两档切换还要加迟滞
-///    防抖；按字走一条连续的指数曲线，本来就没有档位可抖。
-///
-/// 结构性事件（工具调用、批准、新一步、收尾）到来时由会话调 `finish()`：屏幕立刻补齐、
-/// 全文写回记录 —— 一句旁白必须排在它后面那个工具调用之前。
+/// Structural events (tool calls, approvals, a new step, the end) call finish(): the screen
+/// catches up at once and the full text goes into the transcript, so narration stays ahead of
+/// the tool call that follows it.
 @MainActor
 final class StreamPacer: NSObject, ObservableObject {
 
-  /// 屏幕上此刻显示的正文与推理。
-  ///
-  /// **两路合成一个值发布**：分开两个 `@Published` 的话，同一帧两路都动时
-  /// 观察者要重画两次。
+  /// Text and reasoning published as one value, so a frame where both move redraws once.
   struct Shown: Equatable {
     var text = ""
     var thinking = ""
@@ -40,13 +29,11 @@ final class StreamPacer: NSObject, ObservableObject {
 
   @Published private(set) var shown = Shown()
 
-  /// 追赶的时间常数（秒）：每帧露出积压的 1 − e^(−Δt/τ)。
-  ///
-  /// 取 0.1 秒：平均滞后与从前「攒 50ms + 等下一帧」相当（实测 100–140ms），
-  /// 换来的是每一帧都在动。再小就退回「来多少蹦多少」，再大则停顿之后要追很久。
+  /// Each frame reveals 1 - e^(-dt/tau) of the backlog. 0.1 s keeps the average lag of the old
+  /// 50 ms batching while moving every frame; smaller jumps, larger lags after a pause.
   static let catchUp: TimeInterval = 0.1
 
-  /// 分段计时（`AgentTiming`，默认关）：每次发布记下屏幕上有多少字。
+  /// off by default; records visible length on each publish
   var timing: AgentTiming?
 
   private var text = Channel()
@@ -55,17 +42,16 @@ final class StreamPacer: NSObject, ObservableObject {
   private var timer: Timer?
   private var lastTick: CFTimeInterval?
 
-  /// 已收到、还没显示的字数（两路合计）。给断言与基准用。
+  /// both channels; for checks and benchmarks
   var backlog: Int { text.backlog + thinking.backlog }
 
-  /// 收到一个分片。
   func receive(_ chunk: String, thinking isThinking: Bool) {
     guard !chunk.isEmpty else { return }
     if isThinking { thinking.append(chunk) } else { text.append(chunk) }
     startTicking()
   }
 
-  /// 屏幕立刻补齐、停下，返回已收到的全文。**结构性事件与收尾走这里。**
+  /// Catch up at once and stop; returns the full text. Used for structural events and the end.
   @discardableResult
   func finish() -> Shown {
     text.revealAll()
@@ -75,7 +61,7 @@ final class StreamPacer: NSObject, ObservableObject {
     return Shown(text: text.target, thinking: thinking.target)
   }
 
-  /// 换一条消息：清空。
+  /// new message: clear
   func reset() {
     stopTicking()
     text = Channel()
@@ -83,10 +69,10 @@ final class StreamPacer: NSObject, ObservableObject {
     if shown != Shown() { shown = Shown() }
   }
 
-  /// 推进一帧。`now` 是这一帧的时间戳 —— 断言与基准也走这个缝，拿确定的时间驱动它。
+  /// `now` is the frame timestamp; checks and benchmarks drive it with fixed times.
   func tick(at now: CFTimeInterval) {
-    // 两帧之间的时间夹在 [1/240, 0.1]：主线程被别的事占住半秒之后，
-    // 不该一帧把半秒的积压全倒出来 —— 那正是要消灭的「跳一截」。
+    // clamp dt to [1/240, 0.1]: after the main thread was busy for half a second, don't dump half a
+    // second of backlog in one frame
     let dt = lastTick.map { min(max(now - $0, 1.0 / 240), 0.1) } ?? (1.0 / 60)
     lastTick = now
     let movedText = text.advance(dt: dt, tau: Self.catchUp)
@@ -105,20 +91,20 @@ final class StreamPacer: NSObject, ObservableObject {
     }
   }
 
-  // MARK: - 帧时钟
+  // MARK: - Frame clock
 
-  /// 有积压才走帧时钟，追平就停 —— 空闲时一帧的活都不该有。
+  /// Runs only while there is a backlog; idle means no work per frame.
   private func startTicking() {
     guard link == nil, timer == nil else { return }
     lastTick = nil
     if let screen = NSScreen.main {
-      // 跟着屏幕刷新走（macOS 14 起 NSScreen 直接给显示链接）：每帧恰好一次，
-      // 和 SwiftUI 画帧对齐。普通 Timer 与刷新不同步，会时而一帧两次、时而一次没有。
+      // Display link (NSScreen, macOS 14+): exactly once per frame, in step with SwiftUI. A plain Timer
+      // drifts and sometimes fires twice or not at all in a frame.
       let link = screen.displayLink(target: self, selector: #selector(step(_:)))
       link.add(to: .main, forMode: .common)
       self.link = link
     } else {
-      // 没有屏幕（无显示器的环境）：退回 60Hz 的计时器，保证字照样会追平。
+      // no screen (headless): fall back to a 60 Hz timer so text still catches up
       timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
         MainActor.assumeIsolated { self?.tick(at: CACurrentMediaTime()) }
       }
@@ -136,15 +122,13 @@ final class StreamPacer: NSObject, ObservableObject {
     tick(at: link.timestamp)
   }
 
-  // MARK: - 一路字
+  // MARK: - Channel
 
   private struct Channel {
     private(set) var target = ""
-    /// 屏幕显示到 `target` 的第几个 UTF-8 字节（总在字符边界上）。
-    ///
-    /// **记偏移量而不是 `String.Index`**：字符串追加之后，之前取到的索引不保证仍然可用。
+    /// A UTF-8 byte offset into `target`, always on a character boundary. Not a String.Index: indices
+    /// aren't guaranteed valid after appending.
     private var shownBytes = 0
-    /// 已收到、还没显示的字数。
     private(set) var backlog = 0
 
     var visible: String {
@@ -162,7 +146,7 @@ final class StreamPacer: NSObject, ObservableObject {
       backlog = 0
     }
 
-    /// 露出这一帧该露的字。返回屏幕上有没有变化。
+    /// Returns whether anything changed on screen.
     mutating func advance(dt: TimeInterval, tau: TimeInterval) -> Bool {
       guard backlog > 0 else { return false }
       let share = Double(backlog) * (1 - exp(-dt / tau))
@@ -172,8 +156,8 @@ final class StreamPacer: NSObject, ObservableObject {
       let to = target.index(from, offsetBy: step, limitedBy: target.endIndex) ?? target.endIndex
       shownBytes = utf8.distance(from: utf8.startIndex, to: to)
       backlog -= step
-      // 分片的字数是分开数的：一个组合字符恰好被切在两个分片之间时会多数一个。
-      // 到了末尾就是追平了 —— 不这样兜住，帧时钟会为一个不存在的字一直跑下去。
+      // Chunk sizes are counted separately, so a character split across chunks counts once extra. At
+      // the end the backlog is zero by definition, or the clock would run for a phantom character.
       if to == target.endIndex { backlog = 0 }
       return true
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// 一篇论文。字段与后端 `scivane_reader.projects.model.Project` 一一对应。
+/// A paper. Fields match projects.model.Project in the backend.
 struct Project: Codable, Identifiable, Equatable, Hashable {
   let id: String
   var title: String
@@ -11,10 +11,9 @@ struct Project: Codable, Identifiable, Equatable, Hashable {
   var updatedAt: String
   var context: ProjectContext?
   var hasUsableContext: Bool
-  /// 有没有原稿。空项目（直接新建、还没导入 PDF）没有 ——
-  /// 界面据此决定要不要摆出阅读区。
+  /// false for an empty project (created without a PDF); decides whether a reading area is shown
   var hasSource: Bool = false
-  /// 项目目录。App 直接按路径读原稿与插图，不走 HTTP 搬运大文件。
+  /// The app reads the source and figures by path rather than moving large files over HTTP.
   var dir: String
   var sourcePath: String?
   var contextPath: String?
@@ -23,7 +22,7 @@ struct Project: Codable, Identifiable, Equatable, Hashable {
   var contextURL: URL? { contextPath.map { URL(fileURLWithPath: $0) } }
   var directoryURL: URL { URL(fileURLWithPath: dir) }
 
-  /// 有正文但还没人确认它是不是这篇论文。界面据此弹确认条。
+  /// has text that nobody has confirmed belongs to this paper; shows the confirmation bar
   var awaitsConfirmation: Bool {
     guard let context else { return false }
     return !context.confirmed
@@ -33,18 +32,16 @@ struct Project: Codable, Identifiable, Equatable, Hashable {
     titleSource == "filename" || titleSource == "pdf-metadata" || titleSource == "pdf-heading"
   }
 
-  /// 界面上显示的名字。
-  ///
-  /// 空项目留空时，后端存的是占位名「未命名项目」（`title_source = placeholder`）。
-  /// 那是写在磁盘上的数据，**不改它**；只在显示时按界面语言说 —— 中文界面里与盘上逐字相同。
-  /// 用户自己打的名字（哪怕恰好也叫「未命名项目」）来源是 manual，原样显示。
+  /// An empty project's stored title is the placeholder "未命名项目" (title_source = placeholder).
+  /// That is data on disk and stays as is; only the display follows the UI language. A name the
+  /// user typed (title_source = manual) is shown verbatim, even if it is the same text.
   var displayTitle: String {
-    // 不翻：比对的是后端写在盘上的占位名（store.py 的 UNTITLED）
+    // 不翻: compares with the placeholder the backend writes to disk (UNTITLED in store.py)
     titleSource == "placeholder" && title == "未命名项目"
       ? L("未命名项目", "Untitled Project") : title
   }
 
-  /// 给预览与离屏验证造样本用。真实数据一律从后端解码。
+  /// for previews and offscreen checks; real data is always decoded from the backend
   static func sample(id: String, title: String, sourceName: String = "") -> Project {
     Project(
       id: id, title: title, titleSource: "markdown-heading", sourceName: sourceName,
@@ -64,7 +61,6 @@ struct ProjectContext: Codable, Equatable, Hashable {
 
   var fromOCR: Bool { origin == "ocr" }
 
-  /// 给界面显示「这篇论文有多大」。
   var sizeLabel: String {
     guard tokens >= 1000 else { return L("约 \(tokens) token", "~\(tokens) tokens") }
     let wan = String(format: "%.1f", Double(tokens) / 10000)
@@ -73,38 +69,29 @@ struct ProjectContext: Codable, Equatable, Hashable {
   }
 }
 
-/// 项目里的一条对话。字段与后端 `projects/conversations.py` 的 `summarise()` 对应。
-///
-/// **一个项目可以有多条**，各自一份 `.lumen/conversations/<id>.jsonl`。
-/// 换一条对话就是换一段历史 —— 这正是它在模型那边的全部含义。
+/// A conversation in a project; fields match summarise() in projects/conversations.py. Each one
+/// is its own .lumen/conversations/<id>.jsonl.
 struct Conversation: Codable, Identifiable, Equatable, Hashable {
   let id: String
   var title: String
   var messages: Int
   var createdAt: String
   var updatedAt: String
-  /// 这条对话选定的模型卡。**nil = 没选过**，界面回落到全局默认。
-  ///
-  /// 老对话（换卡这个能力之前建的）投影出来就是 nil，所以这个字段
-  /// 不需要任何迁移 —— 后端那边同理，见 conversations.summarise。
+  /// Model card chosen for this conversation; nil falls back to the global default. Older
+  /// conversations decode as nil, so no migration is needed.
   var provider: String?
 
-  /// 侧栏与菜单里显示的名字。
-  ///
-  /// 后端对还没说过话的对话返回空标题 —— 由界面决定叫什么，
-  /// 而不是让后端替界面编一个（那样两边就有两套文案了）。
+  /// The backend returns an empty title before the first message; the UI names it.
   var displayTitle: String { title.isEmpty ? L("新对话", "New Chat") : title }
 
   var isEmpty: Bool { messages == 0 }
 }
 
-/// 用户拖进项目的一份材料，落在 `files/`。
-///
-/// **和 `notes/` 分开**：notes/ 是人**写**的结论（agent 改它要确认），
-/// files/ 是人**给**的材料 —— 本来就是给 agent 看的，读写都不必拦。
+/// A file the user dropped into files/. Separate from notes/: notes are written by people (the
+/// agent needs confirmation to change them), files are given to the agent and need no gate.
 struct ProjectFile: Codable, Identifiable, Equatable, Hashable {
   let name: String
-  /// 相对项目根，如 `files/数据.csv`。给 agent 的就是这个。
+  /// relative to the project root, e.g. `files/data.csv`; this is what the agent sees
   let path: String
   let bytes: Int
 
@@ -131,11 +118,8 @@ enum ProjectClientError: LocalizedError {
   }
 }
 
-/// 项目接口的客户端。
-///
-/// 所有写操作走后端 —— 存储格式只有一处实现，避免 Swift 和 Python 各写一遍
-/// 又慢慢漂移。读原稿和插图则直接按路径访问本地文件，不为几十 MB 的 PDF
-/// 走一趟 HTTP。
+/// Client for the project API. All writes go through the backend so the storage format has a
+/// single implementation; the source PDF and figures are read from disk directly.
 struct ProjectClient {
   let base: URL
 
@@ -180,7 +164,7 @@ struct ProjectClient {
     try await send("projects/\(id)", as: Project.self, key: "project")
   }
 
-  /// 构建项目。同一篇论文重复构建会返回已有项目。
+  /// Building the same paper twice returns the existing project.
   func create(sourcePath: String) async throws -> Project {
     try await send(
       "projects", method: "POST", body: ["path": sourcePath],
@@ -200,7 +184,7 @@ struct ProjectClient {
     _ = try await URLSession.shared.data(for: request)
   }
 
-  /// 替换静态上下文。「重新 OCR 覆盖」与「上传覆盖」走同一个入口。
+  /// Replaces the context; re-running OCR and uploading share this entry point.
   func setContext(
     _ id: String, markdown: String, origin: String,
     jobID: String? = nil, sourceDirectory: URL? = nil
@@ -219,36 +203,30 @@ struct ProjectClient {
       as: Project.self, key: "project")
   }
 
-  // MARK: - 空项目与原稿
+  // MARK: - Empty projects and sources
 
-  /// 建一个还没有原稿的项目。
-  ///
-  /// **标题留空是有意义的**：留空的项目叫「未命名项目」，之后导入 PDF 时
-  /// 会被识别出来的标题改进；打了字的则受红线保护，任何自动提取都不许覆盖。
-  /// 所以这里原样把用户输入交上去，空串也照传，不在这一层替他补一个默认名。
+  /// Create a project without a source. An empty title is passed through as is: the project is then
+  /// untitled and later improved from the PDF, while a typed title is never overwritten.
   func createEmpty(title: String) async throws -> Project {
     try await send(
       "projects", method: "POST", body: ["title": title],
       as: Project.self, key: "project")
   }
 
-  /// 给一个空项目挂上原稿。只对还没有原稿的项目开放。
+  /// Only for projects without a source yet.
   func attachSource(_ id: String, path: String) async throws -> Project {
     try await send(
       "projects/\(id)/source", method: "POST", body: ["path": path],
       as: Project.self, key: "project")
   }
 
-  // MARK: - 用户上传的材料
+  // MARK: - User files
 
   func files(_ id: String) async throws -> [ProjectFile] {
     try await send("projects/\(id)/files", as: [ProjectFile].self, key: "files")
   }
 
-  /// 把一个本机文件复制进 `files/`。
-  ///
-  /// **传路径而不是字节** —— App 与后端在同一台机器上，把几十 MB 从 HTTP
-  /// 搬一遍毫无收益（与原稿、插图同一个取舍）。
+  /// Copy a local file into files/. Sends a path, not bytes: app and backend share the machine.
   func addFile(_ id: String, path: String) async throws -> ProjectFile {
     try await send(
       "projects/\(id)/files", method: "POST", body: ["path": path],
@@ -265,7 +243,7 @@ struct ProjectClient {
     _ = try await URLSession.shared.data(for: request)
   }
 
-  // MARK: - 对话
+  // MARK: - Conversations
 
   func conversations(_ id: String) async throws -> [Conversation] {
     try await send(
@@ -286,8 +264,7 @@ struct ProjectClient {
       as: Conversation.self, key: "conversation")
   }
 
-  /// 这条对话改用哪张模型卡。**复用改名那个端点** —— 两者都是「改这条对话的
-  /// 属性」，分成两个端点只会让这边多记一条路径。
+  /// Reuses the rename endpoint: both change a conversation's attributes.
   func setConversationProvider(_ id: String, _ conversation: String, to provider: String)
     async throws -> Conversation
   {
@@ -304,10 +281,51 @@ struct ProjectClient {
     _ = try await URLSession.shared.data(for: request)
   }
 
-  /// 导出一条对话。
-  ///
-  /// 返回**原始字节**而不是解码后的结构：这份 JSON 要原样写成文件交给用户，
-  /// 中间过一道 Swift 的解码再编码只会改动键序与格式，毫无好处。
+  // MARK: - Annotations
+
+  func annotations(_ projectID: String) async throws -> [PaperAnnotation] {
+    try await send(
+      "projects/\(projectID)/annotations", as: [PaperAnnotation].self, key: "annotations")
+  }
+
+  func addAnnotation(_ annotation: PaperAnnotation, to projectID: String) async throws {
+    try await expectOK(
+      "projects/\(projectID)/annotations", method: "POST", body: annotation.payload)
+  }
+
+  func updateAnnotation(_ id: String, in projectID: String, kind: String?, color: String?)
+    async throws
+  {
+    var body: [String: Any] = [:]
+    if let kind { body["kind"] = kind }
+    if let color { body["color"] = color }
+    try await expectOK("projects/\(projectID)/annotations/\(id)", method: "PATCH", body: body)
+  }
+
+  func removeAnnotation(_ id: String, from projectID: String) async throws {
+    try await expectOK("projects/\(projectID)/annotations/\(id)", method: "DELETE")
+  }
+
+  /// For writes whose response carries nothing the caller needs; a failure still throws.
+  private func expectOK(_ path: String, method: String, body: [String: Any]? = nil) async throws {
+    var request = URLRequest(backend: base.appendingPathComponent(path))
+    request.httpMethod = method
+    request.timeoutInterval = 30
+    if let body {
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      request.httpBody = try JSONSerialization.data(withJSONObject: body)
+    }
+    let (data, response) = try await URLSession.shared.data(for: request)
+    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+    guard code == 200 else {
+      let detail =
+        (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"] as? String
+      throw ProjectClientError.http(code, detail ?? "")
+    }
+  }
+
+  /// Raw bytes rather than decoded data: the JSON is written to a file as is, and decoding and
+  /// re-encoding would only reorder and reformat it.
   func exportConversation(_ id: String, _ conversation: String) async throws -> Data {
     let url = base.appendingPathComponent(
       "projects/\(id)/conversations/\(conversation)/export")

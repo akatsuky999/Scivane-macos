@@ -1,13 +1,12 @@
 import SwiftUI
 
-/// 正文栏顶上的「本地 OCR 还没装」卡片，以及安装进度。
-///
-/// 与 `ScanProgressBar` 同一个位置、同一套版式：一条浅底的横带，不是模态框。
-/// 空闲时什么都不画 —— 所以它可以常驻在视图树里，自己观察 `OCRInstaller`。
+/// "Local OCR is not installed" and install progress, as a band at the top of the text pane (same
+/// place and style as ScanProgressBar, not a modal). Draws nothing when idle, so it can stay in the
+/// tree and observe OCRInstaller itself.
 struct OCRInstallCard: View {
 
     @ObservedObject var installer: OCRInstaller
-    /// 设置页里嵌同一张卡时不要「以后再说」—— 那里本来就是用户主动来找它的
+    /// no "Later" when embedded in Settings, where the user came looking for it
     var dismissible = true
 
     var body: some View {
@@ -23,10 +22,8 @@ struct OCRInstallCard: View {
         case .done(let elapsed, let method):
             band(track: 1) { done(elapsed, method: method) }
                 .task {
-                    // 停几秒让人看见「装好了」与那句一分钟的提醒，之后让位给识别进度。
-                    // **只收走自己显示的那一个**：等待被取消（卡片撤下 —— 设置页关了、状态被别处换走）就到此为止，
-                    // 等完了状态已经换了也不动。从前 `try?` 连取消也吞了、接着 dismiss()：
-                    // 另一处还在显示的「装好了」、甚至别处刚换上的状态，都被一起清成 idle
+                    // Show "installed" for a few seconds, then make way for recognition progress. Dismiss only what
+                    // this card showed: if the wait was cancelled or the phase changed meanwhile, leave it alone.
                     let shown = installer.phase
                     guard (try? await Task.sleep(nanoseconds: 8_000_000_000)) != nil,
                           installer.phase == shown else { return }
@@ -35,12 +32,10 @@ struct OCRInstallCard: View {
         }
     }
 
-    // MARK: - 四种状态
+    // MARK: - States
 
-    /// 三种来由，三种说法：
-    /// - 设置页指定的位置用不了 —— 装组件也没用（覆盖档设了就只看它），说清楚去清掉那一栏
-    /// - 已经在用旧部署、从设置页来迁 —— 这是「一键迁移」，不是「没装」
-    /// - 真没装 —— 下载，或者有旧部署时迁移
+    /// Three causes, three messages: an override in Settings that doesn't work (installing won't help
+    /// until the field is cleared), migrating from a legacy deployment, or simply not installed.
     private func offer(_ status: RuntimeClient.Status) -> some View {
         let (icon, title, detail): (String, String, String) = {
             if let problem = status.overrideProblem {
@@ -134,7 +129,7 @@ struct OCRInstallCard: View {
                 .help(L("停下安装（已下载的部分留着，下次接着下）",
                         "Stop the install (what's downloaded is kept; next time it resumes)"))
             }
-            // 换了来源要让人看得见 —— 否则「怎么突然变快 / 变慢了」无从解释
+            // a changed source must be visible, or a sudden speed change is unexplained
             if let switched = run.switched {
                 Label(switched, systemImage: "arrow.triangle.branch")
                     .foregroundStyle(Palette.accent).lineLimit(1).truncationMode(.middle)
@@ -151,7 +146,7 @@ struct OCRInstallCard: View {
                 .foregroundStyle(Palette.inkSoft).lineLimit(2).truncationMode(.middle)
                 .help(L("\(code)：\(message)", "\(code): \(message)"))
             Spacer(minLength: 6)
-            // 已下载的部分在缓存里：「继续」真的是接着下，不是从头来
+            // downloaded parts are cached: Continue really resumes
             if code != "HTTP_409" {
                 Button(code == "CANCELLED" ? L("继续安装", "Resume Install") : L("重试", "Retry")) {
                     installer.start(method)
@@ -169,7 +164,7 @@ struct OCRInstallCard: View {
             Text(method == .migrate ? L("本地 OCR 迁好了", "Local OCR migrated") : L("本地 OCR 装好了", "Local OCR installed"))
                 .foregroundStyle(Palette.inkSoft)
             pill(ScanProgressBar.duration(elapsed))
-            // 新装的二进制第一次加载要一分钟左右，不说出来就像卡死了
+            // a fresh binary takes about a minute to load the first time; say so, or it looks frozen
             Text(L("第一次识别要加载新装的引擎，大约一分钟", "The first OCR loads the new engine — about a minute"))
                 .foregroundStyle(Palette.inkFaint)
             Spacer()
@@ -177,7 +172,7 @@ struct OCRInstallCard: View {
         .font(.uiMeta)
     }
 
-    // MARK: - 版式
+    // MARK: - Layout
 
     private func band<Content: View>(tint: Color = Palette.sunk, track: Double? = nil,
                                      @ViewBuilder _ content: () -> Content) -> some View {
@@ -213,7 +208,7 @@ struct OCRInstallCard: View {
 
     private func amount(_ run: OCRInstaller.Run) -> String? {
         guard run.total > 0 else { return nil }
-        // `unit` 是后端的契约字段（只有 pip 那一步有，值是「包」）—— 英文照它的意思说
+        // `unit` is a backend contract field (only the pip step has it)
         if let unit = run.unit { return L("\(run.done)/\(run.total) 个\(unit)", "\(run.done)/\(run.total) packages") }
         let mb = { (bytes: Int) in bytes >= 10_000_000 ? String(format: "%.0f", Double(bytes) / 1e6)
                                                       : String(format: "%.1f", Double(bytes) / 1e6) }

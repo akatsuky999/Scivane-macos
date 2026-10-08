@@ -1,17 +1,13 @@
-"""项目层的 HTTP 路由。
+"""HTTP routes for projects: validation and status mapping; logic lives in scivane_reader.projects.
 
-只做编排：参数校验与状态码映射。真正的逻辑在 scivane_reader.projects。
-
-**为什么不代理原稿与插图文件**：项目目录就在本机，响应里直接把路径给出去，
-App 用 PDFKit / WebView 直接读，比把几十 MB 的 PDF 从 HTTP 搬一遍快得多，
-也省掉一整套 range 请求的麻烦。
+Files are not proxied: responses carry local paths and the app reads them directly.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -19,12 +15,12 @@ from pydantic import BaseModel, Field
 from .. import config
 from ..i18n import ui
 from ..projects import ProjectError, projects
+from ..projects.annotations import AnnotationError
 
 logger = logging.getLogger("scivane.api.projects")
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
-#: 存储层的 code → HTTP 状态码。
 _STATUS = {
     "NOT_FOUND": 404,
     "SOURCE_MISSING": 404,
@@ -37,15 +33,21 @@ _STATUS = {
     "INVALID_CONVERSATION": 400,
     "INVALID_TITLE": 400,
     "CORRUPT": 500,
+    "NO_SOURCE": 409,
+    "INVALID_ANNOTATION": 400,
+    "ANNOTATION_NOT_FOUND": 404,
+    "ANNOTATION_EXISTS": 409,
+    "TOO_MANY_ANNOTATIONS": 409,
+    "CORRUPT_ANNOTATIONS": 500,
+    "UNSUPPORTED_ANNOTATIONS": 500,
 }
 
 
-def _fail(exc: ProjectError) -> HTTPException:
+def _fail(exc: ProjectError | AnnotationError) -> HTTPException:
     return HTTPException(status_code=_STATUS.get(exc.code, 400), detail=str(exc))
 
 
 def _described(project) -> dict:
-    """项目详情。附上本机路径，App 直接按路径读文件。"""
     described = project.as_dict()
     directory = projects.dir_for(project.id)
     source = projects.source_path(project.id)
@@ -57,15 +59,11 @@ def _described(project) -> dict:
 
 
 class CreateIn(BaseModel):
-    """建项目。两种：从一份原稿建，或者建一个空的。
-
-    `path` 与 `title` 都可以不给，但不能都不给 —— 那就没说清要建什么了。
-    """
+    """Create from a source document, or empty. At least one of path and title is required."""
 
     path: str | None = None
-    #: 空项目的名字。**留空是有意义的**：留空的项目叫「未命名项目」，
-    #: 之后导入原稿时会被自动识别出来的标题改进；打了字的则受红线保护，
-    #: 任何自动提取都不许覆盖（见 store.create_empty）。
+    #: An empty title is meaningful: untitled projects take their title from a later import,
+    #: while a typed title is never overwritten by extraction.
     title: str | None = None
 
 
@@ -74,8 +72,7 @@ class AttachSourceIn(BaseModel):
 
 
 class AddFileIn(BaseModel):
-    #: 本机路径。**不走 multipart** —— App 与后端在同一台机器上，
-    #: 把几十 MB 的字节从 HTTP 搬一遍毫无收益（与原稿、插图同一个取舍）。
+    #: Local path, not multipart: the app and the backend share the machine.
     path: str
 
 
@@ -84,11 +81,7 @@ class ConversationIn(BaseModel):
 
 
 class ConversationPatchIn(BaseModel):
-    """改名、换模型卡，或者两件一起。
-
-    **两个字段都可选**，但不能都不给 —— 空 PATCH 是调用方写错了，
-    静悄悄返回成功会让它以为改动生效了。
-    """
+    """Rename, switch the model card, or both. An empty PATCH is a client bug and is rejected."""
 
     title: str | None = Field(default=None, min_length=1)
     provider: str | None = Field(default=None, min_length=1)
@@ -101,14 +94,30 @@ class RenameIn(BaseModel):
 class ContextIn(BaseModel):
     markdown: str
     origin: Literal["ocr", "upload"] = "ocr"
-    #: OCR 任务号。给了它才能把 var/jobs 里的插图吸收进项目。
+    #: OCR job whose image crops move into the project
     job_id: str | None = None
-    #: 上传的 Markdown 所在目录，用于解析它引用的相对图片。
+    #: directory of the uploaded Markdown, for its relative image links
     source_dir: str | None = None
 
 
 class ConfirmIn(BaseModel):
     accepted: bool
+
+
+class AnnotationIn(BaseModel):
+    """Shape only; ranges and the palette are checked in projects.annotations."""
+
+    #: chosen by the app, which shows the mark before this request returns
+    id: str
+    kind: str
+    color: str
+    spans: list[dict[str, Any]]
+    text: str = ""
+
+
+class AnnotationPatchIn(BaseModel):
+    kind: str | None = None
+    color: str | None = None
 
 
 @router.get("")
@@ -118,12 +127,8 @@ async def list_projects():
 
 @router.post("")
 async def create_project(body: CreateIn):
-    """建项目。给了 `path` 就从原稿建，没给就建一个空的。
-
-    从原稿建时，同一篇论文重复构建返回已有项目而不是再建一个 —— 与
-    「相同路径再次导入只选中已有文档」的既有行为保持一致。
-    **空项目不参与这个去重**：它们没有内容可比，按内容去重会让第二个
-    空项目变成第一个的"重复"。
+    """Create a project. Rebuilding the same paper returns the existing one;
+    empty projects are never deduplicated.
     """
     if body.path is None:
         try:
@@ -152,10 +157,8 @@ async def create_project(body: CreateIn):
 
 @router.post("/{project_id}/source")
 async def attach_source(project_id: str, body: AttachSourceIn):
-    """给一个空项目挂上原稿，顺带用它精确化标题。
-
-    只对还没有原稿的项目开放 —— 换掉一篇已有原稿会让正文、插图与既往
-    对话引用的一切都不再对应它，那是另一件事。
+    """Attach a source document to an empty project, refining its title.
+    Projects that already have one are refused.
     """
     try:
         project = projects.attach_source(project_id, Path(body.path))
@@ -199,12 +202,7 @@ async def get_context(project_id: str):
 
 @router.put("/{project_id}/context")
 async def set_context(project_id: str, body: ContextIn):
-    """替换静态上下文。
-
-    「重新 OCR 覆盖」与「上传文件覆盖」走同一个入口，差别只在 origin：
-    OCR 的结果就是从本项目原稿扫出来的，直接可用；上传的文件未必对应
-    这篇论文，落地时标记为待确认。
-    """
+    """Replace the static context. OCR output is trusted; uploaded Markdown lands unconfirmed."""
     try:
         project = projects.set_context(
             project_id,
@@ -221,11 +219,7 @@ async def set_context(project_id: str, body: ContextIn):
 
 @router.post("/{project_id}/context/confirm")
 async def confirm_context(project_id: str, body: ConfirmIn):
-    """人工确认上传的 Markdown 是否就是这篇论文的正文。
-
-    拒绝会把它整个撤掉 —— 不留一份没人认账的正文在项目里，
-    免得日后误当作可信上下文使用。
-    """
+    """Confirm or reject uploaded Markdown as this paper's text. Rejecting removes it entirely."""
     try:
         project = projects.confirm_context(project_id, body.accepted)
     except ProjectError as exc:
@@ -235,7 +229,7 @@ async def confirm_context(project_id: str, body: ConfirmIn):
 
 @router.get("/{project_id}/events")
 async def project_events(project_id: str):
-    """会话日志。凡是改变过模型可见内容的事都在这里。"""
+    """Session log: everything that changed what the model saw."""
     try:
         projects.get(project_id)
     except ProjectError as exc:
@@ -243,15 +237,9 @@ async def project_events(project_id: str):
     return {"events": list(projects.events(project_id))}
 
 
-# --- 对话 ----------------------------------------------------------------
-#
-# 一个项目可以有多条对话，各自一份 .jsonl（为什么这么存见
-# projects/conversations.py）。这里只做编排，逻辑在 store 里。
-
 
 @router.get("/{project_id}/conversations")
 async def list_conversations(project_id: str):
-    """这个项目的全部对话，最近活动的在前。"""
     try:
         projects.get(project_id)
     except ProjectError as exc:
@@ -261,7 +249,7 @@ async def list_conversations(project_id: str):
 
 @router.post("/{project_id}/conversations")
 async def create_conversation(project_id: str, body: ConversationIn):
-    """开一条新对话。立刻落盘，界面拿到 id 才能把输入框绑上去。"""
+    """Persisted immediately: the UI needs the id to bind the composer."""
     try:
         conversation = projects.create_conversation(project_id, body.title or "")
     except ProjectError as exc:
@@ -289,7 +277,7 @@ async def patch_conversation(project_id: str, conversation_id: str, body: Conver
 
 @router.delete("/{project_id}/conversations/{conversation_id}")
 async def delete_conversation(project_id: str, conversation_id: str):
-    """删掉一条对话。**只删这一个文件** —— 正文、原稿与其它对话都不受影响。"""
+    """Deletes only this conversation's file."""
     try:
         removed = projects.delete_conversation(project_id, conversation_id)
     except ProjectError as exc:
@@ -299,26 +287,19 @@ async def delete_conversation(project_id: str, conversation_id: str):
 
 @router.get("/{project_id}/conversations/{conversation_id}/export")
 async def export_conversation(project_id: str, conversation_id: str):
-    """导出一条对话。
-
-    给的是**原始事件流**而不是渲染好的文字：它是权威记录，由它能重建
-    模型历史与界面记录两种投影，反过来不行。App 拿到之后存成 .json 文件。
-    """
+    """Export the raw event stream: the authoritative record both projections are rebuilt from."""
     try:
         return projects.export_conversation(project_id, conversation_id)
     except ProjectError as exc:
         raise _fail(exc) from exc
 
 
-# --- 用户上传的材料 ------------------------------------------------------
-#
-# 落在项目的 `files/` 里。与 `notes/` 分开：notes/ 是人**写**的结论
-# （改它要确认），files/ 是人**给**的材料，本来就是给 agent 看的。
+# files/ holds material the user handed over; notes/ holds conclusions they wrote
+# (changing those needs confirmation).
 
 
 @router.get("/{project_id}/files")
 async def list_project_files(project_id: str):
-    """`files/` 里有什么。最近放进来的在前。"""
     try:
         projects.get(project_id)
     except ProjectError as exc:
@@ -328,7 +309,7 @@ async def list_project_files(project_id: str):
 
 @router.post("/{project_id}/files")
 async def add_project_file(project_id: str, body: AddFileIn):
-    """把一个本机文件复制进 `files/`。重名不覆盖，自动加后缀。"""
+    """Copy a local file into files/; name clashes get a suffix instead of overwriting."""
     try:
         added = projects.add_file(project_id, Path(body.path))
     except ProjectError as exc:
@@ -343,3 +324,41 @@ async def remove_project_file(project_id: str, name: str):
     except ProjectError as exc:
         raise _fail(exc) from exc
     return {"removed": name, "existed": removed}
+
+
+# Highlights and underlines on the source PDF, stored in the control plane; the PDF is never modified.
+
+
+@router.get("/{project_id}/annotations")
+async def list_annotations(project_id: str):
+    try:
+        return {"annotations": projects.annotation_book(project_id).list()}
+    except (ProjectError, AnnotationError) as exc:
+        raise _fail(exc) from exc
+
+
+@router.post("/{project_id}/annotations")
+async def add_annotation(project_id: str, body: AnnotationIn):
+    try:
+        record = projects.annotation_book(project_id, writing=True).add(body.model_dump())
+    except (ProjectError, AnnotationError) as exc:
+        raise _fail(exc) from exc
+    return {"annotation": record}
+
+
+@router.patch("/{project_id}/annotations/{annotation_id}")
+async def update_annotation(project_id: str, annotation_id: str, body: AnnotationPatchIn):
+    try:
+        record = projects.annotation_book(project_id).update(annotation_id, body.model_dump())
+    except (ProjectError, AnnotationError) as exc:
+        raise _fail(exc) from exc
+    return {"annotation": record}
+
+
+@router.delete("/{project_id}/annotations/{annotation_id}")
+async def remove_annotation(project_id: str, annotation_id: str):
+    try:
+        removed = projects.annotation_book(project_id).remove(annotation_id)
+    except (ProjectError, AnnotationError) as exc:
+        raise _fail(exc) from exc
+    return {"removed": annotation_id, "existed": removed}

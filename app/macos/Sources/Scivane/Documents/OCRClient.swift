@@ -1,17 +1,14 @@
 import Foundation
 
-/// 和 FastAPI 编排层的 SSE 对话。
-///
-/// 用 URLSessionDataDelegate 而不是 `bytes(for:).lines` —— 后者在这条链路上
-/// 会拿到 200 之后彻底静默，一个事件都不投递（服务端用 curl 验证是正常推送的）。
-/// delegate 的 didReceive 则是几十字节的分片就立刻回调。
+/// SSE client for the OCR stream. URLSessionDataDelegate rather than bytes(for:).lines, which goes
+/// silent after the 200 on this path.
 final class OCRClient: NSObject, @unchecked Sendable {
 
     enum Event {
         case meta(jobID: String, pages: Int, filename: String)
-        /// 开始处理某一页。密集版面单页要十几秒，先让界面动起来。
+        /// dense pages take over ten seconds; get the UI moving first
         case progress(page: Int, total: Int, elapsed: Double)
-        /// 无事件时的保活信号，同时驱动界面上的计时
+        /// keep-alive while idle; also drives the timer in the UI
         case heartbeat(page: Int, total: Int, elapsed: Double)
         case page(index: Int, total: Int, markdown: String, elapsed: Double)
         case done(markdown: String, text: String, elapsed: Double, cancelled: Bool)
@@ -29,7 +26,7 @@ final class OCRClient: NSObject, @unchecked Sendable {
         self.base = base
         super.init()
         let config = URLSessionConfiguration.ephemeral
-        // 有心跳保活，这里只是兜底；识别一份大文档可能要几十分钟
+        // a fallback only: heartbeats keep it alive, and a large document can take tens of minutes
         config.timeoutIntervalForRequest = 600
         config.timeoutIntervalForResource = 6 * 3600
         config.waitsForConnectivity = false
@@ -39,7 +36,6 @@ final class OCRClient: NSObject, @unchecked Sendable {
 
     deinit { session?.invalidateAndCancel() }
 
-    /// 流式识别。逐页产出事件，调用方边收边渲染。
     func recognise(path: String) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             self.continuation = continuation
@@ -73,9 +69,9 @@ final class OCRClient: NSObject, @unchecked Sendable {
         continuation?.finish()
     }
 
-    // MARK: - 分帧
+    // MARK: - Framing
 
-    /// SSE 以空行分帧。按 \n\n 切，切不完整就留在缓冲里等下一片。
+    /// Frames end with a blank line; an incomplete one stays buffered for the next chunk.
     private func drain() {
         let separator = Data("\n\n".utf8)
         while let range = buffer.range(of: separator) {

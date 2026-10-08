@@ -1,21 +1,11 @@
-"""论文专用工具：`reocr` 与 `cite`。**这一组是这个产品独有的**，通用 agent 不会有。
+"""Paper-specific tools: reocr and cite.
 
-### 为什么 reocr 而不是「手工改乱码」
+Garbled text is fixed by re-running OCR on the page, not by editing words: editing replaces one
+model's guess with another's, in the text every answer is based on.
 
-用户最初的描述是「审核扫描件、删掉乱码」。但**乱码的正解是重跑那几页**：
-乱码说明识别失败了，重跑更接近根因，而且可以换识别参数再来一次。手工改字
-是拿一个模型的猜测去覆盖另一个模型的猜测，改完谁也不知道对不对 ——
-而正文是这个产品全部回答的依据，往里面填猜测是最不该做的事。
-
-### cite 为什么要去查原稿而不是查正文
-
-跨页整理（`consolidate`）会把页边界合掉，**最终的 `md/context.md` 里没有任何
-页码信息**。所以 cite 不可能只靠正文回答「这在第几页」—— 它必须拿正文里的
-一段文字回原稿 PDF 里搜。
-
-代价是它依赖原稿的文本层：born-digital 的 PDF 有，扫描件没有。扫描件上
-cite 会如实说「原稿没有文本层，定位不了」，而不是编一个页码 —— 一个编出来的
-出处比没有出处糟得多，因为用户会去核对，然后对整个产品失去信任。
+cite searches the source PDF because restructuring removes page boundaries from md/context.md.
+That needs a text layer; on scanned PDFs it says it can't locate the passage rather than
+inventing a page number.
 """
 
 from __future__ import annotations
@@ -29,12 +19,12 @@ from .definition import ToolContext, ToolDef, ToolError, ToolOutcome
 
 __all__ = ["paper_tools", "MAX_REOCR_PAGES", "find_anchor_probe", "locate_in_pdf"]
 
-#: 一次最多重跑几页。重跑要加载 2.8GB 模型、每页几秒到十几秒，
-#: 不设上限的话模型一句「把全篇重跑一遍」就是十几分钟。
+#: re-running loads the 2.8 GB model and takes seconds per page; "redo the whole paper" would take
+#: a quarter of an hour
 MAX_REOCR_PAGES = 20
 
-#: 拿去 PDF 里搜的探针长度。太短会命中一堆无关位置，太长会因为 OCR 与
-#: 原稿的细微差异（连字、空格）搜不到。
+#: probe length searched in the PDF: too short matches unrelated places, too long misses on
+#: OCR differences (ligatures, spaces)
 PROBE_CHARS = 60
 _MARKUP = re.compile(r"[#*`_>\[\]()!]|<[^>]+>")
 
@@ -46,10 +36,7 @@ def _project(context: ToolContext) -> Path:
 
 
 def find_anchor_probe(markdown: str, anchor: str) -> tuple[str, int] | None:
-    """在正文里找到 anchor 所在的那一行，返回 `(可拿去搜的探针, 行号)`。
-
-    纯函数，不碰 PDF —— 单独抽出来是为了能脱离原稿测这一半逻辑。
-    """
+    """Find the line holding `anchor` in the text; returns (probe, line number). Pure, no PDF needed."""
     needle = anchor.strip().lower()
     if not needle:
         return None
@@ -58,15 +45,14 @@ def find_anchor_probe(markdown: str, anchor: str) -> tuple[str, int] | None:
             continue
         clean = _MARKUP.sub("", line).strip()
         if len(clean) < 4:
-            # 只有一个「## 3.2」这样的空标题，拿它当探针会命中目录页。
-            # 往下找一行有实质内容的。
+            # a bare heading such as "## 3.2" would match the table of contents; use the next line with content
             continue
         return clean[:PROBE_CHARS], number
     return None
 
 
 def locate_in_pdf(pdf: Path, probe: str) -> tuple[int, tuple[float, float, float, float]] | None:
-    """在原稿里搜探针，返回 `(页码从 1 起, 矩形)`。搜不到返回 None。"""
+    """Search the probe in the source; returns (1-based page, rect) or None."""
     import pymupdf
 
     with pymupdf.open(pdf) as doc:
@@ -114,8 +100,7 @@ async def _cite(arguments: dict[str, object], context: ToolContext) -> ToolOutco
             detail={"line": line_number},
         )
     if not await asyncio.to_thread(_has_text_layer, pdf):
-        # 扫描件没有文本层。**如实说定位不了，绝不编一个页码** ——
-        # 用户会去核对，编出来的出处会让整个产品失去信任。
+        # Scanned PDFs have no text layer. Say so; never invent a page number.
         return ToolOutcome(
             f"「{anchor}」在正文第 {line_number} 行：{probe}\n"
             "原稿是扫描件（没有文本层），定位不到页码 —— "
@@ -163,12 +148,12 @@ async def _reocr(arguments: dict[str, object], context: ToolContext) -> ToolOutc
     if not pdf.is_file():
         raise ToolError("这个项目没有原稿副本，没法重新识别", "NO_SOURCE")
 
-    # 延迟导入：这一句会牵出 2.8GB 的模型栈，模块级导入会让单测也得起引擎
+    # imported lazily: it pulls in the 2.8 GB model stack
     from ..ocr import pipeline
 
     job_id = f"reocr-{context.project_id or 'adhoc'}"
     try:
-        # 会加载 2.8GB 模型并占满 GPU 几十秒 —— 绝不能在事件循环里同步跑
+        # loads the model and keeps the GPU busy for tens of seconds; never on the event loop
         redone = await asyncio.to_thread(
             pipeline.parse_pages, pdf, job_id, pages, context.cancelled
         )
@@ -177,8 +162,8 @@ async def _reocr(arguments: dict[str, object], context: ToolContext) -> ToolOutc
     if not redone:
         raise ToolError("一页都没重跑出来（可能被取消，或页码超出总页数）", "REOCR_EMPTY")
 
-    # 结果落进 workbench/，**不直接覆盖 md/context.md**：覆盖正文是会影响
-    # 后续所有回答的动作，该由人看过再决定，不该是一个工具的副作用。
+    # Results go to workbench/, never straight into md/context.md: replacing the text affects every
+    # later answer and should be a person's decision.
     out_dir = workspace.resolve(root, "workbench/reocr", write=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
@@ -223,7 +208,7 @@ def paper_tools() -> tuple[ToolDef, ...]:
                 "required": ["pages"],
             },
             run=_reocr,
-            # 会加载 2.8GB 模型并占满 GPU 几十秒，绝不能和别的工具并发
+            # loads the model and occupies the GPU; never concurrent with other tools
             concurrency_safe=False,
         ),
         ToolDef(

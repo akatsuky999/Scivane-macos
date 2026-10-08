@@ -1,16 +1,16 @@
-"""工具调用循环：把路径边界（段一）与沙箱（段二）接成「agent 真的能干活」。
+"""The tool loop: path boundary plus sandbox, so the agent can actually work.
 
-    definition   工具定义 —— **模型可见字段与主机侧字段严格分开**
-    registry     注册表：查找、导出 schema、按 agent 层级过滤
-    results      结果超限落盘，只给模型预览与路径
-    journal      调用与结果全部落进 .lumen/session.jsonl
-    scheduler    只读并发、其余屏障、取消补合成结果
-    loop         模型 → 工具 → 结果 → 接着想
-    files        read / write / edit / glob / grep（走 workspace.resolve）
-    exec         bash / python（走 sandbox runner）
-    repo         fetch_repo（沙箱内经审计代理浅克隆，剥 hook）
-    paper        reocr / cite（这个产品独有的）
-    agents       两层：书房只见清单，读者落在一个项目里
+    definition   tool definitions; model-visible and host-side fields kept strictly apart
+    registry     lookup, schema export, filtering per agent level
+    results      oversized results spill to disk; the model gets a preview and a path
+    journal      calls and results are written to the conversation log
+    scheduler    read-only calls run concurrently, others serialise; cancellation fills results
+    loop         model -> tools -> results -> model
+    files        read / write / edit / glob / grep (through workspace.resolve)
+    exec         bash / python (through the sandbox runner)
+    repo         fetch_repo (shallow clone through the audit proxy, hooks stripped)
+    paper        reocr / cite
+    agents       two levels: the librarian sees the project list, the reader one project
 """
 
 from __future__ import annotations

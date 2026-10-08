@@ -6,8 +6,7 @@ struct SidebarDocument: View {
     @State private var hovering = false
     var body: some View {
         Button { model.select(job) } label: {
-            // 与 ProjectRow 同一种行：单行、同高、极淡的选中层（尺寸见 SidebarMetrics）。
-            // 状态只在**没跑完或出错**时写在右边 —— 完成是常态，不必每行重复。
+            // Same row as ProjectRow (sizes in SidebarMetrics). Status only shows while running or failed.
             HStack(spacing: 9) {
                 Image(systemName: job.isMarkdown ? "text.alignleft" : (job.isPDF ? "doc.text" : "photo"))
                     .font(.system(size: 12)).frame(width: 17).foregroundStyle(Palette.inkSoft)

@@ -1,16 +1,11 @@
 import SwiftUI
 
-// 用户的一句话、助手的一段回答 —— 对话流里最基本的两种行。
+// The two basic rows: a user message and an assistant answer.
 
-// MARK: - 用户
+// MARK: - User
 
-/// 用户的话：**右对齐的气泡**。
-///
-/// 与助手的回答形成左右分野，一眼看得出谁在说话 —— 这也是 ChatGPT 与
-/// 左边永远留一段空白（至少 44pt），
-/// 长问题不会顶满整栏；气泡自己按内容收缩，短问题就是短短一块。
-// 原先是 file-private。拆文件之后用它的视图在别的文件里，
-// 只能收窄到模块内可见。
+/// Right-aligned bubble that shrinks to its content, with at least 44 pt kept free on the left so
+/// long questions don't fill the column.
 struct UserLine: View {
   let text: String
   var body: some View {
@@ -32,23 +27,20 @@ struct UserLine: View {
   }
 }
 
-// MARK: - 助手
+// MARK: - Assistant
 
-// 原先是 file-private。拆文件之后用它的视图在别的文件里，
-// 只能收窄到模块内可见。
 struct AssistantLine: View {
   let item: TranscriptItem
   var streaming = false
-  /// 正在生成的那一条屏幕上显示到哪了。**流式时正文从这里读**，不从 `item` 读 ——
-  /// 逐帧的增长不经过记录（见 `StreamPacer`），`item.text` 只是上一次定稿的字。
+  /// While streaming the text comes from here, not from `item`, whose text is the last finalised one.
   var live: StreamPacer? = nil
   @Binding var showThinking: Bool
+  @State private var hovering = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 9) {
       if !item.thinking.isEmpty {
-        // 推理默认折起来：它对判断「模型有没有理解题目」有用，
-        // 但常驻展开会把真正的回答挤下去
+        // reasoning collapsed by default; expanded, it would push the answer down
         Button {
           showThinking.toggle()
         } label: {
@@ -76,22 +68,52 @@ struct AssistantLine: View {
       } else if !item.text.isEmpty {
         MarkdownText(item.text, streaming: streaming)
       } else if streaming {
-        // 还没吐出正文（可能在想，也可能正要调工具）—— 先摆个光标占位，
-        // 否则这一条在屏幕上什么都没有，看着像卡住了
+        // no text yet (thinking, or about to call a tool): a caret, so the row isn't empty
         StreamingCaret()
       }
-    }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    // Copy the whole answer as Markdown with LaTeX: rendered formulas are images and don't survive a
+    // text selection copy. Appears on hover only.
+    .overlay(alignment: .topTrailing) {
+      if hovering, !streaming, !item.text.isEmpty {
+        CopyAnswerButton(text: item.text).offset(y: -4)
+      }
+    }
+    .onHover { hovering = $0 }
   }
 }
 
-/// 正在生成的回答。**单独一个视图观察 pacer** —— 逐帧重画的只有这一段，
-/// 对话流里的其余行、外面的面板与输入框一概不动。
+private struct CopyAnswerButton: View {
+  let text: String
+  @State private var copied = false
+
+  var body: some View {
+    Button {
+      NSPasteboard.general.clearContents()
+      NSPasteboard.general.setString(text, forType: .string)
+      copied = true
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
+    } label: {
+      Image(systemName: copied ? "checkmark" : "doc.on.doc")
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(copied ? Palette.accent : Palette.inkFaint)
+        .frame(width: 24, height: 22)
+        .background(Palette.paper, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Palette.ruleSoft))
+    }
+    .buttonStyle(.plain)
+    .help(L("复制这段回答（Markdown）", "Copy this answer (Markdown)"))
+  }
+}
+
+/// The streaming answer. Its own view observes the pacer, so only this redraws per frame.
 private struct LiveAnswer: View {
   @ObservedObject var pacer: StreamPacer
 
   var body: some View {
     if pacer.shown.text.isEmpty {
-      // 这一行刚出现、第一帧还没追上来 —— 先摆个光标，别让它空着
+      // first frame not caught up yet: show the caret
       StreamingCaret()
     } else {
       MarkdownText(pacer.shown.text, streaming: true)

@@ -33,7 +33,7 @@ enum AppAppearance: String, CaseIterable, Identifiable {
     }
 }
 
-/// 两处入口共享同一持久化偏好；不改变系统外观。
+/// Both entry points share one stored preference; the system appearance is never changed.
 struct AppearanceControl: View {
     @AppStorage("appearance") private var appearance: AppAppearance = .system
     var body: some View {

@@ -1,33 +1,15 @@
-"""会话日志的投影：把 append-only 的 `session.jsonl` 重建成模型历史。
+"""Project the append-only log back into model history.
 
-**这是 `store.append_event()` 那件事的读取一半。** 写入在 store.py，事件名在
-model.py 的 `ProjectEvent`，读回来在这里 —— 三者同处 `projects/`，因为日志是
-项目的产物。这一层只依赖 `llm.types`（消息词汇），不依赖 `tools/`，
-所以分层方向仍是 `projects/ → llm/`，没有反向。
-
-凡是进入过模型请求的东西都必须能从日志重建。**反过来也成立** —— 既然日志是
-唯一事实来源，那重建出来的历史必须是**合法的**，不能因为日志尾部不完整就
-产出一段发不出去的历史。
-
-所以有两条规则必须做对：
-
-1. **`tool/call` 与 `tool/result` 按 `call_id` 配对**，并保持模型序。
-   助手那一轮的正文与它的工具调用放同一条消息里（三家协议都要求
-   tool_result 紧跟在带 tool_use 的助手消息之后）。
-
-2. **有 call 无 result 的半截记录，投影时当场补一个合成的错误结果。**
-   这种记录来自进程崩溃、被 kill、或者旧版本留下的日志。不补的话，
-   拿这段历史发请求直接非法（三家都要求每个 tool_use 有对应 tool_result），
-   表现是「打开一个旧项目，第一句话就发不出去」，而且用户完全不知道为什么。
-   这和取消时补合成结果（scheduler.py）是同一条纪律的两半 ——
-   一半管运行时，一半管重启之后。
-
-这里不另设 projection 注册表。我们只有一个消费者、一次全量重放，一个纯函数就够；
-多引入一层注册表对当前规模是纯负担。
+Everything that went into a model request must be rebuildable from the log, and the rebuilt
+history must be valid: tool/call and tool/result pair up by call_id in model order, and a call
+without a result (crash, kill, old log) gets a synthetic error result here. Without that, an old
+conversation could never send another message. scheduler.py does the same for cancellations
+at runtime.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ..i18n import ui
@@ -35,12 +17,13 @@ from ..llm.types import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from .model import ProjectEvent
 
 __all__ = [
-    "derive_messages", "derive_transcript", "summarise_call",
-    "MISSING_RESULT_TEXT", "MISSING_RESULT_CODE",
+    "History", "derive_history", "derive_messages", "derive_transcript", "summarise_call",
+    "MISSING_RESULT_TEXT", "MISSING_RESULT_CODE", "CHECKPOINT_PREAMBLE", "checkpoint_text",
+    "compaction_item",
 ]
 
-#: 合成结果的稳定码。与 scheduler 里取消时用的码区分开 —— 那个是
-#: 「当时被取消了」，这个是「日志里就没有结果」，排障时是两回事。
+#: Distinct from the scheduler's cancellation code: "cancelled" and "no result in the log" are
+#: different problems.
 MISSING_RESULT_CODE = "TOOL_RESULT_MISSING_FROM_LOG"
 
 MISSING_RESULT_TEXT = (
@@ -48,16 +31,36 @@ MISSING_RESULT_TEXT = (
     "上次运行可能是崩溃或被强制结束的。"
 )
 
+#: After compaction the summary comes first in the history (after the paper). English and fixed:
+#: it is an instruction to the model and part of the cached prefix, so it never follows the UI
+#: language.
+CHECKPOINT_PREAMBLE = (
+    "Earlier turns of this conversation were compacted to free up context. The checkpoint below "
+    "condenses them; the original messages, tool calls, and tool results remain in the conversation "
+    "log but are no longer in your context. Treat the checkpoint as established background and "
+    "continue from the messages that follow without restating it. If you need an exact detail it "
+    "does not contain (a file's content, a command's full output, a precise number), run the "
+    "relevant tool again instead of guessing."
+)
+
+
+def checkpoint_text(summary: str, covered: int) -> str:
+    """The summary as it enters the history; the turn range tells the model which turns it replaces."""
+    return (
+        f"{CHECKPOINT_PREAMBLE}\n\n<compacted-summary turns=\"1-{covered}\">\n"
+        f"{summary.strip()}\n</compacted-summary>"
+    )
+
 
 class _Turn:
-    """攒一轮助手输出：正文 + 它发起的工具调用 + 回填的结果。"""
+    """One assistant step: its text, the calls it made, and the results filled in."""
 
     __slots__ = ("text", "uses", "results")
 
     def __init__(self) -> None:
         self.text: str = ""
         self.uses: list[ToolUseBlock] = []
-        #: call_id → 结果。用字典是因为并发跑完的结果回填顺序未必等于调用顺序。
+        #: call_id -> result; concurrent tools finish in any order
         self.results: dict[str, ToolResultBlock] = {}
 
     @property
@@ -65,22 +68,60 @@ class _Turn:
         return not self.text and not self.uses
 
 
-def derive_messages(events: Iterable[dict[str, Any]]) -> tuple[Message, ...]:
-    """把日志事件投影成模型历史。
+@dataclass(frozen=True)
+class History:
+    """A conversation's history grouped by turn.
 
-    只认四种事件（`user/message`、`assistant/message`、`tool/call`、
-    `tool/result`）。生命周期事件（项目创建、上下文替换、布局升级）与
-    `tool/decision` 一律跳过 —— 批准与否是主机侧的事实，不进模型请求
-    （进了反而会让模型就自己的权限边界发表意见）。
-
-    对格式不对的事件宽容：缺字段、类型不对的跳过，不让一条脏数据毁掉整段历史
-    （与 `store.events()` 跳过坏行是同一个取舍）。
+    turns[i] is a question and everything it led to (turns[0] holds stray records from before the
+    first question). A turn is the unit of compaction, so tool calls and results stay paired and the
+    turn in progress is never touched. summary/covered describe the latest compaction, which covers
+    turns 1..covered (summaries are cumulative).
     """
-    messages: list[Message] = []
+
+    turns: tuple[tuple[Message, ...], ...] = ((),)
+    summary: str = ""
+    covered: int = 0
+    #: how many compactions happened; accuracy drops after several
+    compactions: int = 0
+
+    @property
+    def count(self) -> int:
+        return len(self.turns) - 1
+
+    def checkpoint(self) -> Message | None:
+        if not self.summary:
+            return None
+        return Message.text("user", checkpoint_text(self.summary, self.covered))
+
+    def visible(self, *, upto: int | None = None) -> tuple[Message, ...]:
+        """What the model gets: the summary (if any) plus the turns it doesn't cover, up to `upto`."""
+        last = self.count if upto is None else min(upto, self.count)
+        messages: list[Message] = []
+        checkpoint = self.checkpoint()
+        if checkpoint is not None:
+            messages.append(checkpoint)
+        first = self.covered + 1 if checkpoint is not None else 0
+        for index in range(first, last + 1):
+            messages.extend(self.turns[index])
+        return tuple(messages)
+
+
+def derive_history(events: Iterable[dict[str, Any]]) -> History:
+    """Project log events into a history grouped by turn.
+
+    Only message, tool and compaction events count. Lifecycle events and tool/decision are skipped:
+    approvals are host-side facts and would make the model comment on its own permissions.
+    Malformed events are skipped; a compaction claiming more turns than existed when it was
+    written is clamped.
+    """
+    turns: list[list[Message]] = [[]]
     turn = _Turn()
+    summary = ""
+    covered = 0
+    compactions = 0
 
     def flush() -> None:
-        """把攒好的一轮落成消息。**这里是补合成结果的唯一地点。**"""
+        """Turn the collected step into messages. The only place synthetic results are added."""
         nonlocal turn
         if turn.empty:
             turn = _Turn()
@@ -90,11 +131,10 @@ def derive_messages(events: Iterable[dict[str, Any]]) -> tuple[Message, ...]:
         if turn.text:
             blocks.append(TextBlock(turn.text))
         blocks.extend(turn.uses)
-        messages.append(Message("assistant", tuple(blocks)))
+        turns[-1].append(Message("assistant", tuple(blocks)))
 
         if turn.uses:
-            # 按**调用顺序**交回结果，缺的当场补。顺序不能用 results 的插入序 ——
-            # 并发跑完的工具回填顺序与模型给出的顺序无关。
+            # results follow the call order, not arrival order, with missing ones filled in
             results = tuple(
                 turn.results.get(
                     use.id,
@@ -102,7 +142,7 @@ def derive_messages(events: Iterable[dict[str, Any]]) -> tuple[Message, ...]:
                 )
                 for use in turn.uses
             )
-            messages.append(Message("user", results))
+            turns[-1].append(Message("user", results))
         turn = _Turn()
 
     for event in events:
@@ -117,10 +157,10 @@ def derive_messages(events: Iterable[dict[str, Any]]) -> tuple[Message, ...]:
             flush()
             text = data.get("text")
             if isinstance(text, str) and text:
-                messages.append(Message.text("user", text))
+                turns.append([Message.text("user", text)])
 
         elif kind == ProjectEvent.ASSISTANT_MESSAGE:
-            # 一条新的助手消息意味着上一轮（连同它的工具结果）已经结束
+            # a new assistant message ends the previous step and its results
             flush()
             text = data.get("text")
             turn.text = text if isinstance(text, str) else ""
@@ -146,25 +186,39 @@ def derive_messages(events: Iterable[dict[str, Any]]) -> tuple[Message, ...]:
                 is_error=bool(data.get("is_error")),
             )
 
-        # 其余事件与模型历史无关，跳过
+        elif kind == ProjectEvent.CONVERSATION_COMPACTED:
+            # Compaction events belong to no turn and can land mid-turn (compacting earlier turns);
+            # they only record where the summary starts.
+            text = data.get("summary")
+            upto = data.get("turns")
+            if (isinstance(text, str) and text.strip()
+                    and isinstance(upto, int) and not isinstance(upto, bool) and upto >= 1):
+                summary = text.strip()
+                covered = min(upto, len(turns) - 1)
+                compactions += 1
+
+        # anything else has no place in the model history
 
     flush()
-    return tuple(messages)
+    return History(
+        turns=tuple(tuple(messages) for messages in turns),
+        summary=summary if covered >= 1 else "",
+        covered=covered if summary else 0,
+        compactions=compactions,
+    )
+
+
+def derive_messages(events: Iterable[dict[str, Any]]) -> tuple[Message, ...]:
+    """History sent to the model: the latest summary (if any) plus the turns after it."""
+    return derive_history(events).visible()
 
 
 def summarise_call(name: str, arguments: dict) -> str:
-    """给界面一句人类读得懂的话（「搜索 对比损失」「read md/context.md」）。
+    """One readable line for the UI ("Searching contrastive loss", "read md/context.md").
 
-    **放在投影层而不是路由层**，因为两处都要它：流式推送时路由要发一份，
-    而历史恢复时 `derive_transcript()` 也要发一份。各写一份必然漂移，
-    漂移的结果是「实时看到的那句」和「重开之后看到的那句」对不上。
-
-    不是给模型看的，所以可以写得随意些；但**必须说清副作用落在哪** ——
-    批准弹窗上用户要在一秒内判断这次动作该不该批。
-
-    **按界面语言说**（`i18n.py`）：实时推送与历史恢复都是一次带着界面语言的请求，
-    两处因此还是同一句话。英文界面跑动中直接拿它当状态行（「Searching …」），
-    所以英文一律用动名词开头；中文照旧，由界面在前面接「正在」。
+    Lives here because the live stream and history restore both need it and must agree. It must
+    say where side effects land, since approvals are decided in a second. Follows the UI language;
+    English starts with a gerund because it doubles as the status line.
     """
     if name == "fetch_repo":
         url = str(arguments.get("url", "?"))
@@ -198,22 +252,14 @@ def summarise_call(name: str, arguments: dict) -> str:
 
 
 def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """把日志投影成**界面要渲染的那份**记录。
+    """Project the log into the transcript the UI renders.
 
-    与 `derive_messages()` 并列而不是各写各的：两者遵守同一条配对纪律
-    （`tool/call` 与 `tool/result` 按 call_id 配对、缺结果当场补），
-    区别只在产出形状 —— 一个给模型，一个给人看。
-
-    **界面侧不重写这套逻辑。** 在 Swift 里再实现一遍「缺结果要补」，
-    两份必然漂移，而漂移的那份会让用户看到一段和模型看到的不一样的历史。
-
-    与模型那份的三处不同：
-    - 带 `tool/decision`（批准与否是人要看的，但不进模型请求）
-    - 工具结果只给预览，全文在日志里
-    - 保留 `synthetic` 标记，让界面能分辨「工具报错了」和「工具根本没跑」
+    Same pairing rules as derive_messages, so the UI never shows a different history than the
+    model saw. Differences: tool/decision is included, results are previews, the synthetic flag
+    is kept, and compaction hides no turns (it appears as a record where it happened).
     """
     items: list[dict[str, Any]] = []
-    pending: dict[str, int] = {}      # call_id → items 里的下标
+    pending: dict[str, int] = {}      # call_id -> index in items
     decisions: dict[str, dict[str, Any]] = {}
 
     for event in events:
@@ -244,12 +290,10 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 "kind": "tool", "call_id": call_id,
                 "name": name,
                 "arguments": arguments,
-                # 摘要在这里算，**不要留给界面自己拼** —— 实时那份由路由用
-                # 同一个函数算，两边必须是同一句话。少了它，恢复出来的历史
-                # 每一行都会退化成「bash bash」这种把工具名说两遍的废话。
+                # computed by the same function the live stream uses, so both say the same thing
                 "summary": summarise_call(name, arguments),
                 "at": at,
-                # 先按「没有结果」落位，下面收到结果再补上
+                # placed as missing until its result arrives
                 "state": "missing", "preview": MISSING_RESULT_TEXT,
                 "is_error": True, "synthetic": True,
             })
@@ -277,7 +321,13 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                     "reason": data.get("reason", ""),
                 }
 
-    # 裁决回填到对应的工具卡片上
+        elif kind == ProjectEvent.CONVERSATION_COMPACTED:
+            item = compaction_item(data)
+            if item is not None:
+                item["at"] = at
+                items.append(item)
+
+    # attach decisions to their tool card
     for item in items:
         if item.get("kind") == "tool":
             verdict = decisions.get(item.get("call_id"))
@@ -286,5 +336,31 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return items
 
 
-#: 给界面的结果预览长度。与 agent_routes 里流式推送的那个保持一致。
+#: must match the live preview length in agent_routes
 _PREVIEW = 600
+
+
+def compaction_item(data: dict[str, Any]) -> dict[str, Any] | None:
+    """A compaction as the UI shows it, shared by the live event and history restore.
+    Numbers are estimated tokens; invalid events give None.
+    """
+    summary = data.get("summary")
+    turns = data.get("turns")
+    if not (isinstance(summary, str) and summary.strip()
+            and isinstance(turns, int) and not isinstance(turns, bool) and turns >= 1):
+        return None
+
+    def count(key: str) -> int:
+        value = data.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    trigger = data.get("trigger")
+    return {
+        "kind": "compaction",
+        "summary": summary.strip(),
+        "turns": turns,
+        "kept": count("kept"),
+        "trigger": trigger if trigger in ("auto", "manual", "overflow") else "manual",
+        "before": count("before"),
+        "after": count("after"),
+    }

@@ -1,4 +1,4 @@
-"""HTTP 接口层。App 只和这一层对话。"""
+"""HTTP layer; the only interface the app talks to."""
 
 from .app import create_app
 

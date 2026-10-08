@@ -1,7 +1,5 @@
-// 自定义 URL scheme 的两个处理器 —— 正文里的图片走它们进 WKWebView。
-//
-// **为什么不用 file:// 直接给**：那等于把整个文件系统暴露给页面。
-// 自定义 scheme 让每一次取图都过一遍 `LocalAssets.resolve()` 的边界检查。
+// URL scheme handlers that serve images to the WKWebView. Not file://, which would expose the
+// whole file system: every request passes LocalAssets.resolve()'s boundary check.
 import CryptoKit
 import Foundation
 import UniformTypeIdentifiers

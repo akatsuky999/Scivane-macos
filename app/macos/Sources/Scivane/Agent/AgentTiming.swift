@@ -1,23 +1,17 @@
 import Foundation
 
-/// 一轮对话在 App 这一侧的分段计时。
+/// App-side timing of one turn. The backend half is llm/timing.py; this records when the request
+/// went out, when headers arrived, when each event was decoded (URLSession thread), when the main
+/// thread handled it, and when text was handed to the UI (each StreamPacer publish). Both sides use
+/// wall-clock time, so the records line up and show which layer is slow.
 ///
-/// 「对话慢」可能慢在模型、请求的形状、后端转发、客户端解析或界面显示 —— 只看总时长分不出来。
-/// 后端那一半在 `llm/timing.py`：厂商那一段，与每个 SSE 帧交给 HTTP 层的时刻。这里记另一半：
-///
-/// - 请求发出、响应头到达；
-/// - **每个事件解码出来的时刻**（URLSession 的回调线程上）；
-/// - **主线程处理它的时刻**（`AgentSession.absorb`）—— 与上一项之差就是主线程排队多久；
-/// - **字交给界面的时刻**（`StreamPacer` 每次发布）—— 下一帧就画到屏幕上。
-///
-/// 两边都用墙上时钟，同一台机器上逐帧对齐，就分得清慢在哪一层。
-///
-/// **默认关。** `SCIVANE_TIMING=1`（验证脚本）或 `defaults write local.scivane.app agentTiming -bool YES`
-/// （真 App，下次启动生效）打开；开着时 App 也把 `SCIVANE_TIMING=1` 交给它起的后端。
-/// 写到 `<var>/logs/ui-timing.jsonl`，一轮一行。**只记时刻、事件名与字节数，不记内容与凭据。**
+/// Off by default. Enable with SCIVANE_TIMING=1 (checks) or
+/// `defaults write local.scivane.app agentTiming -bool YES` (next launch); the app then passes
+/// SCIVANE_TIMING=1 to its backend. Writes one line per turn to <var>/logs/ui-timing.jsonl:
+/// times, event names and byte counts only, never content or credentials.
 final class AgentTiming: @unchecked Sendable {
 
-  /// 开没开。启动时读一次：一轮跑到一半改了开关，那一轮的记录也不该半截。
+  /// read once at launch, so a turn is never half recorded
   static let enabled: Bool =
     ProcessInfo.processInfo.environment["SCIVANE_TIMING"] == "1"
     || UserDefaults.standard.bool(forKey: "agentTiming")
@@ -28,16 +22,16 @@ final class AgentTiming: @unchecked Sendable {
 
   private let lock = NSLock()
   private var marks: [String: Double] = [:]
-  /// 解码出来的时刻、事件名、这一帧的字节数、其中正文或推理的字节数。
+  /// time, event, frame bytes, text or reasoning bytes
   private var received: [(Double, String, Int, Int)] = []
-  /// 主线程处理的时刻、事件名。
+  /// time, event
   private var handled: [(Double, String)] = []
-  /// 交给界面的时刻、屏幕上的正文字节数、推理字节数。
+  /// time, visible text bytes, visible reasoning bytes
   private var shown: [(Double, Int, Int)] = []
 
   private static func now() -> Double { Date().timeIntervalSince1970 }
 
-  /// 这一轮层面的一个时刻（第一次为准）。
+  /// first occurrence wins
   func mark(_ name: String) {
     let t = Self.now()
     lock.lock(); defer { lock.unlock() }
@@ -62,7 +56,7 @@ final class AgentTiming: @unchecked Sendable {
     shown.append((t, text, thinking))
   }
 
-  /// 追加一行。写不了就算了 —— 计时不该让一轮对话出错。
+  /// Best effort: timing must never fail a turn.
   func write(meta: [String: Any]) {
     lock.lock()
     var record: [String: Any] = ["kind": "ui-turn"]

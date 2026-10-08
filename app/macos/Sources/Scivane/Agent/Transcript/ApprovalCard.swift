@@ -1,12 +1,9 @@
 import SwiftUI
 
-// MARK: - 批准
+// MARK: - Approval
 
-/// 需要用户点头的那一次调用。
-///
-/// **刻意不用模态对话框。** 模态会把整个界面按住，而用户此刻很可能正在
-/// 左边看原稿对照 —— 打断阅读去回答一个是非题，是最糟的时机。
-/// 这里让它作为对话流里的一张卡浮出来：显眼，但不夺走控制权。
+/// A call waiting for the user's OK. A card in the transcript rather than a modal: the user may be
+/// reading the source on the left.
 struct ApprovalCard: View {
   let item: TranscriptItem
   let onAnswer: (Bool, String) -> Void
@@ -23,14 +20,11 @@ struct ApprovalCard: View {
   private var answered: Bool { item.decision != nil }
 
   var body: some View {
-    // **裁决完就收成一行。** 这张卡之所以大，是因为它要让人在一秒内判断
-    // 该不该批 —— 那是「待决」时的需要。答完之后它只是一条记录，
-    // 再占 140pt 就是在和真正的回答抢版面（活动卡收起是同一个道理）。
+    // Collapses to one line once answered; it only needs to be large while undecided.
     if answered { settled } else { prompt }
   }
 
-  /// 已裁决：一行浅色记录。**动作本身要留在行里** ——
-  /// 只写「已允许」而不写允许了什么，这条记录就没有价值了。
+  /// Answered: one quiet line that still names the action.
   private var settled: some View {
     HStack(alignment: .firstTextBaseline, spacing: 6) {
       Image(systemName: verdictSymbol)
@@ -59,12 +53,7 @@ struct ApprovalCard: View {
     return decision.reason.isEmpty ? head : head + L("：", ": ") + decision.reason
   }
 
-  /// 这张卡在问什么。**按工具说，不写死一句。**
-  ///
-  /// 从前这里写死「这一步要联网」和「沙箱内没有网络，只有这一类动作会走到外面」——
-  /// 那时要批准的只有 `fetch_repo`。沙箱通网之后，后一句就不对了；取代码也搬进沙箱之后
-  /// 弹这张卡的只剩书房的删项目（读者那一层零审批工具），前一句也不对了：
-  /// 用户删一篇论文时看到的会是「这一步要联网」。
+  /// Phrased per tool rather than one fixed sentence.
   private var ask: (symbol: String, title: String, note: String) {
     switch item.toolName {
     case "delete_project":
@@ -72,7 +61,7 @@ struct ApprovalCard: View {
               L("原稿副本与这个项目的全部对话会一起删掉，删了找不回来",
                 "The copy of the original and all of this project's chats go with it — this can't be undone"))
     default:
-      // 没见过的工具：只说要你点头，不替它编一句后果
+      // unknown tool: ask, without inventing a consequence
       return ("hand.raised", L("这一步要你点头", "This step needs your OK"), "")
     }
   }

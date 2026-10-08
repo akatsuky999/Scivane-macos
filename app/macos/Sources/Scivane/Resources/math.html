@@ -1,0 +1,146 @@
+<!doctype html>
+<!--
+  Formula typesetting page for the conversation. Never shown: the app loads it in a hidden
+  WebView, KaTeX typesets a batch, each box is measured and exported as vector PDF to embed in
+  native text (see MathRenderer.swift).
+
+  Everything is set at 1em = 20px; the app scales metrics and images to the conversation font
+  size, which matches typesetting at that size because KaTeX lays out in em.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font-size: 20px; color: #000; }
+  #stage { position: absolute; left: 0; top: 0; }
+  /* each formula in its own absolutely positioned cell: no crowding, width set by the formula */
+  .item { position: absolute; left: 8px; display: inline-block; white-space: nowrap; }
+  /* KaTeX scales formulas to 1.21x the surrounding text; here 1em is the reference size and the
+     app decides the scale */
+  .katex { font-size: 1em; }
+  /* display math fills and centres on the line by default, so it would measure the whole line;
+     shrink to the content and let the app centre it (it also places the number) */
+  .katex-display { display: inline-block; margin: 0; text-align: left; }
+  .katex-display > .katex { display: inline-block; text-align: left; }
+  .katex-display > .katex > .katex-html { display: inline-block; }
+  /* per-row numbers in multi-line environments sit at the far right and would overlap once
+     shrunk; let them follow the formula. A single equation number is stripped by the app */
+  .katex-display > .katex > .katex-html > .tag {
+    position: relative; right: auto; display: inline-block; margin-left: 1.6em;
+  }
+</style>
+<script src="vendor/katex/katex.min.js"></script>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+"use strict";
+
+// Commands models use that KaTeX lacks. A fresh copy per call: KaTeX writes \gdef and the like
+// back into this object, so a shared one would let one formula change the next.
+const MACROS = {
+  "\\argmin": "\\operatorname*{arg\\,min}",
+  "\\argmax": "\\operatorname*{arg\\,max}",
+  "\\eqref": "\\text{(#1)}",
+  "\\ref": "\\text{#1}",
+  "\\mathbbm": "\\mathbb{#1}"
+};
+
+// Load every KaTeX font up front, before measuring. Fonts load lazily (calligraphic, large
+// delimiters), so a formula measured right away gets fallback widths, and the PDF exported once
+// the fonts arrive is wider and clipped on the right.
+window.loadAllFonts = async function () {
+  const faces = [];
+  document.fonts.forEach(function (face) { faces.push(face.load().catch(function () { return null; })); });
+  await Promise.all(faces);
+  await document.fonts.ready;
+  return faces.length;
+};
+
+// A formula's box: vertically the TeX box, horizontally what is actually drawn. Not the union of
+// all children vertically: the invisible .pstrut struts that set the baseline reach far above the
+// formula. Not just .katex-html horizontally: it is narrower than its content in cases and
+// aligned. So: the extent of every text run, rule and svg.
+function box(holder) {
+  const html = holder.querySelector(".katex-html") || holder;
+  const tex = html.getBoundingClientRect();
+  let left = tex.left, right = tex.right;
+  const walker = document.createTreeWalker(holder, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.nodeValue.trim()) continue;
+    range.selectNodeContents(node);
+    for (const rect of range.getClientRects()) {
+      if (rect.width <= 0) continue;
+      left = Math.min(left, rect.left);
+      right = Math.max(right, rect.right);
+    }
+  }
+  const drawn = holder.querySelectorAll(
+    "svg, .frac-line, .overline-line, .underline-line, .hline, .hdashline, .rule");
+  for (const element of drawn) {
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0) continue;
+    left = Math.min(left, rect.left);
+    right = Math.max(right, rect.right);
+  }
+  return { left: left, top: tex.top, right: right, bottom: tex.bottom };
+}
+
+// Typeset a batch: [{tex, display}] -> [{ok, x, y, width, height, baseline} | {ok: false, error}].
+// Typeset everything, wait for fonts, then measure: one round trip per batch.
+window.renderBatch = async function (items) {
+  const stage = document.getElementById("stage");
+  stage.textContent = "";
+  const placed = [];
+  for (const item of items) {
+    const cell = document.createElement("span");
+    cell.className = "item";
+    const holder = document.createElement("span");
+    try {
+      katex.render(item.tex, holder, {
+        displayMode: !!item.display,
+        throwOnError: true,
+        strict: "ignore",
+        trust: false,
+        output: "html",
+        macros: Object.assign({}, MACROS)
+      });
+    } catch (error) {
+      placed.push({ ok: false, error: String(error && error.message || error) });
+      continue;
+    }
+    // a zero-size marker on the baseline: its position is the formula's baseline
+    const baseline = document.createElement("span");
+    baseline.style.cssText = "display:inline-block;width:0;height:0;vertical-align:baseline";
+    cell.appendChild(holder);
+    cell.appendChild(baseline);
+    stage.appendChild(cell);
+    placed.push({ cell: cell, holder: holder, baseline: baseline });
+  }
+  await document.fonts.ready;
+
+  const out = [];
+  let top = 4;
+  for (const entry of placed) {
+    if (!entry.cell) { out.push(entry); continue; }
+    entry.cell.style.top = top + "px";
+    const rect = box(entry.holder);
+    const line = entry.baseline.getBoundingClientRect().top;
+    out.push({
+      ok: true,
+      x: rect.left, y: rect.top,
+      width: rect.right - rect.left, height: rect.bottom - rect.top,
+      baseline: line - rect.top
+    });
+    // generous gaps between cells: the export pads each box and must not catch a neighbour
+    top = Math.ceil(rect.bottom) + 24;
+  }
+  document.body.style.height = (top + 8) + "px";
+  return out;
+};
+</script>
+</body>
+</html>

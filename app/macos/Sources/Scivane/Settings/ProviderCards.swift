@@ -1,29 +1,22 @@
 import SwiftUI
 
-/// 模型卡与共享 key 的展示件。
-///
-/// **为什么改成卡片**：原先是「一个下拉选中谁 + 一份表单编辑谁」，
-/// 而这两件事在同一个控件上 —— 想看看另一张卡怎么配的，就得把「正在用的」
-/// 也换掉。卡片把「有哪些」「在用哪个」「这张怎么配的」三件事同时摊开，
-/// 一眼扫完，不用靠记忆。
+/// Model cards and shared keys. Cards show which providers exist, which one is in use and how each
+/// is configured at once, unlike the earlier picker plus a single form.
 
-/// 这张卡的 key 是哪来的、有没有。
+/// Where this card's key comes from, if any.
 enum CardKeyState: Equatable {
-  /// 卡片自己存了一把。
+  /// stored on the card
   case own
-  /// 用共享的那把（带编号与备注）。
+  /// the shared one, with id and note
   case macro(id: String, note: String)
-  /// 还没有可用的 key。
+  /// no usable key yet
   case missing
 
   var usable: Bool { self != .missing }
 }
 
-/// 一张模型卡的抬头。收起时它就是这张卡的全部。
-///
-/// **整行点开编辑，左边那个圆点单独管「设为默认」。** 先前只有 10pt 的小三角
-/// 能展开，实机反馈是「很难点」—— 点击区得配得上动作的频率，而不是配合图标的
-/// 尺寸。圆点保持独立按钮，两个动作才不会抢同一块区域。
+/// A card's header, which is the whole card when collapsed. The whole row expands; the dot on the
+/// left is a separate button for Make Default, so the two actions don't share an area.
 struct ProviderCardHeader: View {
   let provider: AppModel.ProviderSummary
   let isDefault: Bool
@@ -32,8 +25,7 @@ struct ProviderCardHeader: View {
   let onUse: () -> Void
   let onToggle: () -> Void
 
-  /// 地址只显示主机名 —— 完整 URL 在窄栏里会把这一行挤爆，
-  /// 而用户扫一眼要确认的就是「打到哪家去」。
+  /// host only: the full URL doesn't fit, and the host is what people check
   private var host: String {
     URL(string: provider.baseUrl)?.host ?? provider.baseUrl
   }
@@ -44,8 +36,7 @@ struct ProviderCardHeader: View {
 
   var body: some View {
     HStack(alignment: .top, spacing: 10) {
-      // 圆点单独可点：设为默认。**它必须是独立的按钮** —— 整行是展开，
-      // 两个动作叠在同一块区域上，点哪儿都不对。
+      // a separate button, since the row itself expands
       Button(action: onUse) {
         Image(systemName: isDefault ? "largecircle.fill.circle" : "circle")
           .font(.system(size: 13))
@@ -67,7 +58,7 @@ struct ProviderCardHeader: View {
         HStack(spacing: 6) {
           chip(host, tint: Palette.inkFaint)
           chip(reasoningLabel, tint: Palette.inkFaint)
-          if let window = provider.contextWindow {
+          if let window = provider.window {
             chip(UsageMeter.compact(window), tint: Palette.inkFaint)
           }
           keyChip
@@ -75,7 +66,7 @@ struct ProviderCardHeader: View {
         }
       }
 
-      // 箭头只是个指示，**不是唯一的点击区** —— 10pt 的小三角太难点了。
+      // only an indicator; the whole row is clickable
       Image(systemName: "chevron.right")
         .font(.system(size: 9, weight: .semibold))
         .foregroundStyle(Palette.inkFaint.opacity(0.7))
@@ -84,7 +75,7 @@ struct ProviderCardHeader: View {
     }
     .padding(.horizontal, 12).padding(.vertical, 10)
     .contentShape(Rectangle())
-    // 整行可点 = 展开。圆点那块被上面那个 Button 吃掉，不会误触。
+    // the row expands; the dot's Button takes its own clicks
     .onTapGesture(perform: onToggle)
   }
 
@@ -110,13 +101,11 @@ struct ProviderCardHeader: View {
   }
 }
 
-/// 共享 key（宏观 key）那一栏。
-///
-/// **秘密不经过这里** —— 新建时输入的明文直接交给 `MacroKeys.save`，
-/// 存进钥匙串之后视图只留一个掩码。红线：key 不回显、不进偏好文件。
+/// Shared keys. Secrets never pass through here: new input goes straight to MacroKeys.save and
+/// only the mask remains.
 struct MacroKeyPanel: View {
   @Binding var entries: [MacroKeys.Entry]
-  /// 每把 key 被几张卡片引用 —— 删之前要让人看见这个数。
+  /// cards using each key; shown before deleting
   let usage: [String: Int]
   let onChanged: () -> Void
 

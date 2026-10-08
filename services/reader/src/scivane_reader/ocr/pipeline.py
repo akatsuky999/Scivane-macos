@@ -1,7 +1,7 @@
-"""PaddleOCR-VL-1.6 封装。
+"""PaddleOCR-VL-1.6 wrapper.
 
-版面分析（PP-DocLayoutV3）在本进程内用 CPU 跑，逐元素识别外包给
-llama-server，由它用 Metal 调 M 系列 GPU —— 这是整套架构提速的关键。
+Layout analysis (PP-DocLayoutV3) runs on CPU in-process; element recognition goes to
+llama-server on the Metal GPU.
 """
 
 from __future__ import annotations
@@ -22,13 +22,13 @@ _pipeline_lock = threading.Lock()
 
 
 def get_pipeline():
-    """首次调用时构建 pipeline（会加载版面模型，耗时数秒），之后复用。"""
+    """Built on first use (loads the layout model, a few seconds), then reused."""
     global _pipeline
     if _pipeline is not None:
         return _pipeline
     with _pipeline_lock:
         if _pipeline is None:
-            # OCR 是可选组件：在哪一档由 runtime 现找，没装就说清楚没装，而不是撞一个 ImportError
+            # OCR is optional: locate it at runtime and report it missing instead of hitting an ImportError
             active = runtime.resolve()
             if active is None:
                 raise FileNotFoundError(runtime.unavailable_reason())
@@ -42,8 +42,8 @@ def get_pipeline():
                 vl_rec_backend=config.VL_BACKEND,
                 vl_rec_server_url=config.LLAMA_BASE_URL,
                 vl_rec_max_concurrency=config.VL_MAX_CONCURRENCY,
-                # 默认的队列批处理会把整份文档攒完才吐结果，实测反而更慢
-                # （6 页：批处理 27s、关队列 16s、逐页切分 14.6s）
+                # the default queue batches the whole document and is slower
+                # (6 pages: 27 s batched, 16 s without queues, 14.6 s split per page)
                 use_queues=False,
             )
             logger.info("PaddleOCRVL ready")
@@ -51,7 +51,7 @@ def get_pipeline():
 
 
 def warmup() -> None:
-    """提前把版面模型加载好，别让第一份文档替所有人排队。"""
+    """Warm up the layout model so the first document doesn't pay for it."""
     get_pipeline()
 
 
@@ -62,10 +62,10 @@ def _parse_document(
     should_stop: Callable[[], bool] | None = None,
     on_page_start: Callable[[int], None] | None = None,
 ) -> str:
-    """逐页解析，每完成一页回调一次；返回跨页整理后的完整 Markdown。
+    """Parse page by page with a callback per page; returns the restructured Markdown.
 
-    显示用逐页结果（带页锚点，支持左右联动滚动），导出用整理后的版本
-    （跨页表格合并、标题层级重排、段落接续）。
+    Pages are shown as they arrive (with anchors for synced scrolling); export uses the
+    restructured version (merged tables, fixed heading levels, joined paragraphs).
     """
     pipeline = get_pipeline()
     job_dir = config.JOBS_DIR / job_id
@@ -79,13 +79,12 @@ def _parse_document(
         parts = split_pages(path, split_dir)
 
         for i, part in enumerate(parts, start=1):
-            # 拆页之后取消才是真的能立刻停下，不用等整份跑完
+            # per-page splitting makes cancellation immediate
             if should_stop is not None and should_stop():
                 logger.info("job %s cancelled before page %d", job_id, i)
                 break
 
-            # 密集论文单页要跑十几秒，先告诉前端「开始第 N 页了」，
-            # 否则界面在整页跑完前完全没有动静
+            # dense pages take over ten seconds; announce the page so the UI shows progress
             if on_page_start is not None:
                 on_page_start(i)
 
@@ -102,7 +101,7 @@ def _parse_document(
 
 
 def consolidate(pipeline, collected: list, pages: list[str], job_dir: Path, job_id: str) -> str:
-    """跨页整理。失败就退回朴素拼接 —— 导出功能不该因为整理失败而不可用。"""
+    """Cross-page restructuring; falls back to plain concatenation so export never breaks."""
     if not collected:
         return ""
     try:
@@ -128,14 +127,10 @@ def parse_pages(
     pages: tuple[int, ...],
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[int, str]:
-    """只重跑指定的几页，返回 `页码 → Markdown`。
+    """Re-run only the given pages; returns page -> Markdown.
 
-    存在的理由是 `reocr` 工具：**审校乱码的正解是重跑那几页，不是手工改字。**
-    乱码说明那几页识别失败了，重跑更接近根因，而且可以换识别参数再来一次；
-    手工改字则是拿模型的猜测去覆盖另一个模型的猜测，谁也不知道对不对。
-
-    不做跨页整理 —— 整理是对整篇做的，只重跑三页却把整篇重排一遍，
-    会把用户已经校对过的其它部分也改掉。
+    For the reocr tool: garbled text is fixed by re-running the page, not by editing words.
+    No cross-page restructuring, which would rewrite parts the user already checked.
     """
     pipeline = get_pipeline()
     job_dir = config.JOBS_DIR / job_id

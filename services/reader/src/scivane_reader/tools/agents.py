@@ -1,22 +1,12 @@
-"""两层 agent：书房（Librarian）与读者（Reader）。
+"""Two agent levels: the librarian and the reader.
 
-**这是这个产品与通用 agent 最本质的区别**，也是整套设计的收口。
+    librarian  sees the project list (titles, times, status); reads no content; no shell
+    reader     lives in one project; working dir and sandbox root are that project
 
-    书房  只见项目清单（标题、时间、状态）· 不读任何项目的内容 · 没有 shell
-    读者  落在一个项目里 · 工作目录与沙箱根都是那个目录 · 不知道别的项目存在
-
-**打开项目不是切换上下文，是换一个 agent 实例。** 读者从诞生起
-`ToolContext.project_dir` 就是那个项目，注册表里根本没有「列出所有项目」
-这种工具 —— 隔离靠**类型与注册表**成立，不靠提示词里写一句「请不要访问
-其它项目」。后者是建议，前者是边界。
-
-换来三件事：一篇论文的代码跑飞炸不到另一篇；
-读者的提示词只讲这一篇，不必处理「你在哪个项目」的歧义；prompt 缓存的
-静态前缀就是这一篇论文，不会因为切项目而失效。
-
-书房那层刻意做得很薄：它不读内容，所以不需要沙箱，也**不该有 shell** ——
-`without_project()` 会把执行类、文件类、论文类工具整个滤掉，模型连它们的
-名字都看不到。给它看见再拒绝执行是更糟的做法：模型会反复尝试并解释失败。
+Opening a project creates a new agent instance rather than switching context. The reader's
+ToolContext.project_dir is fixed from the start and no tool lists other projects, so isolation
+rests on types and the registry, not on a prompt asking nicely. The librarian is deliberately
+thin: without_project() removes execution, file and paper tools so the model never sees them.
 """
 
 from __future__ import annotations
@@ -110,8 +100,8 @@ Be concise without omitting reasoning needed to reproduce the conclusion. State 
 
 Choose the response language from the user's latest substantive question or instruction, not from the interface language, tool output, paper language, stored history, or this prompt. Answer in Simplified Chinese when the request is predominantly Chinese and in English when it is predominantly English. For a mixed or ambiguous request, use the language of the main request sentence; if that remains unclear, use the language of the latest user message. Keep code, filenames, identifiers, equations, citations, and quoted source text unchanged unless translation is requested. This language choice affects the answer only; it must not change tool selection, project boundaries, or factual standards."""
 
-# 本地 OCR 没装时接在 READER_PROMPT 后面。`reocr` 同时退出注册表 —— 上面几处提到它的
-# 地方不必逐句删：这一段明说它此刻不在，模型就不会去调一个看不见的工具。
+# Appended to READER_PROMPT when local OCR is missing; reocr is unregistered too. Saying so
+# explicitly keeps the model from reaching for a tool it can't see.
 READER_NO_OCR_NOTE = """
 
 ## Local OCR is unavailable
@@ -120,7 +110,7 @@ The `reocr` tool mentioned above is not currently available because the optional
 
 
 class ProjectSource(Protocol):
-    """书房要的最小存储接口：只列元数据，**没有读正文的方法**。"""
+    """The librarian's minimal store interface: metadata only, no way to read content."""
 
     def list_all(self) -> list: ...
     def get(self, project_id: str, *, migrate: bool = True): ...
@@ -129,7 +119,7 @@ class ProjectSource(Protocol):
 
 @dataclass(frozen=True)
 class Agent:
-    """一个 agent 实例：提示词 + 工具集 + 环境，三者绑死。"""
+    """One agent instance: prompt, tools and environment bound together."""
 
     name: str
     system: str
@@ -141,7 +131,7 @@ class Agent:
 
 
 def _row(project: object) -> str:
-    """项目清单的一行。**只出元数据，一个字的正文都不带。**"""
+    """One row of the project list: metadata only, never any content."""
     state = getattr(getattr(project, "context", None), "state", None)
     return (
         f"{getattr(project, 'id', '?')}  {getattr(project, 'title', '（无题）')}"
@@ -150,7 +140,7 @@ def _row(project: object) -> str:
 
 
 def librarian_tools(store: ProjectSource) -> tuple[ToolDef, ...]:
-    """书房那层的工具。全部 `requires_project=False`。"""
+    """The librarian's tools, all requires_project=False."""
 
     async def _list(arguments: dict[str, object], context: ToolContext) -> ToolOutcome:
         projects = store.list_all()
@@ -181,8 +171,7 @@ def librarian_tools(store: ProjectSource) -> tuple[ToolDef, ...]:
             project = store.get(project_id)
         except Exception as exc:  # noqa: BLE001
             raise ToolError(f"打开不了 {project_id}：{exc}", "NOT_FOUND") from exc
-        # 注意这里**没有**把项目内容带回来：打开是界面动作，
-        # 它会换一个读者 agent 实例，而不是把内容塞进书房的上下文。
+        # No project content comes back: opening is a UI action that creates a reader instance.
         return ToolOutcome(
             f"已请求打开「{getattr(project, 'title', project_id)}」。"
             "界面会切到那篇论文，接手的是一个只读得到它的助手。",
@@ -231,24 +220,22 @@ def librarian_tools(store: ProjectSource) -> tuple[ToolDef, ...]:
 
 
 def reader_registry(*, ocr: bool = True) -> ToolRegistry:
-    """读者那层的工具集。`ocr=False` 时不含 `reocr`。
+    """The reader's tools; without OCR, no reocr.
 
-    **没装 OCR 就不给看**，而不是给了再报「引擎不存在」—— 模型会反复尝试并解释失败。
-    代价：工具集属于 prompt 缓存的静态前缀，装上 OCR 之后
-    第一轮不命中缓存，之后照常。
+    Hidden rather than refusing at run time, which makes models retry and explain. The tool set is
+    part of the cached prefix, so the first turn after installing OCR misses the cache.
     """
     paper = tuple(t for t in paper_tools() if ocr or t.name != "reocr")
     return ToolRegistry(file_tools() + exec_tools() + repo_tools() + paper)
 
 
 def librarian(store: ProjectSource) -> Agent:
-    """书房实例。**注册表里只有清单类工具** —— 没有 shell、没有文件、没有正文。"""
+    """The librarian: only list-level tools, no shell, no files, no content."""
     return Agent(
         name="librarian",
         system=LIBRARIAN_PROMPT,
         registry=ToolRegistry(librarian_tools(store)),
-        # project_dir 为 None：任何需要项目目录的工具在这一层直接抛 NO_PROJECT，
-        # 但更重要的是它们**根本不在注册表里**，模型看不到。
+        # project_dir None: project tools would raise NO_PROJECT, but they aren't registered at all
         context=ToolContext(project_dir=None),
     )
 
@@ -261,12 +248,11 @@ def reader(
     cancelled: object = None,
     ocr: bool | None = None,
 ) -> Agent:
-    """读者实例。从诞生起工作目录就是这个项目。
+    """A reader whose working directory is this project from the start.
 
-    每打开一个项目建一个新的 —— **不要复用同一个实例换 project_dir**，
-    那会把上一篇的对话历史与 prompt 缓存前缀一起带过去，两层隔离就白做了。
-
-    `ocr` 不给时现查本机装没装本地 OCR（几次 stat，每轮一次，装完不用重启后端）。
+    Create a new one for every project; reusing an instance with a new project_dir would carry
+    over the previous conversation and cache prefix. Without `ocr`, local OCR is checked now
+    (a few stats per turn, so a fresh install needs no restart).
     """
     has_ocr = runtime.available() if ocr is None else ocr
     context = ToolContext(

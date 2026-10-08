@@ -1,7 +1,4 @@
-"""纸面上的事：数页、拆页、把抠出的插图落盘。
-
-不碰模型，纯文件操作，可以单独测。
-"""
+"""Pages and files: counting, splitting, saving image crops. No model, so it is testable on its own."""
 
 from __future__ import annotations
 
@@ -16,7 +13,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".g
 
 @dataclass
 class PageResult:
-    """一页的识别结果。index 从 1 开始，和界面上显示的页码一致。"""
+    """One page's result; index is 1-based, matching the UI."""
 
     index: int
     markdown: str
@@ -28,7 +25,7 @@ def is_image(path: Path) -> bool:
 
 
 def page_count(path: Path) -> int:
-    """先拿到总页数，进度条才能是确定性的而不是转圈。"""
+    """Page count up front so the progress bar is determinate."""
     if is_image(path):
         return 1
     try:
@@ -36,16 +33,15 @@ def page_count(path: Path) -> int:
 
         with pymupdf.open(path) as doc:
             return doc.page_count
-    except Exception:  # 非 PDF 或读取失败，交给下游处理
+    except Exception:  # not a PDF, or unreadable: leave it to the pipeline
         return 0
 
 
 def split_pages(path: Path, work_dir: Path) -> list[Path]:
-    """把 PDF 拆成一页一个文件。
+    """Split a PDF into one file per page.
 
-    直接把整份 PDF 交给 predict() 的话，它会攒完所有页才一次性吐结果 ——
-    进度条没法动，用户也不知道要等多久。拆开逐页送反而更快，实测 6 页
-    从 27 秒降到 14.6 秒，而且第一页 2.8 秒就能出来。
+    predict() on a whole PDF only returns at the end; per page is also faster
+    (6 pages: 27 s -> 14.6 s, first page after 2.8 s).
     """
     if is_image(path):
         return [path]
@@ -65,10 +61,7 @@ def split_pages(path: Path, work_dir: Path) -> list[Path]:
 
 
 def extract_markdown(res) -> tuple[str, dict]:
-    """从 paddleocr 的结果对象里取出 markdown 和抠图。
-
-    不同版本返回的形状不一样（dict 或字符串），统一在这里吸收。
-    """
+    """Markdown and crops from a paddleocr result; absorbs version differences (dict or string)."""
     md = res.markdown
     if isinstance(md, dict):
         return md.get("markdown_texts", "") or "", md.get("markdown_images", {}) or {}
@@ -76,7 +69,7 @@ def extract_markdown(res) -> tuple[str, dict]:
 
 
 def persist_images(markdown: str, images: dict, job_dir: Path, job_id: str) -> str:
-    """把抠出的插图落盘，并把 Markdown 里的相对路径改写成 /assets URL。"""
+    """Save image crops and rewrite their Markdown paths to /assets URLs."""
     if not images:
         return markdown
 

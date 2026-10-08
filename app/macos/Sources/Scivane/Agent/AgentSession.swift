@@ -1,65 +1,54 @@
 import Foundation
 import SwiftUI
 
-/// 一层 agent 的对话记录与运行状态。
-///
-/// **每一层各持一个实例**：书房一个，每个项目一个。这不是为了省事，
-/// 而是因为「打开项目是换一个 agent 实例，不是换上下文」——
-/// 两层的记录混成一条流，用户就分不清哪句话是对着哪一层说的，
-/// 而书房那一层根本读不到论文正文。
+/// Transcript and run state of one agent level: the librarian, or one conversation in a project.
 @MainActor
 final class AgentSession: ObservableObject {
 
-  /// 这是哪一层。`nil` 是书房（不属于任何项目）。
+  /// nil is the librarian
   let projectID: String?
 
-  /// 这是项目里的哪一条对话。书房那层没有对话的概念，永远是 `nil`。
-  ///
-  /// **它和 projectID 一起构成这个会话的身份。** 换一条对话就是换一段历史，
-  /// 所以换的是**另一个 AgentSession 实例**，而不是把这个实例的 items 清空 ——
-  /// 后者会让正在跑的那一轮把结果写进新对话的界面里。
+  /// Together with projectID this is the session's identity. Switching conversations switches
+  /// instances; clearing this one instead would let a running turn write into the new conversation.
+  /// Always nil for the librarian.
   let conversationID: String?
 
   @Published private(set) var items: [TranscriptItem] = []
   @Published private(set) var running = false
-  /// 后端尚未返回 job id 时也要锁住发送入口，避免快速连点创建两条交叠请求。
+  /// locks sending before the job id arrives, so a double click can't start two overlapping requests
   @Published private(set) var preparing = false
   @Published private(set) var usage = AgentUsage()
-  /// 正在等用户裁决的那一次调用。非空时输入区让位给批准卡。
+  /// Window occupancy of one request, not the turn's total (`usage`). Updated by `context` events
+  /// while running; when idle, fetched with refreshContext.
+  @Published private(set) var context: ContextReport?
+  /// a manual compaction rather than a question
+  @Published private(set) var compacting = false
+  /// non-nil: the composer gives way to the approval card
   @Published private(set) var pending: PendingApproval?
-  /// 这一轮里 agent 第一个到达的主机。**显眼但不阻塞**：
-  /// 联网是正常行为，不该按住用户，但第一次出网应当被看见 ——
-  /// 之后同一轮的主机都收进工具卡的折叠行。
+  /// First host reached this turn: visible but not blocking. Later hosts fold into the tool card.
   @Published private(set) var firstNetworkHost: String?
-  /// 已经从后端恢复过历史了。避免每次切回来都重拉一遍。
   private(set) var restored = false
 
-  /// 这一轮有没有产出过任何东西（正文、推理、工具、批准、失败）。
-  ///
-  /// **这是最后一道兜底。** 无论什么原因，一轮跑完却一个字都没有，
-  /// 界面都必须说句话 —— 否则用户看到的就是「发了消息没反应」，
-  /// 而那和「App 坏了」在观感上毫无区别。实测踩过：key 过期时后端
-  /// 一路静默到这里，界面空空如也。
+  /// Whether this turn showed anything at all (text, reasoning, tools, approvals, failures). The last
+  /// safety net: a turn that ends with nothing must still say something, or it looks broken. An
+  /// expired key once ended up exactly here.
   private var produced = false
   private var terminalEventSeen = false
-  /// 用户按过「停」。
-  ///
-  /// `@Published` 是因为**按下去必须立刻有反应**：后端还要把合成结果补完
-  /// 才会收流，中间这一两秒如果界面纹丝不动，用户只会认为按钮坏了
-  /// （实机就是这么报的）。所以状态行马上改口说「正在停下」。
+  /// Published so the button reacts at once: the backend still fills in synthetic results before
+  /// closing the stream, and a second of stillness reads as a broken button.
   @Published private(set) var cancelRequested = false
 
   private var jobID: String?
-  /// 正在生成的那一条屏幕上显示到哪了。**逐帧的增长只在这里**，见 `StreamPacer`：
-  /// 只有正在生成的那一行观察它，对话流与面板不随每个分片重画。
+  /// The streaming message's visible length. Per-frame growth lives only here; only the streaming
+  /// row observes it, so the transcript and panel don't redraw per chunk.
   let pacer = StreamPacer()
   private var stopWatchdog: Task<Void, Never>?
   private var client: AgentClient?
   private var task: Task<Void, Never>?
-  /// 这一轮的分段计时（`AgentTiming`，默认关）。
+  /// off by default
   private var timing: AgentTiming?
   private var timingProvider = ""
-  /// 正在流式接收的那条助手消息在 items 里的下标。
+  /// index in items of the message being streamed
   private var streamingIndex: Int?
 
   init(projectID: String?, conversationID: String? = nil) {
@@ -69,13 +58,13 @@ final class AgentSession: ObservableObject {
 
   var isEmpty: Bool { items.isEmpty }
 
-  /// 此刻在做什么。等待时那一行显示它。
-  ///
-  /// 「正在思考」和「正在读 md/context.md」是两种等待 —— 用户对后者的耐心
-  /// 要长得多，因为他知道机器在忙什么。只显示一个转圈的话，两者没有区别。
+  /// Shown in the waiting line. "Thinking" and "reading md/context.md" are different waits.
   var activity: String {
+    if let last = items.last, last.kind == .compaction, last.compaction?.state == .running {
+      return L("正在压缩上下文", "Compacting context")
+    }
     if let tool = items.last(where: { $0.kind == .tool && $0.awaitingResult }) {
-      // 英文摘要本身就是动名词（后端按界面语言说，「Searching …」），不用再接前缀
+      // English summaries already start with a gerund ("Searching ..."), no prefix needed
       return tool.summary.isEmpty
         ? L("正在跑 \(tool.toolName)", "Running \(tool.toolName)") : L("正在\(tool.summary)", tool.summary)
     }
@@ -83,16 +72,9 @@ final class AgentSession: ObservableObject {
     if items.contains(where: { $0.kind == .approval && $0.decision == nil }) {
       return L("等你的决定", "Waiting for your decision")
     }
-    // **「在想」和「在写」要分清楚。**
-    //
-    // 早先按 `streamingID == nil` 判，而 streamingIndex 在**推理的第一个
-    // 分片**落地时就有值了 —— 于是模型还在推理，界面已经写着「正在作答」。
-    // 实机截图里就是这样：卡里只有推理、一个字的正文都没有，状态却说在作答。
-    // 推理模型一想就是几十秒，这句话错了，用户会以为答案马上就到。
-    //
-    // **而且只看这一轮。** 早先找的是整段记录里最后一条助手消息 —— 追问时那是**上一轮**
-    // 的回答，于是新一轮一个字节都还没到，状态就写着「正在作答」；首字要等几秒的时候
-    // （实测：冷连接加慢供应商 3–12 秒），用户看到的是「在作答」却一个字都没有。
+    // Thinking vs. writing is decided by spoken text in this turn only. Checking streamingIndex said
+    // "answering" as soon as the first reasoning chunk landed, and searching the whole transcript
+    // found the previous turn's answer before this turn's first byte.
     let thisTurn = items.lastIndex(where: { $0.kind == .user }).map { items[($0 + 1)...] } ?? items[...]
     if let latest = thisTurn.last(where: { $0.kind == .assistant }), !latest.text.isEmpty {
       return L("正在作答", "Answering")
@@ -100,22 +82,17 @@ final class AgentSession: ObservableObject {
     return L("正在思考", "Thinking")
   }
 
-  /// 这一轮是什么时候发出去的。**给界面报已等了多久用。**
-  ///
-  /// 长推理时屏幕上几十秒没有任何变化，用户分不清「还在想」和「卡死了」——
-  /// 一个一直在走的秒数是最便宜也最有效的「还活着」信号。
+  /// For the elapsed-time display: during long reasoning a ticking counter is the cheapest sign of
+  /// life.
   private(set) var askedAt: Date?
 
-  /// 这一轮最后落在一条**有正文的回答**上。
-  ///
-  /// 模型偶尔会调完一串工具就收工，一个字都不说。那时活动卡之后空空如也，
-  /// 用户无从判断是还在跑、坏了、还是它就这么结束了 —— 必须说清楚。
+  /// Models sometimes run tools and stop without a word; that must be said explicitly.
   private var endsWithAnswer: Bool {
     guard let last = items.last else { return false }
     return last.kind == .assistant && !last.text.isEmpty
   }
 
-  /// 正在流式接收的那条消息。渲染时给它跟一个光标。
+  /// gets the caret
   var streamingID: UUID? {
     guard running, let index = streamingIndex, items.indices.contains(index) else { return nil }
     return items[index].id
@@ -128,13 +105,10 @@ final class AgentSession: ObservableObject {
     let expiresAt: Date
   }
 
-  // MARK: - 历史恢复
+  // MARK: - Restoring history
 
-  /// 从后端拉回此前的对话。
-  ///
-  /// 走 `/agent/transcript` 的投影接口，**不在 Swift 侧另写一套解析** ——
-  /// 「有调用没结果就补一条合成结果」这条纪律只能有一份实现，
-  /// 写两份必然漂移，而漂移的那份会让用户看到一段和模型看到的不一样的历史。
+  /// Uses the backend's /agent/transcript projection rather than parsing here: filling in results
+  /// for calls without one must have a single implementation.
   func restore(base: URL) async {
     guard let projectID, !restored else { return }
     restored = true
@@ -144,7 +118,88 @@ final class AgentSession: ObservableObject {
     items = raw.compactMap(TranscriptItem.init(restored:))
   }
 
-  // MARK: - 发问
+  /// Not while running: events carry the live numbers, and the idle forecast would overwrite them.
+  func refreshContext(base: URL, provider: String?) async {
+    guard let projectID, !running else { return }
+    let report = await AgentClient(base: base)
+      .context(projectID: projectID, conversation: conversationID, provider: provider)
+    guard let report, !running else { return }
+    context = report
+  }
+
+  // MARK: - Compaction
+
+  /// Manual compaction (POST .../agent/compact). Same receiving path as asking: job id, cancel,
+  /// watchdog and wrap-up all apply, and a cancelled compaction leaves nothing in the log.
+  func compact(base: URL, provider: String) {
+    guard let projectID, !running, !preparing else { return }
+    preparing = true
+    running = true
+    compacting = true
+    produced = false
+    terminalEventSeen = false
+    cancelRequested = false
+    askedAt = Date()
+    streamingIndex = nil
+
+    let client = AgentClient(base: base)
+    self.client = client
+    let stream = client.compact(projectID: projectID, provider: provider, conversation: conversationID)
+    task = Task { [weak self] in
+      do {
+        for try await event in stream {
+          guard let self else { return }
+          if Task.isCancelled { return }
+          self.absorb(event)
+        }
+        if let self, !self.terminalEventSeen, !self.cancelRequested {
+          self.endCompaction(UIText("连接提前结束了", "The connection ended early"))
+        }
+      } catch {
+        if let self, !self.cancelRequested {
+          self.endCompaction(.verbatim(error.localizedDescription))
+        }
+      }
+      self?.finish()
+    }
+  }
+
+  /// start opens a card; done / failed update the same card in place.
+  private func applyCompaction(_ event: CompactionEvent) {
+    switch event.phase {
+    case "start":
+      streamingIndex = nil
+      items.append(.compaction(TranscriptItem.Compaction(state: .running, trigger: event.trigger)))
+    case "done":
+      let result = TranscriptItem.Compaction(
+        state: .done, trigger: event.trigger, summary: event.summary, turns: event.turns,
+        kept: event.kept, before: event.before, after: event.after)
+      if let index = runningCompaction {
+        items[index].compaction = result
+      } else {
+        items.append(.compaction(result))
+      }
+    default:
+      endCompaction(.verbatim(event.message))
+    }
+  }
+
+  private var runningCompaction: Int? {
+    items.lastIndex { $0.kind == .compaction && $0.compaction?.state == .running }
+  }
+
+  /// Mark the running card failed, or add a notice if it never started (e.g. nothing to compact).
+  private func endCompaction(_ message: UIText) {
+    if let index = runningCompaction {
+      items[index].compaction?.state = .failed
+      items[index].localized = message
+      items[index].text = message.zh
+    } else {
+      items.append(.notice(message))
+    }
+  }
+
+  // MARK: - Asking
 
   func ask(_ question: String, base: URL, provider: String, confirmed: [String] = []) {
     guard !running, !preparing else { return }
@@ -208,14 +263,9 @@ final class AgentSession: ObservableObject {
     let client = self.client
     let projectID = self.projectID
     Task { await client?.cancel(projectID: projectID, jobID: jobID) }
-    // 不立刻 stop()：后端还要把合成结果补完再收流，
-    // 提前掐断的话那几条 tool_result 就到不了界面上（日志里仍然是全的）。
-    //
-    // **但不能无限等。** 正常路径上后端 0.03 秒就返回 aborted（实测），
-    // 慢的是补合成结果那一段；真出了岔子（后端崩了、连接半死）就没人来
-    // 收这个流了，而界面会永远停在「正在停下…」——那和按钮坏了没区别。
-    // 兜底掐断：宁可少几条 tool_result 卡片（日志里仍然是全的），
-    // 也不能把用户锁在一个转不完的圈里。
+    // Not stop() right away: the backend still sends the synthetic results before closing, and
+    // cutting early would lose those cards (the log stays complete). But not forever either: if the
+    // backend is gone nobody closes the stream, so cut it off after a grace period.
     stopWatchdog?.cancel()
     stopWatchdog = Task { [weak self] in
       try? await Task.sleep(for: .seconds(Self.stopGrace))
@@ -229,8 +279,7 @@ final class AgentSession: ObservableObject {
     }
   }
 
-  /// 按下「停」之后最多等多久。后端正常在毫秒级返回，这里给足余量
-  /// 让它把合成结果补完 —— 超过就是真出岔子了。
+  /// the backend normally answers in milliseconds; past this something is really wrong
   static let stopGrace: Double = 8
 
   func answer(_ approved: Bool, reason: String = "") {
@@ -247,26 +296,22 @@ final class AgentSession: ObservableObject {
     }
   }
 
-  /// 超时按拒绝 —— 后端已经这么判了，界面要说清是超时而不是用户点的。
+  /// Timed out counts as refused, as the backend decided; say it was a timeout, not the user.
   func expireApproval() {
     guard let pending else { return }
     self.pending = nil
     markDecision(callID: pending.callID, approved: false, reason: "", timedOut: true)
   }
 
-  // MARK: - 事件
+  // MARK: - Events
 
-  /// 把一个事件喂进来。**给断言用的缝** —— 定稿（`stream`/`flushStream`）
-  /// 是这条链路上最容易静默出错的一段：丢掉最后几个字、或者把旁白排到
-  /// 它后面那个工具调用之后，两种都不会报错，只会让记录悄悄失真。
-  /// 提成 internal 才能让 `verify_agent_panel` 用合成事件钉住它。
+  /// Seam for the panel checks: finalising the stream is where text gets lost or reordered silently.
   func ingest(_ event: AgentClient.Event) { absorb(event) }
 
-  /// 把正在生成的那一条立刻定稿。断言里用它模拟「一轮收尾」。
+  /// finalise the streaming message, as at the end of a turn
   func drainForTesting() { flushStream() }
 
-  /// 直接塞一条记录进去。**只给离屏出图与断言用** ——
-  /// 版式、密度、层次这些必须用眼睛看，而看需要一段像样的记录。
+  /// offscreen rendering and checks only
   func seedForTesting(_ item: TranscriptItem) { items.append(item) }
 
   private func absorb(_ event: AgentClient.Event) {
@@ -277,14 +322,11 @@ final class AgentSession: ObservableObject {
     default:
       break
     }
-    // **会往记录里添行、或者换掉正在生成的那一条的事件，先把它定稿再处理。**
-    // 顺序是有意义的：一句旁白必须排在它之后那个工具调用前面，
-    // 不定稿的话就会颠倒过来。
-    //
-    // 工具结果与执行强度只改已有的那几行、不影响先后，**不为它们打断**正在平滑
-    // 铺开的字 —— 流中派发之后，工具结果可能在模型还在说话时回来。
+    // Events that add rows or replace the streaming one finalise it first, so narration stays ahead of
+    // the tool call that follows it. Tool results and enforcement only edit existing rows and don't
+    // interrupt the text being paced out.
     switch event {
-    case .text, .thinking, .heartbeat, .usage, .toolResult, .enforcement:
+    case .text, .thinking, .heartbeat, .usage, .context, .toolResult, .enforcement:
       break
     default:
       flushStream()
@@ -292,7 +334,7 @@ final class AgentSession: ObservableObject {
     switch event {
     case .messageStart(let id, _, _):
       if let id { jobID = id }
-      // 新一轮开始：上一条助手消息已经定稿，不要再往里追加
+      // new step: the previous assistant message is final
       streamingIndex = nil
 
     case .text(let chunk):
@@ -320,8 +362,7 @@ final class AgentSession: ObservableObject {
       update(callID: callID) { $0.enforcement = level; $0.enforcementReason = reason }
 
     case .network(let hit):
-      // 去重按「首次到达」保序：一次 clone 会往同一个主机发几十个请求，
-      // 折叠行里重复几十遍没有信息量。
+      // dedupe, keeping first-arrival order: a clone sends dozens of requests to one host
       update(callID: hit.callID) { item in
         if hit.allowed {
           if !item.hosts.contains(hit.target) { item.hosts.append(hit.target) }
@@ -329,9 +370,8 @@ final class AgentSession: ObservableObject {
           item.blockedHosts.append((host: hit.target, reason: hit.reason))
         }
       }
-      // **第一个主机出一条显眼但不阻塞的提示**。
-      // 用 notice 而不是模态框：联网是正常行为，按住用户去点「知道了」
-      // 会把它训练成无脑点同意 —— 逐次批准最后只会被一路点过去。
+      // A notice rather than a modal: networking is normal, and confirm-every-time trains people to
+      // click through.
       if hit.first && hit.allowed {
         firstNetworkHost = hit.target
         items.append(.notice(UIText(
@@ -342,14 +382,20 @@ final class AgentSession: ObservableObject {
     case .usage(let value):
       usage = value
 
+    case .context(let report):
+      context = report
+
+    case .compaction(let event):
+      applyCompaction(event)
+
     case .done(let stop, let steps, let exhausted, _, let total):
       terminalEventSeen = true
       if !total.isEmpty { usage = total }
-      if exhausted {
-        // 上限现在是**防跑飞的兜底**（200），
-        // 不再是工作上限。撞到它多半是真在原地打转，所以这句话的建议
-        // 从「继续」换成「换个问法」—— 让一个已经转圈的循环接着转没有意义。
-        // 历史仍然留着，真想接着做说一句「继续」也行。
+      if stop == "compacted" {
+        // manual compaction: the card already says it all
+      } else if exhausted {
+        // The cap (200) is a runaway guard, not a work limit; hitting it usually means going in circles,
+        // so suggest rephrasing rather than continuing.
         items.append(.notice(UIText(
           "走了 \(steps) 步还没收敛，按防跑飞的兜底停下了。多半是它在原地打转 —— 换个更具体的问法通常比让它继续更有效。",
           "Stopped by the runaway guard after \(steps) steps without converging. It was probably going in "
@@ -358,18 +404,15 @@ final class AgentSession: ObservableObject {
         items.append(.notice(UIText("已取消。没来得及跑的调用都补了结果，历史仍然完整。",
                                     "Canceled. Calls that hadn't run got placeholder results, so the history stays intact.")))
       } else if stop == "error" {
-        // 后端现在会单独发 error 事件，正常走不到这里。留着是因为
-        // **旧后端仍会把失败发成 done**，而那条路的表现是整屏静默。
+        // The backend sends a separate error event now; older backends still report failure as done.
         items.append(.failure(code: "LLM_ERROR",
                               message: UIText("这一轮在模型那边失败了。", "This turn failed on the model's side.")))
       } else if !produced {
-        // 兜底：走到这里说明既没报错也没产出。多半是模型真的返回了空，
-        // 但无论什么原因，**沉默是最糟的呈现**。
+        // neither an error nor any output: silence is the worst possible answer
         items.append(.notice(UIText("模型这一轮什么都没返回。再问一次，或者换一个模型试试。",
                                     "The model returned nothing this turn. Ask again, or try another model.")))
       } else if !endsWithAnswer {
-        // **跑了一堆工具却不给答案**，实机遇到过。界面上的表现是活动卡之后
-        // 空空如也，用户无从判断是还在跑、还是坏了、还是它就这么结束了。
+        // tools ran but no answer followed
         items.append(.notice(UIText(
           "它跑完工具就停下了，没有给出结论。追问一句「所以结论是什么」通常就能拿到。",
           "It stopped after running tools without a conclusion. Asking “so what's the conclusion?” usually gets it.")))
@@ -377,23 +420,23 @@ final class AgentSession: ObservableObject {
 
     case .failed(let code, let message):
       terminalEventSeen = true
-      // 后端给的原话只有一种语言（它按请求那一刻的界面语言说）
-      items.append(.failure(code: code, message: .verbatim(message)))
+      // the backend's wording is in a single language (the UI language at request time)
+      if compacting {
+        // a failed manual compaction isn't a failed turn: it lands on the card, or as a notice
+        endCompaction(.verbatim(message))
+      } else {
+        items.append(.failure(code: code, message: .verbatim(message)))
+      }
 
     case .heartbeat:
       break
     }
   }
 
-  /// 正文与推理的分片。**只在这一路第一次有字时改记录，之后只交给 pacer。**
-  ///
-  /// 从前的做法是攒到 50ms 再改一次记录 —— 每改一次，整个面板都要重算（对话流的
-  /// 每一行、输入框、状态栏），历史越长越贵；而屏幕上的字照样一顿一顿地跳
-  /// （实测 83% 的帧一个字不动，见 `StreamPacer`）。现在逐帧在长的部分只在 pacer 里，
-  /// 只有正在生成的那一行观察它。
-  ///
-  /// **第一次有字是结构变化，必须进记录**：分组据「有没有正文」决定这一条进消息流
-  /// 还是进过程卡（`AgentTranscript.group`），`activity` 据此分「在想」与「在写」。
+  /// Text and reasoning chunks. The transcript is touched only for the first chunk; after that
+  /// growth goes to the pacer. Updating items every 50 ms recomputed the whole panel and still
+  /// stuttered. The first chunk is structural: grouping and the thinking/writing state depend on
+  /// whether there is text.
   private func stream(_ chunk: String, thinking: Bool) {
     guard !chunk.isEmpty else { return }
     if let index = streamingIndex, items.indices.contains(index) {
@@ -405,7 +448,7 @@ final class AgentSession: ObservableObject {
     } else {
       var line = TranscriptItem.assistant("")
       if thinking { line.thinking = chunk } else { line.text = chunk }
-      // 打上时间戳：活动卡要报「已处理多久」，而一段纯思考里没有工具可以借时间
+      // the activity card reports elapsed time, and pure reasoning has no tool to borrow it from
       line.startedAt = Date()
       line.finishedAt = Date()
       pacer.reset()
@@ -415,9 +458,8 @@ final class AgentSession: ObservableObject {
     pacer.receive(chunk, thinking: thinking)
   }
 
-  /// 把正在生成的那一条定稿：屏幕立刻补齐，已收到的全文写回记录。
-  ///
-  /// 收尾时必须走到这里 —— 丢掉的话回答会缺最后几个字，而那正是结论所在。
+  /// Finalise the streaming message: the screen catches up and the full text goes into the
+  /// transcript. Every ending must pass here, or the last words (the conclusion) are lost.
   private func flushStream() {
     guard let index = streamingIndex, items.indices.contains(index) else { return }
     let full = pacer.finish()
@@ -441,8 +483,7 @@ final class AgentSession: ObservableObject {
   }
 
   private func finish() {
-    // 收尾前把正在生成的那一条定稿 —— 丢掉的话回答会缺最后几个字，
-    // 而那正是结论所在。
+    // finalise first, or the last words are lost
     flushStream()
     if let timing {
       timing.mark("finished")
@@ -458,6 +499,7 @@ final class AgentSession: ObservableObject {
     stopWatchdog = nil
     preparing = false
     running = false
+    compacting = false
     streamingIndex = nil
     pending = nil
     jobID = nil
@@ -465,13 +507,27 @@ final class AgentSession: ObservableObject {
   }
 }
 
-// MARK: - 一条记录
+// MARK: - Transcript item
 
-/// 对话流里的一条。做成带 kind 的结构体而不是 enum，是因为流式更新要**原地改**
-/// （正文逐字追加、工具结果回填、执行强度事后挂上去），
-/// enum 每次都要拆开重装，代码会难看很多。
+/// A struct with a kind rather than an enum: streaming updates edit in place (appended text,
+/// filled-in results, enforcement attached later).
 struct TranscriptItem: Identifiable {
-  enum Kind { case user, assistant, tool, approval, failure, notice }
+  enum Kind { case user, assistant, tool, approval, failure, notice, compaction }
+
+  /// Running, done or failed. Token counts are the backend's estimates.
+  struct Compaction: Equatable {
+    enum State { case running, done, failed }
+    var state: State
+    /// auto / overflow / manual
+    var trigger: String
+    var summary = ""
+    /// turns covered by the summary
+    var turns = 0
+    /// turns kept verbatim
+    var kept = 0
+    var before = 0
+    var after = 0
+  }
 
   struct Decision: Equatable {
     let approved: Bool
@@ -482,45 +538,39 @@ struct TranscriptItem: Identifiable {
   let id = UUID()
   var kind: Kind
   var text = ""
-  /// 推理过程。默认折起来 —— 它对判断「模型有没有理解题目」有用，
-  /// 但常驻展开会把真正的回答挤下去。
+  /// collapsed by default: useful to judge understanding, but it would push the answer down
   var thinking = ""
 
-  // --- 工具 / 批准 ---
+  // tool / approval
   var callID = ""
   var toolName = ""
   var summary = ""
   var preview = ""
   var truncated = false
   var isError = false
-  /// 取消后补的合成结果。**必须与「工具报错了」分开显示** ——
-  /// 一个是跑了但失败，一个是根本没跑，回放时这两件事完全不同。
+  /// Filled in after a cancel; shown apart from tool errors (ran and failed vs. never ran).
   var synthetic = false
   var enforcement: String?
   var enforcementReason = ""
-  /// 这次工具调用到达过的主机，按首次到达排序、已去重。
-  ///
-  /// **只有主机与端口**（`example.com`、`127.0.0.1:8080`）—— 路径与查询串
-  /// 在后端就不存在，凭据常藏在查询串里。收进工具卡的折叠行；
-  /// 每次调用的**第一个**主机另外出一条显眼但不阻塞的提示。
+  /// Hosts this call reached, deduped in first-arrival order. Host and port only; the path and query
+  /// string never exist here.
   var hosts: [String] = []
-  /// 被代理拒掉的出网：`主机 → 原因`。这一条要显眼 —— 它说明 agent 试过
-  /// 去它不该去的地方（多半是连回环），用户有权知道。
+  /// `host -> reason`; shown prominently, since the agent tried to go somewhere it shouldn't
   var blockedHosts: [(host: String, reason: String)] = []
   var decision: Decision?
   var startedAt: Date?
   var finishedAt: Date?
   var expiresAt: Date?
-  /// 工具还没回结果。界面上显示成「进行中」。
+  /// shown as in progress
   var awaitingResult = false
-  /// edit / write 带回来的结构化改动。**只有这两个工具有。**
+  /// edit and write only
   var diff: AgentClient.FileDiff?
+  /// `.compaction` only; a failure's explanation is in `localized`
+  var compaction: Compaction?
   var code = ""
-  /// 界面自己写下的那句话（提示、本地的失败说明）。**两种说法都存**，显示时按当前语言挑 ——
-  /// 存成 String 的话，切换语言之前写下的那几条就停在旧语言里。`text` 里仍是中文那句
-  /// （断言与导出照旧读它）；后端给的原话只有一种，`localized` 两边相同。
+  /// Text written by the UI itself, kept in both languages so it follows a switch. `text` still holds
+  /// the Chinese (checks and export read it); backend wording is the same on both sides.
   var localized: UIText?
-  /// 显示用的那句。
   var displayText: String { localized?.text ?? text }
 
   var duration: TimeInterval? {
@@ -537,6 +587,11 @@ struct TranscriptItem: Identifiable {
   }
   static func notice(_ text: UIText) -> TranscriptItem {
     var item = TranscriptItem(kind: .notice); item.text = text.zh; item.localized = text; return item
+  }
+  static func compaction(_ info: Compaction) -> TranscriptItem {
+    var item = TranscriptItem(kind: .compaction)
+    item.compaction = info
+    return item
   }
   static func failure(code: String, message: UIText) -> TranscriptItem {
     var item = TranscriptItem(kind: .failure)
@@ -575,22 +630,17 @@ struct TranscriptItem: Identifiable {
     awaitingResult = false
   }
 
-  /// 只留推理的那一半（给折叠卡）。
-  ///
-  /// **id 必须沿用原来的，不能新生成。** 试过新建一个 `TranscriptItem`，
-  /// 那样每次重渲染都是一个新 UUID —— `ForEach` 每帧都认为这张卡换了，
-  /// 展开状态被重置、视图反复重建。和 `MarkdownBlock.rule` 早先那个
-  /// `UUID()` 是同一类坑：**身份里不许出现任何随机值。**
-  ///
-  /// 两半同号不会撞：`Row.id` 给活动行加了 `run:` 前缀。
+  /// The reasoning half, for the collapsed card. Keeps the original id: a new UUID per render makes
+  /// ForEach treat it as a new card every frame, resetting expansion. Row.id prefixes activity rows
+  /// with `run:`, so the halves don't collide.
   func reasoningOnly() -> TranscriptItem {
     var copy = self
     copy.text = ""
     return copy
   }
 
-  /// 只留说出来那一半（给消息流）。id 沿用原来的 —— 流式那条要靠它
-  /// 和 `session.streamingID` 对上，换了号光标就跟丢了。
+  /// The spoken half, for the message flow. Keeps the original id so it still matches
+  /// session.streamingID.
   func spokenOnly() -> TranscriptItem {
     guard !thinking.isEmpty, !text.isEmpty else { return self }
     var copy = self
@@ -598,23 +648,30 @@ struct TranscriptItem: Identifiable {
     return copy
   }
 
-  /// 从后端投影出来的历史条目重建。字段名与 `projects/session.py`
-  /// 的 `derive_transcript()` 对应，改那边必须改这里。
+  /// Field names follow derive_transcript() in projects/session.py.
   init?(restored raw: [String: Any]) {
     let kindName = raw["kind"] as? String ?? ""
     switch kindName {
     case "user": self.init(kind: .user)
     case "assistant": self.init(kind: .assistant)
     case "tool": self.init(kind: .tool)
+    case "compaction": self.init(kind: .compaction)
     default: return nil
+    }
+    if kind == .compaction {
+      // fields of session.compaction_item(), the same as the live done event
+      compaction = Compaction(
+        state: .done, trigger: raw["trigger"] as? String ?? "manual",
+        summary: raw["summary"] as? String ?? "", turns: raw["turns"] as? Int ?? 0,
+        kept: raw["kept"] as? Int ?? 0, before: raw["before"] as? Int ?? 0,
+        after: raw["after"] as? Int ?? 0)
+      return
     }
     text = raw["text"] as? String ?? ""
     if kind == .tool {
       callID = raw["call_id"] as? String ?? ""
       toolName = raw["name"] as? String ?? "?"
-      // 摘要由后端的 `summarise_call()` 算好带过来 —— 实时推送用的是同一个
-      // 函数，两边必须是同一句话。之前这里写成 `summary = toolName`，
-      // 恢复出来的每一行都是「bash bash」，把工具名说了两遍。
+      // computed by the backend's summarise_call(), the same function the live stream uses
       summary = raw["summary"] as? String ?? toolName
       preview = raw["preview"] as? String ?? ""
       isError = raw["is_error"] as? Bool ?? false
@@ -624,8 +681,7 @@ struct TranscriptItem: Identifiable {
         enforcement = level
         enforcementReason = detail["enforcement_reason"] as? String ?? ""
       }
-      // 改动的 diff 也要恢复：退出重开之后「它到底改了什么」不该只剩一句
-      // 「已改 md/context.md」。投影里带的是同一份 detail。
+      // restore the diff too, so reopening still shows what changed
       diff = AgentClient.FileDiff(detail["diff"] as? [String: Any])
       if let verdict = raw["decision"] as? [String: Any] {
         decision = Decision(

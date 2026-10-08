@@ -1,23 +1,19 @@
 import SwiftUI
 
-/// 阅读工作区。
-///
-/// **没有栏头。** 之前每栏顶上各有一条 38pt 的标题栏，加上 46pt 的工具栏，
-/// 内容开始之前先吃掉 84pt —— 对一个「论文本身才是主角」的阅读器来说，
-/// 这个比例是失衡的。栏的身份、布局与模式切换全部收进唯一那条全局工具栏；
-/// 页码这种只在原稿栏有意义的控件，改成浮在内容之上、不占布局高度。
+/// Reading workspace. No pane headers: identity, layout and mode live in the single toolbar, and the
+/// page number floats over the PDF.
 struct ReaderView: View {
   @ObservedObject var model: AppModel
   @FocusState private var searchFocused: Bool
 
   var body: some View {
     VStack(spacing: 0) {
-      // 待确认的正文要一直挂着提示，直到人给出答复
+      // stays until someone answers
       if let project = model.activeProject, project.awaitsConfirmation {
         ContextConfirmBar(model: model, project: project)
       }
       if model.isSearching { searchBar }
-      // 本地 OCR 没装时的入口与安装进度。空闲时它什么都不画，自己观察安装状态
+      // draws nothing when idle
       OCRInstallCard(installer: model.ocrInstaller)
       if let source = model.readingSource, source.status != .ready && !source.status.isFinished {
         ScanProgressBar(job: source, onCancel: { model.cancelCurrent() }, onRetry: { model.retry(source) },
@@ -25,8 +21,7 @@ struct ReaderView: View {
       }
       if model.dualPane {
         HSplitView {
-          // Agent 是工作主区域：保留原稿作为参照，但把主要宽度交给对话，
-          // 避免聊天被压成右侧窄栏，工具状态和长回答都无法阅读。
+          // the agent gets most of the width; the source stays as a reference
           sourcePane.frame(minWidth: 240, idealWidth: model.textMode == .chat ? 360 : 460)
           textPane.frame(minWidth: 460, idealWidth: model.textMode == .chat ? 760 : 560)
         }
@@ -42,7 +37,7 @@ struct ReaderView: View {
     }
   }
 
-  // MARK: - 原稿栏
+  // MARK: - Source pane
 
   private var sourcePane: some View {
     ZStack(alignment: .bottom) {
@@ -66,11 +61,10 @@ struct ReaderView: View {
     .background(Palette.paper)
   }
 
-  // MARK: - 正文栏 / Agent
+  // MARK: - Text pane / agent
   //
-  // 两者叠在同一个 ZStack 里用透明度切换，**不是**用 if/switch 换视图。
-  // 换视图会让 MarkdownWebView 离开视图树：回来时 makeNSView 重跑，
-  // 新建 WKWebView、重新加载 viewer.html、重放整篇论文、滚动位置归零。
+  // Both stay in one ZStack and switch by opacity, not if/switch: leaving the tree would rebuild
+  // the WKWebView, reload viewer.html, replay the whole paper and lose the scroll position.
 
   private var textPane: some View {
     ZStack {
@@ -95,9 +89,8 @@ struct ReaderView: View {
     }
   }
 
-  // MARK: - 空栏
+  // MARK: - Empty panes
 
-  /// 当前打开的是不是一个还没有原稿的项目。
   private var sourcelessProject: Project? {
     guard let project = model.activeProject, !project.hasSource else { return nil }
     return project
@@ -114,8 +107,8 @@ struct ReaderView: View {
         : (kind == .source ? L("PDF 或图片，导入后先预览。", "A PDF or image; it's previewed after import.") : L("导入 Markdown，或先识别左侧原稿。", "Import Markdown, or run OCR on the original on the left first.")))
         .font(.uiCaption).foregroundStyle(Palette.inkFaint).multilineTextAlignment(.center)
       Button(kind == .source ? L("导入 PDF", "Import PDF") : L("导入 Markdown", "Import Markdown")) {
-        // 在一个还没有原稿的项目里，「导入 PDF」的意思是**挂到这个项目上**，
-        // 而不是再开一份临时文档 —— 后者会让用户建的空项目一直空着。
+        // In a project without a source, importing a PDF attaches it to the project rather than opening
+        // a loose document.
         if kind == .source, let project = sourcelessProject {
           model.chooseSourceForProject(project)
         } else {
@@ -160,11 +153,9 @@ struct ReaderView: View {
   }
 }
 
-// MARK: - 浮动页码
+// MARK: - Floating page number
 //
-// 页码只在原稿栏有意义，为它常驻一条 38pt 的栏头不划算。
-// 浮在内容上、平时压低存在感、指过去才亮起来 —— 预览.app 就是这个做法，
-// 既随时可用又不占版面。
+// Dim until hovered, as in Preview.
 
 private struct PageCapsule: View {
   @ObservedObject var model: AppModel
@@ -215,12 +206,10 @@ private struct PageCapsule: View {
   }
 }
 
-// MARK: - 分段切换
+// MARK: - Segmented control
 //
-// 高亮块是**滑**过去的，不是跳过去的：`matchedGeometryEffect` 负责在两个位置
-// 之间插值，但只有把赋值包进 `withAnimation` 才会真的动起来 —— 之前少了这一步，
-// 所以看起来是硬切。用弹簧而不是 easeOut：轻微的过冲让它有质感，
-// 又不至于晃得让人分心。
+// The highlight slides: matchedGeometryEffect only animates inside withAnimation. A spring, for
+// a little overshoot.
 
 struct SegmentedTabs: View {
   struct Item: Identifiable, Equatable {
@@ -231,17 +220,13 @@ struct SegmentedTabs: View {
 
   let items: [Item]
   @Binding var selection: String
-  /// 只画图标，文字退到 tooltip 里。
-  ///
-  /// 给"单栏 / 双栏"这类**形状本身就说明问题**的开关用：两个字的标签在
-  /// 一条已经挤的工具栏上是纯占位。**复用这个控件而不是另画一个按钮** ——
-  /// 滑块的插值、hover 的轻反馈、选中的字重变化都在这里，
-  /// 另写一个就得把这些手感再实现一遍，而且一定会不一样。
+  /// Icons only, text in the tooltip, for switches whose shape says it all (single / dual pane).
+  /// Reuses this control so the slide and hover feel stay the same.
   var iconOnly = false
   @Namespace private var glide
   @State private var hovering: String?
 
-  /// 滑动的手感全在这一行。response 略短让它跟手，阻尼 0.78 留一点点回弹。
+  /// short response to track the pointer, 0.78 damping for a slight bounce
   private static let glideCurve = Animation.spring(response: 0.3, dampingFraction: 0.78)
 
   var body: some View {
@@ -265,13 +250,13 @@ struct SegmentedTabs: View {
 
           .background {
             if active {
-              // 只有一个 source，滑块在两个位置之间插值
+              // a single shape, interpolated between positions
               RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Palette.panel)
                 .shadow(color: .black.opacity(0.07), radius: 2.5, y: 1)
                 .matchedGeometryEffect(id: "slider", in: glide)
             } else if hovering == item.id {
-              // 未选中项的悬停反馈，压得很轻，不跟滑块抢注意力
+              // light hover feedback on unselected items
               RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Palette.panel.opacity(0.4))
             }
