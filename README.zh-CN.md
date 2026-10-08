@@ -56,7 +56,7 @@ cd Scivane-macos
 make app
 ```
 
-看到 `完成 → …/Desktop/Scivane.app` 就成功了，App 在桌面上。
+看到 `Finished Scivane …` 就成功了，App 在桌面上。
 
 ### 3 · 填 API key
 
@@ -80,7 +80,8 @@ cd ~/Scivane-macos && git pull && make app
 
 - **下载慢或网络报错**：终端需要能访问 GitHub 和 PyPI。用代理的话，先运行 `export https_proxy=http://127.0.0.1:端口`，再重新 `make app`。
 - **报错提到 `Swift tools version 6.0`**：命令行工具太旧，到「系统设置 → 通用 → 软件更新」里更新。
-- **提示「请先退出 Scivane 再打包」**：按 <kbd>⌘</kbd> <kbd>Q</kbd> 退出 App 后再试。
+- **报 `error: Scivane is running`**：按 <kbd>⌘</kbd> <kbd>Q</kbd> 退出 App 后再试。
+- **某一步失败**：屏幕上会列出那一步输出的末尾部分，完整日志在 `var/build/make-app.log`。
 
 ---
 

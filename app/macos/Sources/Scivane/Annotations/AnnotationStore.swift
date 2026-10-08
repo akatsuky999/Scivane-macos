@@ -77,6 +77,16 @@ final class AnnotationStore: ObservableObject {
     }
   }
 
+  /// Waits for queued writes, at most `limit`; true when none are left. Quitting stops the backend,
+  /// so a mark made a moment before has to land first.
+  func flush(within limit: Duration) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: limit)
+    while pendingWrites > 0, ContinuousClock.now < deadline, !Task.isCancelled {
+      try? await Task.sleep(for: .milliseconds(20))
+    }
+    return pendingWrites == 0
+  }
+
   // MARK: - Editing
 
   func add(_ annotation: PaperAnnotation, undo: UndoManager?) {

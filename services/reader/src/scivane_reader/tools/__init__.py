@@ -10,6 +10,7 @@
     exec         bash / python (through the sandbox runner)
     repo         fetch_repo (shallow clone through the audit proxy, hooks stripped)
     paper        reocr / cite
+    annotations  the user's marks on the source PDF, read on the host and located in the paper text
     agents       two levels: the librarian sees the project list, the reader one project
 """
 
@@ -24,6 +25,7 @@ from .agents import (
     reader,
     reader_registry,
 )
+from .annotations import annotation_tools
 from .definition import (
     DEFAULT_MAX_RESULT_CHARS,
     UNLIMITED_RESULT,
@@ -49,7 +51,7 @@ __all__ = [
     "Journal", "NullJournal", "StoreJournal", "ABORTED_BEFORE_DISPATCH",
     "Dispatcher", "Batch", "partition",
     "AgentLoop", "LoopResult", "MAX_STEPS",
-    "file_tools", "exec_tools", "repo_tools", "paper_tools",
+    "file_tools", "exec_tools", "repo_tools", "paper_tools", "annotation_tools",
     "ALLOWED_HOSTS", "normalise_repo_url",
     "Agent", "librarian", "reader", "librarian_tools", "reader_registry",
     "LIBRARIAN_PROMPT", "READER_PROMPT",

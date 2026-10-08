@@ -41,4 +41,4 @@ let task = Process(); task.executableURL = URL(fileURLWithPath:"/usr/bin/iconuti
 task.arguments = ["-c", "icns", set.path, "-o", out.appendingPathComponent("Scivane.icns").path]
 try task.run(); task.waitUntilExit()
 guard task.terminationStatus == 0 else { exit(task.terminationStatus) }
-print("→ \(out.appendingPathComponent("Scivane.icns").path)")
+print("wrote \(out.appendingPathComponent("Scivane.icns").path)")

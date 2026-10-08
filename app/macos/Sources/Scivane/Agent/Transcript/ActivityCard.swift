@@ -73,6 +73,7 @@ struct ActivityCard: View {
     case "fetch_repo": return Verb(zh: "取回代码", doing: "Fetching code", done: "fetched code")
     case "reocr": return Verb(zh: "重跑识别", doing: "Re-running OCR", done: "re-ran OCR")
     case "cite": return Verb(zh: "定位原文", doing: "Locating the source", done: "located the source")
+    case "annotations": return Verb(zh: "查看标注", doing: "Reading your marks", done: "read your marks")
     default: return Verb(zh: tool, doing: tool, done: tool)
     }
   }

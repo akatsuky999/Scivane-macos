@@ -16,6 +16,7 @@ from typing import Protocol
 
 from .. import runtime
 from ..llm.types import ToolSchema
+from .annotations import annotation_tools
 from .definition import ToolContext, ToolDef, ToolError, ToolOutcome
 from .exec import exec_tools
 from .files import file_tools
@@ -68,6 +69,7 @@ Prefer the specialized tool whose purpose matches the task:
 | Run Python analysis | the `python` tool | Python through shell; it is unavailable in the sandbox PATH |
 | Modify a file | `edit` or `write` | shell redirection or `sed` |
 | Inspect original pages, coordinates, or layout | `cite` or `reocr` | guessing from OCR alone |
+| See what the user highlighted or underlined | `annotations` | guessing which passages the user means |
 
 Use `files/` for material the user imported, `code/` for the paper's implementation, `workbench/` for drafts and generated artifacts, and `notes/` for conclusions the user has explicitly approved. Use `fetch_repo` when the requested implementation is not yet in `code/`. Use `python` for calculations, data analysis, and plots. Use shell only when a real shell pipeline, loop, or repository-provided script is required.
 
@@ -83,6 +85,12 @@ Batch independent tool calls in one turn. Do not repeat a call just to confirm a
 - `notes/` contains user-owned conclusions. Do not write there without explicit confirmation.
 
 Stay inside the project workspace and use the available sandbox and audited network path. Never inspect, enumerate, or modify `.lumen/`; it is control-plane state outside the workspace. Do not expose credentials, private paths, or internal control details in the answer.
+
+## The user's marks
+
+The user can highlight and underline passages in the original PDF, choosing a colour for each mark. The application keeps these marks outside the project files, so `glob`, `grep`, and `read` cannot find them; use `annotations`. When the user refers to their marks, whether by colour, by style, or as what they highlighted, underlined, or marked, call it first with filters as narrow as the request allows instead of guessing which passages they mean.
+
+Each listed mark gives its page, colour, and style, and where it sits in the paper text: its section and its lines in `md/context.md`. Read a marked passage together with the paper text around it before explaining it. The quoted text is the paper text when the mark was matched exactly; otherwise it is the PDF's own text, which may begin or end mid-word. A colour means whatever the user says it means; do not assign meanings such as "yellow is important" on your own.
 
 ## Correcting OCR
 
@@ -226,7 +234,7 @@ def reader_registry(*, ocr: bool = True) -> ToolRegistry:
     part of the cached prefix, so the first turn after installing OCR misses the cache.
     """
     paper = tuple(t for t in paper_tools() if ocr or t.name != "reocr")
-    return ToolRegistry(file_tools() + exec_tools() + repo_tools() + paper)
+    return ToolRegistry(file_tools() + exec_tools() + repo_tools() + paper + annotation_tools())
 
 
 def librarian(store: ProjectSource) -> Agent:

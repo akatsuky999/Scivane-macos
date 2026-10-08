@@ -48,7 +48,7 @@ cd Scivane-macos
 make app
 ```
 
-When you see `完成 → …/Desktop/Scivane.app` (“完成” means “done”), the app is on your Desktop.
+When you see `Finished Scivane …`, the app is on your Desktop.
 
 ### 3 · Add an API Key
 
@@ -72,7 +72,8 @@ cd ~/Scivane-macos && git pull && make app
 
 - **Slow downloads or network errors**: Terminal needs to reach GitHub and PyPI. If you use a proxy, run `export https_proxy=http://127.0.0.1:<port>` first, then run `make app` again.
 - **The error mentions `Swift tools version 6.0`**: your Command Line Tools are too old. Update them in System Settings → General → Software Update.
-- **The build stops with `请先退出 Scivane 再打包`** (“quit Scivane before building”): press <kbd>⌘</kbd> <kbd>Q</kbd> to quit the app, then try again.
+- **The build stops with `error: Scivane is running`**: press <kbd>⌘</kbd> <kbd>Q</kbd> to quit the app, then try again.
+- **A step fails**: the end of that step's output is shown on screen, and the full log is in `var/build/make-app.log`.
 
 ## License
 

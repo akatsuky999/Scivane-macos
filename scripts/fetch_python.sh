@@ -25,10 +25,10 @@ CACHE="$PROJECT_ROOT/var/build/python"
 TARBALL="$CACHE/$ASSET"
 DEST="$CACHE/$BUILD_ID"
 
-log() { echo "[fetch_python] $*" >&2; }
+log() { echo "fetch_python: $*" >&2; }
 
 if [ -f "$DEST/python/.scivane-build" ] && [ "$(cat "$DEST/python/.scivane-build")" = "$BUILD_ID" ]; then
-  log "已就绪：$DEST/python"
+  log "Python $PY_VERSION ready at $DEST/python"
   echo "$DEST/python"
   exit 0
 fi
@@ -38,31 +38,31 @@ mkdir -p "$CACHE"
 verify() { [ "$(shasum -a 256 "$1" | cut -d' ' -f1)" = "$SHA256" ]; }
 
 if [ -f "$TARBALL" ] && verify "$TARBALL"; then
-  log "压缩包已在缓存里，校验通过"
+  log "using the cached $ASSET (checksum verified)"
 else
   rm -f "$TARBALL"
-  log "下载 $ASSET"
+  log "downloading $ASSET"
   # download to .partial and rename, so a broken download never counts as done; https only
   curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --silent --show-error \
     --output "$TARBALL.partial" "$URL"
   if ! verify "$TARBALL.partial"; then
     rm -f "$TARBALL.partial"
-    log "错误：sha256 不符，已删除下载的文件。期望 $SHA256"
+    log "error: checksum mismatch, the download was deleted (expected sha256 $SHA256)"
     exit 1
   fi
   mv "$TARBALL.partial" "$TARBALL"
-  log "校验通过"
+  log "checksum verified"
 fi
 
 # Unpack to a temporary directory and move it into place, so an interrupted unpack never looks complete.
 STAGE="$(mktemp -d "$CACHE/.extract.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 tar -xzf "$TARBALL" -C "$STAGE"
-[ -x "$STAGE/python/bin/python3" ] || { log "错误：压缩包里没有 python/bin/python3"; exit 1; }
+[ -x "$STAGE/python/bin/python3" ] || { log "error: $ASSET has no python/bin/python3"; exit 1; }
 echo "$BUILD_ID" > "$STAGE/python/.scivane-build"
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
 mv "$STAGE/python" "$DEST/python"
-log "已解包：$DEST/python（$(du -sh "$DEST/python" | cut -f1)）"
+log "unpacked Python $PY_VERSION to $DEST/python ($(du -sh "$DEST/python" | cut -f1))"
 echo "$DEST/python"

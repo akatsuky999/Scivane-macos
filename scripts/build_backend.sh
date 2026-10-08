@@ -19,7 +19,7 @@ IN="$PROJECT_ROOT/services/reader/requirements-base.in"
 LOCK="$PROJECT_ROOT/services/reader/requirements-base.txt"
 OUT="$PROJECT_ROOT/var/build/backend"
 
-log() { echo "[build_backend] $*" >&2; }
+log() { echo "build_backend: $*" >&2; }
 
 PYROOT="$(bash "$PROJECT_ROOT/scripts/fetch_python.sh" | tail -1)"
 PY="$PYROOT/bin/python3"
@@ -67,7 +67,7 @@ lines.append("")
 for name, version, sha in sorted(rows):
     lines.append(f"{name}=={version} \\\n    --hash=sha256:{sha}")
 open(out, "w").write("\n".join(lines) + "\n")
-print(f"[build_backend] 已写 {out}（{len(rows)} 个包）", file=sys.stderr)
+print(f"build_backend: wrote {out} ({len(rows)} packages)", file=sys.stderr)
 PYEOF
   rm -f "$report"
 }
@@ -79,7 +79,7 @@ if [ "${1:-}" = "lock" ]; then
 fi
 
 # --- Assemble ------------------------------------------------------------------
-[ -f "$LOCK" ] || { log "缺锁文件 $LOCK —— 先跑 bash scripts/build_backend.sh lock"; exit 1; }
+[ -f "$LOCK" ] || { log "error: $LOCK is missing; generate it with: bash scripts/build_backend.sh lock"; exit 1; }
 
 # Assemble in a temporary directory and swap it in, so build_app.sh never copies a half-built backend.
 STAGE="$(mktemp -d "$PROJECT_ROOT/var/build/.backend.XXXXXX")"
@@ -90,7 +90,7 @@ mkdir -p "$STAGE/bin" "$STAGE/src"
 cp -Rp "$PYROOT" "$STAGE/python"
 
 # --require-hashes fails on any mismatch; --no-deps because the lock already lists everything.
-log "安装基础层依赖（$(grep -c '^[a-z]' "$LOCK") 个包）"
+log "installing $(grep -c '^[a-z]' "$LOCK") locked packages"
 "${PIP[@]}" install --quiet --no-deps --require-hashes --only-binary=:all: --no-compile \
   --target "$STAGE/site" -r "$LOCK"
 # Console scripts (bin/uvicorn...) have absolute shebangs to the build interpreter; the backend
@@ -118,7 +118,7 @@ PYEOF
 
 # Smoke test: with an empty environment, import the whole API from the bundle and assert every
 # loaded module comes from it, so a missing or borrowed dependency fails at build time.
-log "冒烟：env -i 下 import 编排层"
+log "checking that the API imports from the bundle alone"
 env -i HOME="$STAGE/home" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
   PYTHONPATH="$STAGE/src:$STAGE/site" "$STAGE/python/bin/python3" - "$STAGE" <<'PYEOF'
 import sys
@@ -132,11 +132,11 @@ files = {getattr(m, "__file__", None) or "" for m in list(sys.modules.values())}
 # real paths only; this script's own __main__ is "<stdin>"
 outside = sorted(f for f in files if f.startswith("/") and not f.startswith(stage))
 if outside:
-    sys.exit("有模块不是从包里加载的：\n  " + "\n  ".join(outside))
+    sys.exit("modules loaded from outside the bundle:\n  " + "\n  ".join(outside))
 PYEOF
 rm -rf "$STAGE/home"
 
 rm -rf "$OUT"
 mv "$STAGE" "$OUT"
 trap - EXIT
-log "已组装：${OUT}（$(du -sh "$OUT" | cut -f1)；python $(du -sh "$OUT/python" | cut -f1) · site $(du -sh "$OUT/site" | cut -f1)）"
+log "assembled $OUT ($(du -sh "$OUT" | cut -f1): python $(du -sh "$OUT/python" | cut -f1), site $(du -sh "$OUT/site" | cut -f1))"

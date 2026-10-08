@@ -3,7 +3,8 @@
 One JSON document per project in the control plane (.lumen/annotations.json), rewritten atomically
 on every change. The source PDF itself is never modified. The app owns the geometry: rects are page
 space points exactly as PDFKit reports them, and this module only checks that they are well formed.
-Nothing here reaches the model.
+The agent can't open the file; the annotations tool reads it on the host and shows the model a view
+of it, without geometry.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..i18n import ui
+from .workspace import CONTROL_DIR
 
 FILE_NAME = "annotations.json"
 SCHEMA = "scivane.annotations/1"
@@ -26,6 +28,13 @@ KINDS = ("highlight", "underline")
 #: Palette keys rather than RGB values, so the app decides how each one renders. Must match
 #: AnnotationColor in the app.
 COLORS = ("yellow", "red", "green", "blue", "purple", "magenta", "orange", "gray")
+
+#: The words the app's palette uses, so the model and the user call a colour the same thing.
+COLOR_NAMES = {
+    "yellow": "黄色", "red": "红色", "green": "绿色", "blue": "蓝色",
+    "purple": "紫色", "magenta": "品红", "orange": "橙色", "gray": "灰色",
+}
+KIND_NAMES = {"highlight": "高亮", "underline": "下划线"}
 
 MAX_ANNOTATIONS = 20_000
 #: pages one annotation may cover
@@ -144,6 +153,11 @@ def validate_changes(raw: Mapping[str, Any]) -> dict[str, str]:
     if not changes:
         raise _invalid("kind 与 color 至少给一个", "Give at least a kind or a colour")
     return changes
+
+
+def path_in(project_dir: Path | str) -> Path:
+    """Where a project keeps its marks."""
+    return Path(project_dir) / CONTROL_DIR / FILE_NAME
 
 
 class AnnotationBook:

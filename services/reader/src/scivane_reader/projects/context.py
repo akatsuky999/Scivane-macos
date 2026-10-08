@@ -91,7 +91,7 @@ HISTORY_RESULT_BUDGET = 2000
 #: Tools whose results can be re-read with the same arguments and no side effects. Past results
 #: become a note telling the model to call again. bash and python would redo their work, so
 #: those are cut to head and tail instead.
-_REREADABLE = frozenset({"read", "grep", "glob", "cite"})
+_REREADABLE = frozenset({"read", "grep", "glob", "cite", "annotations"})
 
 #: head and tail kept when cutting; with the note, close to the budget
 _HEAD, _TAIL = 1200, 600

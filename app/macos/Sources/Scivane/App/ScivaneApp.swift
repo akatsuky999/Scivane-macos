@@ -105,6 +105,18 @@ var model: AppModel? {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    /// Quitting stops the backend; a mark made just before may still be on its way to it.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            guard let marks = model?.annotations, marks.hasPendingWrites else { return .terminateNow }
+            Task { @MainActor in
+                _ = await marks.flush(within: .seconds(5))
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { backend?.stop() }
     }

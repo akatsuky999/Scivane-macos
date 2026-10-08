@@ -385,6 +385,7 @@ private struct DiffView: View {
     case "fetch_repo": return "arrow.down.circle"
     case "reocr": return "doc.viewfinder"
     case "cite": return "quote.opening"
+    case "annotations": return "highlighter"
     case "list_projects", "find_project": return "list.bullet"
     case "open_project": return "folder.badge.gearshape"
     case "delete_project": return "trash"

@@ -87,7 +87,7 @@ class UILanguage:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Scivane Reader", version="0.0.2", lifespan=lifespan)
+    app = FastAPI(title="Scivane Reader", version="0.0.3", lifespan=lifespan)
     app.add_middleware(UILanguage)
     app.include_router(router)
     app.include_router(llm_router)

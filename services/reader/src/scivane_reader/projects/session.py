@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 from ..i18n import ui
 from ..llm.types import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from .annotations import COLOR_NAMES, KIND_NAMES
 from .model import ProjectEvent
 
 __all__ = [
@@ -244,11 +245,31 @@ def summarise_call(name: str, arguments: dict) -> str:
     if name == "cite":
         anchor = arguments.get("anchor", "?")
         return ui(f"定位「{anchor}」在原稿的位置", f"Locating “{anchor}” in the original")
+    if name == "annotations":
+        return _summarise_marks(arguments)
     if name == "delete_project":
         project = arguments.get("project_id", "?")
         return ui(f"删除项目 {project}（连同原稿与历史）",
                   f"Deleting project {project} (with its original and history)")
     return name
+
+
+def _summarise_marks(arguments: dict) -> str:
+    # The model's arguments are unchecked here; a malformed call still gets a line, not a crash.
+    colors = arguments.get("colors")
+    colors = [c for c in colors if isinstance(c, str)] if isinstance(colors, list) else []
+    kind = arguments.get("kind")
+    kind = kind if isinstance(kind, str) and kind in KIND_NAMES else None
+    pages = arguments.get("pages")
+    pages = [str(p) for p in pages if type(p) is int] if isinstance(pages, list) else []
+    zh = "、".join(COLOR_NAMES.get(c, c) for c in colors) + (KIND_NAMES[kind] if kind else "")
+    shades = ", ".join(colors[:-1]) + " and " + colors[-1] if len(colors) > 1 else "".join(colors)
+    marks = {"highlight": "highlights", "underline": "underlines"}.get(kind or "", "marks")
+    where = f" on page{'s' if len(pages) > 1 else ''} {', '.join(pages)}" if pages else ""
+    return ui(
+        f"查看原稿上的{zh}标注" + (f"（第 {'、'.join(pages)} 页）" if pages else ""),
+        f"Reading your {shades + ' ' if shades else ''}{marks}{where}",
+    )
 
 
 def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
