@@ -125,6 +125,8 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
     scope.querySelectorAll("table").forEach(function (t) {
       // drop inline styles and presentational attributes
       t.querySelectorAll("*").forEach(function (el) {
+        // KaTeX places sub- and superscripts with inline styles; stripping them breaks formulas
+        if (el.closest(".katex")) return;
         el.removeAttribute("style");
         el.removeAttribute("align");
         el.removeAttribute("bgcolor");
@@ -180,6 +182,16 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
       w.className = "table-wrap";
       t.parentNode.insertBefore(w, t);
       w.appendChild(t);
+    });
+  }
+
+  /** Latin paragraphs of a few words (author lines, affiliations) stay ragged: justifying one or
+   * two lines only opens gaps. CJK justifies evenly, so it is left alone. */
+  function markShortParagraphs(scope) {
+    if (document.documentElement.lang !== "en") return;
+    scope.querySelectorAll("p").forEach(function (p) {
+      const words = (p.textContent || "").trim().split(/\s+/).length;
+      p.classList.toggle("short", words < 30);
     });
   }
 
@@ -280,6 +292,7 @@ resolveImages(body);
 
       normaliseTables(body);
       typeset(body);
+      markShortParagraphs(body);
 
       el.innerHTML = "";
       const mark = document.createElement("div");
@@ -308,6 +321,12 @@ resolveImages(body);
 
     setFontSize: function (px) {
       document.body.style.fontSize = px + "px";
+      document.documentElement.style.setProperty("--size", String(px));
+    },
+
+    /** "compact", "standard" or "relaxed": line spacing, gaps between blocks and line length */
+    setDensity: function (density) {
+      document.documentElement.setAttribute("data-density", density);
     },
 
     /** UI language: the empty state and page labels; existing pages relabel without relayout */

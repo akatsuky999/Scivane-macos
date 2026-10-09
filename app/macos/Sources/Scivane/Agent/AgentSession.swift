@@ -202,8 +202,7 @@ final class AgentSession: ObservableObject {
   // MARK: - Asking
 
   func ask(
-    _ question: String, base: URL, provider: String, confirmed: [String] = [],
-    images: [ComposerImage] = []
+    _ question: String, base: URL, provider: String, images: [ComposerImage] = []
   ) {
     guard !running, !preparing else { return }
     preparing = true
@@ -231,7 +230,7 @@ final class AgentSession: ObservableObject {
       projectID.map {
         client.chat(
           projectID: $0, question: question, provider: provider,
-          confirmed: confirmed, conversation: conversationID, images: images)
+          conversation: conversationID, images: images)
       } ?? client.deskChat(question: question, provider: provider)
 
     task = Task { [weak self] in

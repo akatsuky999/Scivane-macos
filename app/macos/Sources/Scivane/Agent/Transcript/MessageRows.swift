@@ -9,6 +9,8 @@ import SwiftUI
 struct UserLine: View {
   let text: String
   var images: [TranscriptImage] = []
+  /// the question follows the conversation's type size, or compact answers sit under 13 pt questions
+  @AppStorage(TypeScale.chat.sizeKey) private var base = TypeScale.chat.standardSize
 
   var body: some View {
     VStack(alignment: .trailing, spacing: 6) {
@@ -22,7 +24,7 @@ struct UserLine: View {
         HStack(spacing: 0) {
           Spacer(minLength: 44)
           Text(text)
-            .font(.system(size: 13)).foregroundStyle(Palette.ink)
+            .font(.system(size: TypeScale.chat.clamp(base) - 0.5)).foregroundStyle(Palette.ink)
             .textSelection(.enabled)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)

@@ -134,6 +134,8 @@ class ProjectEvent:
     SOURCE_ATTACHED = "source/attached"
     #: the user added a file to files/; visible to every conversation
     FILE_ADDED = "file/added"
+    #: the user brought a Markdown file into notes/ (with its images)
+    NOTE_ADDED = "note/added"
 
     #: Header of a conversation file, so an empty conversation still exists on disk and in lists.
     CONVERSATION_CREATED = "conversation/created"

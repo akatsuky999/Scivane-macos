@@ -17,6 +17,12 @@ enum LocalAssets {
     else { return nil }
     return file
   }
+
+  /// Whether a resolved file sits under a `.lumen/` folder inside `root`.
+  static func inControlPlane(_ file: URL, root: URL) -> Bool {
+    let base = root.resolvingSymlinksInPath().standardizedFileURL.path
+    return file.path.dropFirst(base.count).split(separator: "/").contains(".lumen")
+  }
 }
 
 /// Reading an existing result must not require waking a 2 GB inference engine.
@@ -45,12 +51,17 @@ final class LocalAssetHandler: NSObject, WKURLSchemeHandler {
   func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
 }
 
+/// Images a Markdown document links to by relative path. `directory` is the root links may reach:
+/// the project for its own documents, the document's folder for a loose file. Never the control
+/// plane: a note's `../.lumen/…` link stays broken.
 final class DocumentAssetHandler: NSObject, WKURLSchemeHandler {
   let directory: () -> URL?
   init(directory: @escaping () -> URL?) { self.directory = directory }
   func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
     guard let url = task.request.url, url.host == "local", let root = directory(),
-      let file = LocalAssets.resolve("/assets/" + url.path.drop(while: { $0 == "/" }), root: root)
+      let file = LocalAssets.resolve("/assets/" + url.path.drop(while: { $0 == "/" }), root: root),
+      // checked on the resolved file, so a link through a symlink is caught too
+      !LocalAssets.inControlPlane(file, root: root)
     else {
       task.didFailWithError(URLError(.fileDoesNotExist))
       return

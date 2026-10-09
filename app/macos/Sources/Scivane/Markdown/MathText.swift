@@ -348,6 +348,8 @@ struct MathDisplayBlock: View {
   var size: CGFloat = 13.5
   /// streaming, closing delimiter not here yet: show the source, typeset once closed
   var open = false
+  /// the conversation's gap scale (type size and density)
+  var spacing: CGFloat = 1
   @State private var settled = 0
 
   var body: some View {
@@ -356,7 +358,7 @@ struct MathDisplayBlock: View {
     let _ = settled
     content(display)
       .frame(maxWidth: .infinity)
-      .padding(.vertical, 9)
+      .padding(.vertical, 9 * spacing)
       .contextMenu {
         Button(L("复制 LaTeX", "Copy LaTeX")) {
           NSPasteboard.general.clearContents()

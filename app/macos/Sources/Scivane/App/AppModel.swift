@@ -85,9 +85,11 @@ final class AppModel: ObservableObject {
 
   @Published var projects: [Project] = []
   @Published var activeProjectID: Project.ID?
-  /// project id -> Markdown file under files/ shown in the text pane; absent means the paper text.
+  /// project id -> Markdown file under notes/ shown in the text pane; absent means the paper text.
   /// Viewing never changes what the model reads.
   @Published var projectDocument: [String: String] = [:]
+  /// project id -> the Markdown documents in its notes/, newest first
+  @Published var projectNotes: [String: [ProjectNote]] = [:]
   /// non-nil: the engine chooser is up for that document
   @Published var recognitionRequest: RecognitionRequest?
   @Published var projectBusy = false
@@ -271,7 +273,7 @@ final class AppModel: ObservableObject {
   // MARK: - Queue
 
   func add(urls: [URL], to pane: ReadingPane? = nil) {
-    // Markdown dropped into a project is kept in its files/ and shown in the text pane. It never
+    // Markdown dropped into a project is kept in its notes/ and shown in the text pane. It never
     // becomes the paper text this way; that takes Replace on the text chip in the chat.
     if activeProject != nil, pane != .source {
       let markdown = urls.first {
@@ -440,13 +442,45 @@ final class AppModel: ObservableObject {
     replayIntoRenderer()
   }
 
+  /// Where the text pane's relative image links may reach: the whole project for its own documents
+  /// (a note links `../md/assets/…` or `../workbench/outputs/…`), the document's folder for a loose
+  /// Markdown file.
+  var readingDocumentRoot: URL? {
+    guard let job = readingDocument, job.isMarkdown else { return nil }
+    return documentScope(job).root
+  }
+
+  /// A document's link root and its folder inside it.
+  private func documentScope(_ job: DocumentJob) -> (root: URL, folder: String) {
+    let folder = job.url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+    if let projectID = jobProjects[job.id],
+      let project = projects.first(where: { $0.id == projectID })
+    {
+      let root = project.directoryURL.standardizedFileURL.resolvingSymlinksInPath()
+      if folder.path == root.path { return (root, "") }
+      if folder.path.hasPrefix(root.path + "/") {
+        return (root, String(folder.path.dropFirst(root.path.count + 1)))
+      }
+    }
+    return (folder, "")
+  }
+
+  /// The page resolves relative links against this, so it must name the document's own folder;
+  /// the scheme handler then serves them from readingDocumentRoot.
+  private func documentBase(_ job: DocumentJob) -> String {
+    let folder = documentScope(job).folder.split(separator: "/").map {
+      String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0)
+    }
+    return "scivane-document://local/" + folder.map { $0 + "/" }.joined()
+  }
+
   /// The WebView is created lazily and pages arriving before it are lost, so replay once it exists.
   func replayIntoRenderer() {
     guard let job = readingDocument else {
       renderBridge?("reset", [0])
       return
     }
-    renderBridge?("setDocumentBase", [job.isMarkdown ? "scivane-document://local/" : ""])
+    renderBridge?("setDocumentBase", [job.isMarkdown ? documentBase(job) : ""])
     renderBridge?("reset", [job.pageCount])
     for index in job.pages.keys.sorted() {
       renderBridge?("setPage", [index, job.pages[index] ?? ""])

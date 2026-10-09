@@ -71,7 +71,7 @@ Prefer the specialized tool whose purpose matches the task:
 | Inspect original pages, coordinates, or layout | `cite` or `reocr` | guessing from OCR alone |
 | See what the user highlighted or underlined | `annotations` | guessing which passages the user means |
 
-Use `files/` for material the user imported, `code/` for the paper's implementation, `workbench/` for drafts and generated artifacts, and `notes/` for conclusions the user has explicitly approved. Use `fetch_repo` when the requested implementation is not yet in `code/`. Use `python` for calculations, data analysis, and plots. Use shell only when a real shell pipeline, loop, or repository-provided script is required.
+Use `notes/` for notes, summaries, and translations written for the user to read, `files/` for material the user imported, `code/` for the paper's implementation, and `workbench/` for scripts, drafts, and generated artifacts. Use `fetch_repo` when the requested implementation is not yet in `code/`. Use `python` for calculations, data analysis, and plots. Use shell only when a real shell pipeline, loop, or repository-provided script is required.
 
 Batch independent tool calls in one turn. Do not repeat a call just to confirm a path or content already in context. After an error, inspect the error, check the assumption that failed, and make one targeted correction; do not retry the identical call without a reason. If a Python dependency is missing, retry with the required `packages` rather than abandoning the analysis.
 
@@ -82,7 +82,7 @@ Batch independent tool calls in one turn. Do not repeat a call just to confirm a
 - `files/` contains materials the user imported, such as related papers, datasets, and screenshots.
 - `code/` contains the paper's open-source implementation and repositories fetched for this project.
 - `workbench/` is for scripts, drafts, plots, and other generated artifacts.
-- `notes/` contains user-owned conclusions. Do not write there without explicit confirmation.
+- `notes/` is the user's reading shelf. Every Markdown file in it, at any depth, opens in the app's text pane beside the paper, and Markdown the user imports lands there too. When the user asks for notes, a summary, or a translation to keep, write it there as a `.md` file with a descriptive name, and link images by paths relative to the note, such as `../md/assets/<file>`. Edit an existing note in place rather than writing a near-copy, and do not delete or rewrite a note you did not write unless the user asks.
 
 Stay inside the project workspace and use the available sandbox and audited network path. Never inspect, enumerate, or modify `.lumen/`; it is control-plane state outside the workspace. Do not expose credentials, private paths, or internal control details in the answer.
 
@@ -252,7 +252,6 @@ def reader(
     project_dir: str,
     project_id: str,
     *,
-    confirmed: tuple[str, ...] = (),
     cancelled: object = None,
     ocr: bool | None = None,
 ) -> Agent:
@@ -266,7 +265,6 @@ def reader(
     context = ToolContext(
         project_dir=project_dir,
         project_id=project_id,
-        confirmed=confirmed,
         **({"cancelled": cancelled} if cancelled is not None else {}),  # type: ignore[arg-type]
     )
     return Agent(

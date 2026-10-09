@@ -92,8 +92,7 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable {
   var isEmpty: Bool { messages == 0 }
 }
 
-/// A file the user dropped into files/. Separate from notes/: notes are written by people (the
-/// agent needs confirmation to change them), files are given to the agent and need no gate.
+/// A file the user added to files/: material for the agent. Markdown goes to notes/ instead.
 struct ProjectFile: Codable, Identifiable, Equatable, Hashable {
   let name: String
   /// relative to the project root, e.g. `files/data.csv`; this is what the agent sees
@@ -107,6 +106,24 @@ struct ProjectFile: Codable, Identifiable, Equatable, Hashable {
     if bytes >= 1024 { return "\(bytes / 1024) KB" }
     return "\(bytes) B"
   }
+}
+
+/// A Markdown document in notes/, imported by the user or written by the agent; the text pane
+/// lists these.
+struct ProjectNote: Codable, Identifiable, Equatable, Hashable {
+  let name: String
+  /// relative to the project root, e.g. `notes/reading/summary.md`; what the agent sees
+  let path: String
+  /// the subfolder inside notes/, empty at the top
+  let folder: String
+  let bytes: Int
+  /// seconds since 1970, from the file
+  let modifiedAt: Double
+
+  var id: String { path }
+  /// the name without its extension
+  var title: String { (name as NSString).deletingPathExtension }
+  var modified: Date { Date(timeIntervalSince1970: modifiedAt) }
 }
 
 enum ProjectClientError: LocalizedError {
@@ -231,6 +248,17 @@ struct ProjectClient {
     try await send(
       "projects/\(id)/files", method: "POST", body: ["path": path],
       as: ProjectFile.self, key: "file")
+  }
+
+  func notes(_ id: String) async throws -> [ProjectNote] {
+    try await send("projects/\(id)/notes", as: [ProjectNote].self, key: "notes")
+  }
+
+  /// Copy a local Markdown file into notes/ with the images it links to.
+  func importNote(_ id: String, path: String) async throws -> ProjectNote {
+    try await send(
+      "projects/\(id)/notes", method: "POST", body: ["path": path],
+      as: ProjectNote.self, key: "note")
   }
 
   func removeFile(_ id: String, name: String) async throws {

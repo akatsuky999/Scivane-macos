@@ -59,9 +59,7 @@ def call_policy(context: ToolContext):
         network = NetworkPolicy(
             proxy_port=context.network.port, proxy_token=context.network.token
         )
-    return workspace.sandbox_policy(
-        Path(context.project_dir), confirmed=context.confirmed, network=network
-    )
+    return workspace.sandbox_policy(Path(context.project_dir), network=network)
 
 
 def _timeout(arguments: dict[str, object]) -> float:

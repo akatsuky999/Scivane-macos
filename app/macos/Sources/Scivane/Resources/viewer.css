@@ -1,6 +1,31 @@
 /* Reader typography: the feel of an academic journal. Serif text, restrained greys, and a dark
  * green accent used only for the current-page marker and search hits. */
 
+/* CJK in PingFang, by unicode-range so it never claims Latin letters. Without it, ui-serif's own
+   fallback picks a Songti face that has no bold (WebKit can't reach Songti's bold through local()
+   either), and **bold** in Chinese prints as regular. */
+@font-face {
+  font-family: "Scivane CJK";
+  font-weight: 100 450;
+  src: local("PingFangSC-Regular");
+  unicode-range: U+2E80-2FDF, U+3000-30FF, U+3100-312F, U+31A0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: "Scivane CJK";
+  font-weight: 451 549;
+  src: local("PingFangSC-Medium");
+  unicode-range: U+2E80-2FDF, U+3000-30FF, U+3100-312F, U+31A0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: "Scivane CJK";
+  font-weight: 550 900;
+  src: local("PingFangSC-Semibold");
+  unicode-range: U+2E80-2FDF, U+3000-30FF, U+3100-312F, U+31A0-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+
 :root {
   /* warm paper white, easier than pure white over long reading */
   --paper:      #faf9f5;
@@ -16,19 +41,49 @@
   --accent:      #29574a;
   --accent-wash: rgba(41, 87, 74, 0.13);
 
-  --serif: "New York", ui-serif, "Songti SC", "Source Han Serif SC", Georgia, serif;
+  /* ui-serif is New York (its name isn't reachable from a page). "Scivane CJK" takes only CJK
+     characters, so Latin text stays in New York. */
+  --serif: "Scivane CJK", ui-serif, Georgia, serif;
   --sans:  ui-sans-serif, -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
   --mono:  ui-monospace, "SF Mono", Menlo, monospace;
 
-  /* Line length follows the window within the comfortable range: 58ch minimum (shorter wraps
-     too often), 76ch maximum (longer loses the line start). `ch` follows the font size. */
-  --measure: clamp(58ch, 56vw, 76ch);
-  --gutter: clamp(26px, 3.4vw, 52px);
+  /* The type size in px, without a unit (set by the app along with the body's font size). */
+  --size: 15;
+
+  /* Spacing, standard. data-density on <html> swaps the set (see below). Leading differs by
+     script: CJK glyphs fill the em box and need more air than Latin text. */
+  --leading:     1.6;
+  --leading-cjk: 1.76;
+  /* multiplies every vertical gap between blocks */
+  --space: 1;
+  /* line length at 15px, in em */
+  --measure-em: 37;
+
+  /* Smaller type gets a few more characters per line, larger type fewer, so the column's width
+     moves much less than the type does: shrinking the type should fit more on the screen, not
+     narrow the column. `em` follows the body size. */
+  --measure: calc(var(--measure-em) * pow(15 / var(--size), 0.55) * 1em);
+  --gutter: clamp(18px, 3.2vw, 48px);
   /* Tables and figures may extend past the measure, as in journals; more on wide windows so
      tables don't scroll next to empty space. */
   --bleed: clamp(0px, 4.5vw, 96px);
 
   color-scheme: light dark;
+}
+
+:root[data-density="compact"] {
+  --leading:     1.46;
+  --leading-cjk: 1.62;
+  --space: .72;
+  --measure-em: 40;
+  --gutter: clamp(14px, 2.4vw, 36px);
+}
+
+:root[data-density="relaxed"] {
+  --leading:     1.74;
+  --leading-cjk: 1.92;
+  --space: 1.24;
+  --measure-em: 34;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -71,15 +126,18 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--serif);
-  font-size: 17px;
-  line-height: 1.75;
+  font-size: 15px;
+  line-height: var(--leading);
   /* lining figures: old-style digits look uneven next to CJK text */
   font-variant-numeric: lining-nums proportional-nums;
   font-kerning: normal;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   hanging-punctuation: allow-end;
+  /* a hair of space between CJK and Latin letters or digits, where the text has none */
+  text-autospace: normal;
 }
+:root[lang="zh"] body { line-height: var(--leading-cjk); }
 
 ::selection { background: var(--accent-wash); }
 
@@ -126,7 +184,7 @@ body {
 #doc {
   max-width: calc(var(--measure) + var(--gutter) * 2);
   margin: 0 auto;
-  padding: 60px var(--gutter) 48vh;
+  padding: calc(48px * var(--space)) var(--gutter) 40vh;
 }
 
 /* --- Page breaks ------------------------------------------------------
@@ -140,11 +198,12 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 60px 0 26px;
+  margin: calc(52px * var(--space)) 0 calc(22px * var(--space));
   font-family: var(--sans);
   font-size: 10px;
   font-weight: 620;
   letter-spacing: .14em;
+  line-height: 1;
   color: var(--accent);
   user-select: none;
   font-variant-numeric: tabular-nums;
@@ -173,33 +232,34 @@ body {
 }
 
 /* --- Headings ---------------------------------------------------------
-   Hierarchy through size and weight, not colour. CJK headings need tighter tracking. */
+   Hierarchy through size and weight, not colour. More space above than below, so a heading
+   belongs to what follows. */
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--serif);
   line-height: 1.3;
-  margin: 2em 0 .6em;
-  font-weight: 680;
-  text-wrap: pretty;      /* no orphaned last word */
+  margin: calc(1.6em * var(--space)) 0 calc(.5em * var(--space));
+  font-weight: 650;
+  text-wrap: balance;
 }
 h1 {
-  font-size: 1.78em;
-  font-weight: 600;
-  letter-spacing: -0.022em;
-  line-height: 1.22;
-  margin: .55em 0 .75em;
+  font-size: 1.6em;
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin: 0 0 calc(.7em * var(--space));
 }
 h2 {
-  font-size: 1.34em;
-  letter-spacing: -0.014em;
-  margin-top: 2.1em;
+  font-size: 1.28em;
+  letter-spacing: -0.012em;
+  margin-top: calc(1.7em * var(--space));
 }
 h3 {
-  font-size: 1.12em;
-  letter-spacing: -0.008em;
-  margin-top: 1.8em;
+  font-size: 1.1em;
+  letter-spacing: -0.006em;
+  margin-top: calc(1.45em * var(--space));
 }
 h4, h5, h6 {
-  font-size: .95em;
+  font-size: .92em;
   font-family: var(--sans);
   font-weight: 620;
   letter-spacing: .01em;
@@ -212,13 +272,19 @@ h1 + p, h2 + p, h3 + p { margin-top: 0; }
    Justified with hyphenation; justification alone opens rivers. overflow-wrap catches the long
    URLs and unbreakable symbol runs common in OCR output. */
 p {
-  margin: 0 0 1.1em;
+  margin: 0 0 calc(.8em * var(--space));
   text-align: justify;
   hyphens: auto;
   overflow-wrap: break-word;
+  /* reset what a list or quote passes down: in this WebKit, pretty turns hyphenation off and,
+     justified, spreads CJK lines apart */
+  text-wrap: wrap;
 }
+/* Short paragraphs aren't justified (author lines, affiliations, one-line notes): stretching a
+   line or two only opens gaps. viewer.js marks them. */
+p.short { text-align: left; hyphens: manual; }
 /* quotes and captions aren't justified: short blocks only get uneven spacing */
-blockquote p, figcaption, caption { text-align: left; hyphens: manual; }
+blockquote p, figcaption, caption { text-align: left; hyphens: manual; text-wrap: pretty; }
 
 /* reference numbers and footnote marks: smaller and raised, without growing the line */
 sup, sub { font-size: .72em; line-height: 0; }
@@ -227,6 +293,8 @@ em { font-style: italic; }
 
 a {
   color: inherit;
+  /* addresses and URLs never take a hyphen */
+  hyphens: manual;
   text-decoration: underline;
   text-decoration-color: var(--rule);
   text-decoration-thickness: 1px;
@@ -239,21 +307,22 @@ hr {
   border: 0;
   height: 1px;
   background: var(--rule-soft);
-  margin: 2.6em auto;
+  margin: calc(2em * var(--space)) auto;
   width: 40%;
 }
 
-ul, ol { margin: 0 0 1.1em; padding-left: 1.35em; }
-li { margin: .3em 0; padding-left: .15em; }
+ul, ol { margin: 0 0 calc(.8em * var(--space)); padding-left: 1.4em; }
+li { margin: calc(.2em * var(--space)) 0; padding-left: .15em; text-wrap: pretty; }
 li::marker { color: var(--ink-faint); font-size: .9em; }
-li > ul, li > ol { margin-bottom: .2em; margin-top: .3em; }
+li > ul, li > ol { margin-bottom: calc(.15em * var(--space)); margin-top: calc(.2em * var(--space)); }
+li > p { margin-bottom: calc(.4em * var(--space)); }
 
 blockquote {
-  margin: 1.6em 0;
-  padding: .15em 0 .15em 1.3em;
+  margin: calc(1.2em * var(--space)) 0;
+  padding: .05em 0 .05em 1.1em;
   border-left: 2px solid var(--rule);
   color: var(--ink-soft);
-  font-size: .97em;
+  font-size: .96em;
 }
 blockquote p:last-child { margin-bottom: 0; }
 
@@ -261,7 +330,7 @@ blockquote p:last-child { margin-bottom: 0; }
    Paper tables are often wider than the text: they may extend into the margins and only scroll
    when even that isn't enough. */
 .table-wrap {
-  margin: 2.1em calc((var(--gutter) + var(--bleed)) * -1);
+  margin: calc(1.5em * var(--space)) calc((var(--gutter) + var(--bleed)) * -1);
   padding: 0 calc(var(--gutter) + var(--bleed));
   overflow-x: auto;
   overscroll-behavior-x: contain;
@@ -277,14 +346,14 @@ table {
   border-collapse: collapse;
   width: 100%;
   font-family: var(--sans);
-  font-size: .82em;
-  line-height: 1.5;
+  font-size: .84em;
+  line-height: 1.45;
   font-variant-numeric: tabular-nums lining-nums;
 }
 /* booktabs: three horizontal rules (above and below the header, at the end) and no vertical
    ones, which are a spreadsheet default rather than a paper's. */
 th, td {
-  padding: .5em .9em;
+  padding: calc(.42em * var(--space) + .08em) .85em;
   text-align: left;
   vertical-align: top;
   border: 0;
@@ -296,10 +365,9 @@ thead th {
   font-weight: 620;
   font-size: .93em;
   color: var(--ink-soft);
-  letter-spacing: .035em;
+  letter-spacing: .03em;
   border-top: 1.5px solid var(--ink-soft);
   border-bottom: 1px solid var(--rule);
-  padding: .55em .9em;
 }
 tbody tr:last-child td { border-bottom: 1.5px solid var(--ink-soft); }
 tbody tr { transition: background .15s ease; }
@@ -309,10 +377,10 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums lining-nu
 
 table caption {
   caption-side: bottom;
-  padding-top: 1em;
+  padding-top: .9em;
   font-family: var(--sans);
-  font-size: .76em;
-  line-height: 1.55;
+  font-size: .78em;
+  line-height: 1.5;
   color: var(--ink-faint);
   text-align: left;
 }
@@ -320,22 +388,22 @@ table caption {
 /* --- Figures ----------------------------------------------------------
    Figures may extend past the measure like tables: squeezing a wide figure blurs the axis
    labels first. */
-figure { margin: 2.1em calc(var(--bleed) * -0.5); }
+figure { margin: calc(1.6em * var(--space)) calc(var(--bleed) * -0.5); }
 img {
   max-width: 100%;
   height: auto;
   display: block;
-  margin: 1.9em auto;
+  margin: calc(1.5em * var(--space)) auto;
   border-radius: 4px;
   border: 1px solid var(--rule-soft);
   background: var(--paper-sunk);
 }
 figure img { margin: 0 auto; }
 figcaption {
-  margin-top: .9em;
+  margin-top: .8em;
   font-family: var(--sans);
-  font-size: .76em;
-  line-height: 1.55;
+  font-size: .78em;
+  line-height: 1.5;
   color: var(--ink-faint);
   text-align: center;
 }
@@ -345,26 +413,26 @@ code {
   font-family: var(--mono);
   font-size: .84em;
   background: var(--panel);
-  padding: .15em .4em;
+  padding: .12em .38em;
   border-radius: 3px;
   font-variant-numeric: tabular-nums;
 }
 pre {
   background: var(--paper-sunk);
   border: 1px solid var(--rule-soft);
-  padding: 1.05em 1.2em;
-  border-radius: 12px;
+  padding: .95em 1.15em;
+  border-radius: 10px;
   overflow-x: auto;
-  margin: 1.7em 0;
-  line-height: 1.62;
+  margin: calc(1.3em * var(--space)) 0;
+  line-height: 1.55;
 }
 pre code { background: none; padding: 0; font-size: .8em; }
 
 /* --- Math ------------------------------------------------------------- */
 .katex { font-size: 1.02em; }
 .katex-display {
-  margin: 1.7em 0;
-  padding: .3em 0;
+  margin: calc(1.2em * var(--space)) 0;
+  padding: .25em 0;
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -397,7 +465,7 @@ mark.hit.active {
 /* --- Narrow panes: tighter margins ------------------------------------ */
 @media (max-width: 620px) {
   :root { --bleed: 0px; }
-  #doc { padding-top: 40px; }
+  #doc { padding-top: calc(32px * var(--space)); }
   .page.is-current::before { left: -12px; }
   /* justified text in a narrow column spaces words unevenly; align left */
   p { text-align: left; }
@@ -412,4 +480,4 @@ mark.hit.active {
 /* A Markdown file is a continuous document, without invented PDF page markers. */
 .markdown-document .page-mark { display: none; }
 .markdown-document .page.is-current::before { display: none; }
-.markdown-document #doc { padding-top: 36px; }
+.markdown-document #doc { padding-top: calc(32px * var(--space)); }

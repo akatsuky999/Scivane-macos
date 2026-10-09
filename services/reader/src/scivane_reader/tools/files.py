@@ -2,7 +2,7 @@
 
 All five go through workspace.resolve(), never building paths themselves. Out-of-bounds paths
 are refused, never clamped back into the project (that would report success for a write that
-went elsewhere). Writes to notes/ need confirmation, carried per call in ToolContext.confirmed.
+went elsewhere).
 """
 
 from __future__ import annotations
@@ -43,11 +43,8 @@ def _resolve(context: ToolContext, raw: object, *, write: bool = False) -> Path:
     if not isinstance(raw, str) or not raw.strip():
         raise ToolError("path 必须是非空字符串", "INVALID_ARGS")
     root = _root(context)
-    top = Path(raw).parts[0] if Path(raw).parts else ""
     try:
-        return workspace.resolve(
-            root, raw, write=write, confirmed=top in context.confirmed
-        )
+        return workspace.resolve(root, raw, write=write)
     except workspace.WorkspaceError as exc:
         raise ToolError(str(exc), exc.code) from exc
 

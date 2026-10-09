@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 /// 2. recognition (local OCR or a model card) finishes inside a project: the result becomes the
 ///    paper text and refines the title
 /// 3. the paper text changes only through those runs or Replace on the text chip; other Markdown
-///    goes into files/ and is only shown
+///    lives in notes/ and is only shown
 @MainActor
 extension AppModel {
 
@@ -189,8 +189,8 @@ extension AppModel {
     select(source)
   }
 
-  /// Put the project's text beside its source: the paper text, or the Markdown from files/ chosen in
-  /// the text pane. Text an older version left unconfirmed isn't shown as the paper text.
+  /// Put the project's text beside its source: the paper text, or the note chosen in the text pane.
+  /// Text an older version left unconfirmed isn't shown as the paper text.
   private func pairProjectText(_ project: Project, source: DocumentJob) {
     let chosen = projectDocument[project.id].map { project.directoryURL.appendingPathComponent($0) }
     let url = chosen.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
@@ -206,7 +206,8 @@ extension AppModel {
     pair(source: source, text: text)
   }
 
-  /// What the text pane shows in this project: nil for the paper text, or a Markdown under files/.
+  /// What the text pane shows in this project: nil for the paper text, or a Markdown file in the
+  /// project (a note, or one an older version kept in files/).
   func showProjectText(_ relativePath: String?) {
     guard let project = activeProject else { return }
     if let relativePath {
@@ -286,16 +287,22 @@ extension AppModel {
     requestRecognition(source)
   }
 
-  // MARK: - Markdown in files/
+  // MARK: - Notes
 
-  /// Keep a Markdown file in the project's files/ (with its images) and show it in the text pane.
+  func refreshProjectNotes(_ projectID: String) async {
+    guard await awaitBackend(quiet: true) else { return }
+    guard let found = try? await projectClient.notes(projectID) else { return }
+    projectNotes[projectID] = found
+  }
+
+  /// Copy a Markdown file into the project's notes/ (with its images) and show it in the text pane.
   /// The paper text is untouched.
   func viewMarkdownInProject(_ url: URL) async {
     guard let projectID = activeProjectID else { return }
     guard await awaitBackend() else { return }
     do {
-      let added = try await projectClient.addFile(projectID, path: url.path)
-      await refreshProjectFiles(projectID)
+      let added = try await projectClient.importNote(projectID, path: url.path)
+      await refreshProjectNotes(projectID)
       guard activeProjectID == projectID else { return }
       showProjectText(added.path)
     } catch {
@@ -308,10 +315,39 @@ extension AppModel {
     let panel = NSOpenPanel()
     panel.allowedContentTypes = Self.markdownTypes
     panel.allowsMultipleSelection = false
-    panel.message = L("放进项目的 files/ 并在正文栏查看", "Keep it in the project's files/ and show it in the text pane")
-    panel.prompt = L("打开", "Open")
+    panel.message = L("拷进项目的 notes/，在正文栏打开", "Copy it into the project's notes/ and open it in the text pane")
+    panel.prompt = L("导入", "Import")
     guard panel.runModal() == .OK, let url = panel.url else { return }
     Task { await viewMarkdownInProject(url) }
+  }
+
+  /// notes/ in the Finder, where notes are renamed, sorted into folders or deleted.
+  func revealProjectNotes() {
+    guard let project = activeProject else { return }
+    let notes = project.directoryURL.appendingPathComponent("notes", isDirectory: true)
+    NSWorkspace.shared.open(
+      FileManager.default.fileExists(atPath: notes.path) ? notes : project.directoryURL)
+  }
+
+  /// After the agent's turn the list of notes may have grown, and the document on screen may have
+  /// been rewritten (a note it edited, the paper text it corrected). The page is replaced in place,
+  /// so the reader keeps their scroll position.
+  func refreshAfterAgentTurn(_ projectID: String) async {
+    await refreshProjectNotes(projectID)
+    guard activeProjectID == projectID, let project = activeProject else { return }
+    if let shown = projectDocument[projectID],
+      !FileManager.default.fileExists(atPath: project.directoryURL.appendingPathComponent(shown).path)
+    {
+      // the note on screen was deleted or renamed
+      showProjectText(nil)
+      return
+    }
+    guard let job = readingDocument, job.isMarkdown, jobProjects[job.id] == projectID,
+      let text = try? String(contentsOf: job.url, encoding: .utf8), text != job.consolidated
+    else { return }
+    job.pages = [1: text]
+    job.consolidated = text
+    renderBridge?("setPage", [1, text])
   }
 
   // MARK: - Replacing the paper text
@@ -396,10 +432,11 @@ extension AppModel {
     do {
       try await projectClient.delete(project.id)
       if activeProjectID == project.id { leaveProject() }
-      // Its documents (source, paper text, Markdown from files/) go with it. Only unlinked, they
-      // would turn up among this session's loose documents, pointing at files no longer there.
+      // Its documents (source, paper text, notes) go with it. Only unlinked, they would turn up
+      // among this session's loose documents, pointing at files no longer there.
       forget(Set(jobProjects.filter { $0.value == project.id }.map(\.key)))
       projectDocument.removeValue(forKey: project.id)
+      projectNotes.removeValue(forKey: project.id)
       await refreshProjects()
       notifyProject(L("已删除项目", "Project deleted"))
     } catch {

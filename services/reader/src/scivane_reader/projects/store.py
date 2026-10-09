@@ -10,10 +10,10 @@
     │   └── policy.json      sandbox and tool policy
     ├── pdf/             source document, read-only
     ├── md/              the paper text (OCR or transcription) and its images
-    ├── files/           material the user added, Markdown with its images
+    ├── notes/           Markdown to read in the text pane: imported, or written by the agent
+    ├── files/           other material the user added
     ├── code/            the paper's code
-    ├── workbench/       the agent's scripts and outputs
-    └── notes/           the user's notes and conclusions
+    └── workbench/       the agent's scripts and outputs
 
 The store writes .lumen/ directly instead of going through workspace.resolve(), which is the
 agent's entry point and refuses it. Source documents are copied, not referenced, so a project
@@ -26,6 +26,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import uuid
@@ -53,7 +54,7 @@ from .conversations import (
     new_id as new_conversation_id,
     summarise,
 )
-from .workspace import CONTROL_DIR, FILES_DIR, MD_DIR, PDF_DIR, SKELETON
+from .workspace import CONTROL_DIR, FILES_DIR, MD_DIR, NOTES_DIR, PDF_DIR, SKELETON
 
 logger = logging.getLogger("scivane.projects")
 
@@ -793,9 +794,29 @@ class ProjectStore:
     def add_file(self, project_id: str, source: Path) -> dict[str, Any]:
         """Copy a dropped file into files/. Name clashes get -2, -3 suffixes instead of overwriting.
 
-        A Markdown file brings the local images it links to, into files/<name>_files/, so it still
-        renders (and can later become the paper text) once its original folder is gone.
+        Markdown goes to notes/ instead (import_note), wherever it was dropped: every Markdown
+        document of a project lives in one place, the one the text pane lists. The returned path
+        says where the file went.
         """
+        source = self._upload_source(project_id, source)
+        if _is_markdown(source):
+            return self.import_note(project_id, source)
+        size = source.stat().st_size
+        target = _unique_target(self.files_dir(project_id), source.name)
+        shutil.copy2(source, target)
+
+        self.append_event(project_id, ProjectEvent.FILE_ADDED, {
+            "name": target.name, "bytes": size, "origin": source.name,
+        })
+        return {
+            "name": target.name,
+            "path": f"{FILES_DIR}/{target.name}",
+            "bytes": size,
+        }
+
+    def _upload_source(self, project_id: str, source: Path) -> Path:
+        """The checks every copy into a project shares: the project exists, the file exists, and it
+        isn't too large."""
         self.get(project_id)                 # raises when the project doesn't exist
         source = Path(source).expanduser()
         if not source.is_file():
@@ -809,28 +830,62 @@ class ProjectStore:
                    f"File too large ({megabytes:.0f} MB); the limit is {limit} MB"),
                 "FILE_TOO_LARGE",
             )
+        return source
 
-        target_dir = self.files_dir(project_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / _safe_name(source.name)
-        stem, suffix = target.stem, target.suffix
-        serial = 2
-        while target.exists() or (_is_markdown(target) and _companion(target).exists()):
-            target = target_dir / f"{stem}-{serial}{suffix}"
-            serial += 1
-        if _is_markdown(target):
-            self._add_markdown(source, target)
-        else:
-            shutil.copy2(source, target)
+    def notes_dir(self, project_id: str) -> Path:
+        return self.dir_for(project_id) / NOTES_DIR
 
-        self.append_event(project_id, ProjectEvent.FILE_ADDED, {
-            "name": target.name, "bytes": size, "origin": source.name,
+    def import_note(self, project_id: str, source: Path) -> dict[str, Any]:
+        """Copy a Markdown file into notes/ with the local images it links to, which go into
+        notes/<name>_files/, so it still renders (and can later become the paper text) once its
+        original folder is gone. Name clashes get -2, -3 suffixes instead of overwriting.
+        """
+        source = self._upload_source(project_id, source)
+        if not _is_markdown(source):
+            raise ProjectError(ui(f"notes/ 只收 Markdown：{source.name}",
+                                  f"notes/ only takes Markdown: {source.name}"), "NOT_MARKDOWN")
+        target = _unique_target(self.notes_dir(project_id), source.name)
+        self._add_markdown(source, target)
+        self.append_event(project_id, ProjectEvent.NOTE_ADDED, {
+            "name": target.name, "bytes": source.stat().st_size, "origin": source.name,
         })
-        return {
-            "name": target.name,
-            "path": f"{FILES_DIR}/{target.name}",
-            "bytes": size,
-        }
+        return _note_record(self.notes_dir(project_id), target)
+
+    #: A menu of hundreds of notes is no longer a menu; past this the oldest drop off the list
+    #: (they stay on disk and in reach of the agent).
+    NOTES_LIST_LIMIT = 500
+
+    def list_notes(self, project_id: str) -> list[dict[str, Any]]:
+        """Markdown documents under notes/ at any depth, most recently changed first.
+
+        Skipped: hidden entries, the image folders imports bring along (<name>_files/ next to
+        <name>.md) and anything that resolves outside notes/. The agent writes here, and a link
+        it leaves pointing elsewhere must not put a foreign file on the list.
+        """
+        root = self.notes_dir(project_id)
+        if not root.is_dir():
+            return []
+        base = root.resolve()
+        found: list[dict[str, Any]] = []
+        # os.walk doesn't follow directory links; file links are checked one by one below
+        for current, folders, names in os.walk(root):
+            here = Path(current)
+            folders[:] = sorted(
+                name for name in folders
+                if not name.startswith(".") and not _is_companion(here / name)
+            )
+            for name in names:
+                path = here / name
+                if name.startswith(".") or not _is_markdown(path):
+                    continue
+                try:
+                    if not path.resolve().is_relative_to(base) or not path.is_file():
+                        continue
+                    found.append(_note_record(root, path))
+                except OSError:
+                    continue
+        found.sort(key=lambda note: (note["modified_at"], note["path"]), reverse=True)
+        return found[: self.NOTES_LIST_LIMIT]
 
     def _add_markdown(self, source: Path, target: Path) -> None:
         """Copy a Markdown file and the local images it links to; links are rewritten to the copies."""
@@ -1063,8 +1118,43 @@ def _is_markdown(path: Path) -> bool:
 
 
 def _companion(markdown: Path) -> Path:
-    """Where a Markdown file's images live in files/: <name>_files/, like a saved web page."""
+    """Where an imported Markdown file's images live: <name>_files/ beside it, like a saved web
+    page."""
     return markdown.with_name(f"{markdown.stem}_files")
+
+
+def _is_companion(folder: Path) -> bool:
+    """An image folder an import brought along, not a folder of notes."""
+    if not folder.name.endswith("_files"):
+        return False
+    stem = folder.name[: -len("_files")]
+    return any((folder.parent / f"{stem}{suffix}").is_file() for suffix in (".md", ".markdown"))
+
+
+def _unique_target(directory: Path, name: str) -> Path:
+    """A free name in `directory` for an incoming file; clashes get -2, -3 instead of overwriting.
+    A Markdown name also counts as taken when its image folder exists."""
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / _safe_name(name)
+    stem, suffix = target.stem, target.suffix
+    serial = 2
+    while target.exists() or (_is_markdown(target) and _companion(target).exists()):
+        target = directory / f"{stem}-{serial}{suffix}"
+        serial += 1
+    return target
+
+
+def _note_record(root: Path, path: Path) -> dict[str, Any]:
+    """How a note is listed. `path` is relative to the project, as the agent sees it."""
+    relative = path.relative_to(root)
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "path": f"{NOTES_DIR}/{relative.as_posix()}",
+        "folder": "" if relative.parent == Path(".") else relative.parent.as_posix(),
+        "bytes": stat.st_size,
+        "modified_at": stat.st_mtime,
+    }
 
 
 def _safe_name(name: str) -> str:

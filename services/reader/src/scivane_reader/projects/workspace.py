@@ -9,13 +9,13 @@ resolve() refusing .lumen/ means the agent may not touch it.
     md/          read     write      fixing OCR errors happens here
     code/        read     write      clone, edit, run
     workbench/   read     write      the agent's default place
-    notes/       read     confirm    the user's conclusions; overwriting needs confirmation
+    notes/       read     write      Markdown the user reads in the text pane, imported or written
+    files/       read     write      material the user added
     anything     read     write      grows as needed (data/, refs/)
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,8 +29,10 @@ PDF_DIR = "pdf"
 MD_DIR = "md"
 CODE_DIR = "code"
 WORKBENCH_DIR = "workbench"
+#: Every Markdown document of the project except the paper text: what the user imports to read and
+#: what the agent writes for them. The text pane lists it.
 NOTES_DIR = "notes"
-#: Material the user dropped in. Unlike notes/, it needs no confirmation.
+#: Other material the user added (PDFs, data, images).
 FILES_DIR = "files"
 
 #: created with the project; anything else grows on demand
@@ -59,8 +61,6 @@ class WorkspaceError(Exception):
 class TierRule:
     readable: bool
     writable: bool
-    #: writes need explicit confirmation (only notes/ today)
-    needs_confirmation: bool = False
     reason: str = ""
 
 
@@ -71,16 +71,9 @@ TIERS: dict[str, TierRule] = {
     MD_DIR: TierRule(True, True),
     CODE_DIR: TierRule(True, True),
     WORKBENCH_DIR: TierRule(True, True),
-    NOTES_DIR: TierRule(True, True, needs_confirmation=True, reason="人写的结论，不能被悄悄覆盖"),
-    FILES_DIR: TierRule(True, True, reason="用户给的材料，本来就是给你看的"),
+    NOTES_DIR: TierRule(True, True),
+    FILES_DIR: TierRule(True, True),
 }
-
-#: Tiers a caller may mark as confirmed, derived from TIERS. Anything else is rejected by
-#: check_confirmed() at the route and in ToolContext: extra names happen to be harmless today,
-#: but nothing structural guarantees it.
-CONFIRMABLE_TIERS: frozenset[str] = frozenset(
-    name for name, rule in TIERS.items() if rule.needs_confirmation
-)
 
 _DEFAULT_TIER = TierRule(True, True)
 
@@ -107,12 +100,11 @@ def resolve(
     path: Path | str,
     *,
     write: bool = False,
-    confirmed: bool = False,
 ) -> Path:
     """Resolve an agent-supplied path inside the project; out of bounds or not permitted raises.
 
     Never clamps silently: writing somewhere else while reporting success is worse than an error.
-    Raises WorkspaceError: OUT_OF_BOUNDS, READ_DENIED, WRITE_DENIED or NEEDS_CONFIRMATION.
+    Raises WorkspaceError: OUT_OF_BOUNDS, READ_DENIED or WRITE_DENIED.
     """
     root = canonical_root(project_dir)
     raw = Path(path).expanduser()
@@ -134,47 +126,23 @@ def resolve(
             f"{name}/ 对 agent 不可见" + (f"：{rule.reason}" if rule.reason else ""),
             "READ_DENIED",
         )
-    if write:
-        if not rule.writable:
-            raise WorkspaceError(
-                f"{name or '项目根'} 不可写" + (f"：{rule.reason}" if rule.reason else ""),
-                "WRITE_DENIED",
-            )
-        if rule.needs_confirmation and not confirmed:
-            raise WorkspaceError(
-                f"写入 {name}/ 需要用户确认" + (f"：{rule.reason}" if rule.reason else ""),
-                "NEEDS_CONFIRMATION",
-            )
-    return target
-
-
-def check_confirmed(names: Iterable[str]) -> tuple[str, ...]:
-    """Every confirmed dir must be in CONFIRMABLE_TIERS; returned unchanged.
-
-    Unknown names raise NOT_CONFIRMABLE instead of being skipped, or "notes/" with a slash would
-    silently count as unconfirmed.
-    """
-    given = tuple(names)
-    extra = sorted({name for name in given if name not in CONFIRMABLE_TIERS})
-    if extra:
-        allowed = "、".join(sorted(CONFIRMABLE_TIERS)) or "（无）"
+    if write and not rule.writable:
         raise WorkspaceError(
-            f"confirmed 只能列需要用户确认才能写的目录（{allowed}），收到：{'、'.join(extra)}",
-            "NOT_CONFIRMABLE",
+            f"{name or '项目根'} 不可写" + (f"：{rule.reason}" if rule.reason else ""),
+            "WRITE_DENIED",
         )
-    return given
+    return target
 
 
 def describe_tiers() -> list[dict[str, object]]:
     """Readable form of the tier table for the UI and prompts; tests pin it."""
     rows: list[dict[str, object]] = []
-    for name in (CONTROL_DIR, PDF_DIR, MD_DIR, CODE_DIR, WORKBENCH_DIR, NOTES_DIR):
+    for name in (CONTROL_DIR, PDF_DIR, MD_DIR, CODE_DIR, WORKBENCH_DIR, NOTES_DIR, FILES_DIR):
         rule = TIERS[name]
         rows.append({
             "path": f"{name}/",
             "readable": rule.readable,
             "writable": rule.writable,
-            "needs_confirmation": rule.needs_confirmation,
             "reason": rule.reason,
         })
     return rows
@@ -184,16 +152,15 @@ def sandbox_policy(
     project_dir: Path | str,
     *,
     mode: SandboxMode = "workspace-write",
-    confirmed: tuple[str, ...] = (),
     network: NetworkPolicy | None = None,
 ) -> SandboxPolicy:
     """Translate the tier table into a sandbox file policy.
 
     Kept next to TIERS so the two never drift: resolve() governs file tools, this governs
-    subprocesses (a shell redirect never passes through resolve()). notes/ is write-denied unless
-    the caller lists it in `confirmed` for this call. Reads also deny the user's whole home and
-    re-open only the project root and runtime dirs; the most specific rule wins, so .lumen/ stays
-    denied. Network is a separate axis passed through as is; None means no network.
+    subprocesses (a shell redirect never passes through resolve()). Reads also deny the user's
+    whole home and re-open only the project root and runtime dirs; the most specific rule wins,
+    so .lumen/ stays denied. Network is a separate axis passed through as is; None means no
+    network.
     """
     from .. import config
     from ..sandbox.policy import FilePolicy, NetworkPolicy as _NetworkPolicy, SandboxPolicy
@@ -207,8 +174,6 @@ def sandbox_policy(
             deny_read.append(root / name)
             deny_write.append(root / name)
         elif not rule.writable:
-            deny_write.append(root / name)
-        elif rule.needs_confirmation and name not in confirmed:
             deny_write.append(root / name)
 
     # OCR locations are not part of the paper, not even readable

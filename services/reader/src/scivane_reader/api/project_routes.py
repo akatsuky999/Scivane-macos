@@ -29,6 +29,7 @@ _STATUS = {
     "SOURCE_EXISTS": 409,
     "FILE_TOO_LARGE": 413,
     "INVALID_NAME": 400,
+    "NOT_MARKDOWN": 400,
     "INVALID_ID": 400,
     "INVALID_CONVERSATION": 400,
     "INVALID_TITLE": 400,
@@ -284,8 +285,8 @@ async def export_conversation(project_id: str, conversation_id: str):
         raise _fail(exc) from exc
 
 
-# files/ holds material the user handed over; notes/ holds conclusions they wrote
-# (changing those needs confirmation).
+# files/ holds material the user handed over; notes/ holds the project's Markdown documents, the
+# ones the text pane lists. Markdown sent to files/ lands in notes/ (the response says where).
 
 
 @router.get("/{project_id}/files")
@@ -305,6 +306,25 @@ async def add_project_file(project_id: str, body: AddFileIn):
     except ProjectError as exc:
         raise _fail(exc) from exc
     return {"file": added}
+
+
+@router.get("/{project_id}/notes")
+async def list_project_notes(project_id: str):
+    try:
+        projects.get(project_id)
+    except ProjectError as exc:
+        raise _fail(exc) from exc
+    return {"notes": projects.list_notes(project_id)}
+
+
+@router.post("/{project_id}/notes")
+async def import_project_note(project_id: str, body: AddFileIn):
+    """Copy a local Markdown file into notes/ with its images; name clashes get a suffix."""
+    try:
+        note = projects.import_note(project_id, Path(body.path))
+    except ProjectError as exc:
+        raise _fail(exc) from exc
+    return {"note": note}
 
 
 @router.delete("/{project_id}/files/{name}")

@@ -28,16 +28,20 @@ struct AgentTranscript: View {
     }
   }
 
-  /// Measured, not full width. 720 holds 40-45 CJK characters per line at 13.5 pt. It grows with the
-  /// font size (or larger text means fewer characters per line), and up to 1.34x on wide windows so
-  /// tables and code don't scroll next to empty space.
-  static func column(width: CGFloat, fontSize: CGFloat) -> CGFloat {
-    let measure = 720 * (fontSize / 13.5)
-    return min(max(measure, width * 0.62), measure * 1.34)
+  /// Measured, not full width. 720 holds 40-45 CJK characters per line at 13.5 pt. It moves with
+  /// the font size, but less than the type does: smaller type fits more on a line instead of
+  /// narrowing the column, larger type fewer instead of running wide. A compact page is a little
+  /// wider. Up to 1.34x on wide windows so tables and code don't scroll next to empty space.
+  static func column(
+    width: CGFloat, fontSize: CGFloat, density: ReadingDensity = .standard
+  ) -> CGFloat {
+    let measure = 720 * pow(fontSize / TypeScale.chat.standardSize, 0.55) * density.measure
+    return min(max(measure, width * 0.62 * density.measure), measure * 1.34)
   }
 
-  /// the column follows the conversation font size
-  @AppStorage("agentFontSize") private var fontSize = 13.5
+  /// the column follows the conversation font size and density
+  @AppStorage(TypeScale.chat.sizeKey) private var fontSize = TypeScale.chat.standardSize
+  @AppStorage(TypeScale.chat.densityKey) private var density = ReadingDensity.standard
 
   /// consecutive process items merge into one card
   private var rows: [Row] { Self.group(session.items, running: session.running) }
@@ -116,7 +120,8 @@ struct AgentTranscript: View {
         // Bound to `running` so the end of a turn (status removed, card finalised) animates as one
         // change, without catching per-chunk growth.
         .padding(.horizontal, 22).padding(.top, 20)
-        .frame(maxWidth: Self.column(width: viewport.size.width, fontSize: fontSize))
+        .frame(maxWidth: Self.column(
+          width: viewport.size.width, fontSize: TypeScale.chat.clamp(fontSize), density: density))
         .frame(
           maxWidth: .infinity, minHeight: viewport.size.height,
           alignment: .top)
@@ -150,16 +155,18 @@ struct AgentTranscript: View {
     }
   }
 
-  /// Tight within a turn, a clear gap before each new question.
+  /// Tight within a turn, a clear gap before each new question; closer or wider with the density.
   private func topGap(for item: TranscriptItem) -> CGFloat {
+    let gap: CGFloat
     switch item.kind {
-    case .tool: return 4
-    case .user: return 20
-    case .assistant: return 10
-    case .approval, .failure: return 8
-    case .notice: return 8
-    case .compaction: return 10
+    case .tool: gap = 4
+    case .user: gap = 20
+    case .assistant: gap = 10
+    case .approval, .failure: gap = 8
+    case .notice: gap = 8
+    case .compaction: gap = 10
     }
+    return gap * density.space
   }
 
   @ViewBuilder

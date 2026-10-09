@@ -122,10 +122,10 @@ struct ReaderView: View {
         // a source to recognise: that is the main way in; a Markdown file is the other
         Button(L("识别原稿…", "Recognize Original…")) { model.requestRecognition(source) }
           .buttonStyle(StudioButtonStyle(primary: true)).padding(.top, 4)
-        Button(L("打开 Markdown", "Open Markdown")) { open(kind) }
+        Button(markdownAction) { open(kind) }
           .buttonStyle(.borderless).font(.uiCaption).foregroundStyle(Palette.accent)
       } else {
-        Button(kind == .source ? L("导入 PDF", "Import PDF") : L("打开 Markdown", "Open Markdown")) { open(kind) }
+        Button(kind == .source ? L("导入 PDF", "Import PDF") : markdownAction) { open(kind) }
           .buttonStyle(StudioButtonStyle(primary: kind == .source)).padding(.top, 4)
       }
     }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -140,8 +140,14 @@ struct ReaderView: View {
       }
   }
 
+  /// In a project Markdown is imported into its notes/ (and only shown); outside one it is opened
+  /// as a loose document.
+  private var markdownAction: String {
+    model.activeProject != nil ? L("导入 Markdown", "Import Markdown") : L("打开 Markdown", "Open Markdown")
+  }
+
   /// In a project without a source, importing a PDF attaches it to the project rather than opening
-  /// a loose document; Markdown opened in a project is kept in its files/ and only shown.
+  /// a loose document; Markdown in a project goes to its notes/ and is only shown.
   private func open(_ kind: AppModel.ReadingPane) {
     if kind == .source, let project = sourcelessProject {
       model.chooseSourceForProject(project)

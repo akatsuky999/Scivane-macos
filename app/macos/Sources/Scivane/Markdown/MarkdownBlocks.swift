@@ -468,7 +468,8 @@ struct MarkdownText: View {
 
   /// Stored apart from the reader's font size. Headings, tables and code scale from this base so
   /// their proportions survive resizing.
-  @AppStorage("agentFontSize") private var base = 13.5
+  @AppStorage(TypeScale.chat.sizeKey) private var base = TypeScale.chat.standardSize
+  @AppStorage(TypeScale.chat.densityKey) private var density = ReadingDensity.standard
 
   init(_ text: String, streaming: Bool = false) {
     self.blocks = MarkdownParser.blocks(text, cache: !streaming)
@@ -480,8 +481,11 @@ struct MarkdownText: View {
       // Identified by index, not content: repeated blocks (two `---`) would collide and SwiftUI would
       // drop one. Indices of earlier blocks are stable while streaming.
       ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-        MarkdownBlockView(block: block, base: base, live: streaming && index == blocks.count - 1)
-          .equatable()
+        MarkdownBlockView(
+          block: block, base: TypeScale.chat.clamp(base), density: density,
+          live: streaming && index == blocks.count - 1
+        )
+        .equatable()
       }
     }.frame(maxWidth: .infinity, alignment: .leading)
   }
@@ -493,8 +497,17 @@ private struct MarkdownBlockView: View, Equatable {
   let block: MarkdownBlock
   /// read from preferences by MarkdownText
   let base: Double
+  let density: ReadingDensity
   /// the streaming last block: caret after it, an unclosed trailing formula held back
   let live: Bool
+
+  /// A gap given at the standard size and density. Gaps follow the type and the density, or small
+  /// type keeps the spacing of large type and a compact page never gets compact.
+  private func gap(_ points: CGFloat) -> CGFloat {
+    points * spacing
+  }
+
+  private var spacing: CGFloat { base / TypeScale.chat.standardSize * density.space }
 
   var body: some View {
     switch block {
@@ -503,50 +516,55 @@ private struct MarkdownBlockView: View, Equatable {
       prose(text, size: base * [0, 1.26, 1.13, 1.03, 1.0, 1.0, 1.0][min(level, 6)], weight: .semibold)
         .textSelection(.enabled)
         .fixedSize(horizontal: false, vertical: true)
-        .padding(.top, level <= 2 ? 15 : 12).padding(.bottom, 4)
+        .padding(.top, gap(level <= 2 ? 15 : 12)).padding(.bottom, gap(4))
 
     case .paragraph(let text):
       HStack(alignment: .bottom, spacing: 3) {
         prose(text, size: base, live: live)
-          .lineSpacing(base * 0.37).textSelection(.enabled)
+          .lineSpacing(base * density.leading).textSelection(.enabled)
           .fixedSize(horizontal: false, vertical: true)
         if live { StreamingCaret().padding(.bottom, 2) }
       }
-      .padding(.vertical, 5)
+      .padding(.vertical, gap(5))
 
     case .list(let items):
-      VStack(alignment: .leading, spacing: 5) {
+      VStack(alignment: .leading, spacing: gap(5)) {
         ForEach(Array(items.enumerated()), id: \.offset) { index, item in
           HStack(alignment: .firstTextBaseline, spacing: 8) {
             ListMarker(marker: item.marker, depth: item.depth, size: base)
             prose(item.text, size: base, live: live && index == items.count - 1)
-              .lineSpacing(base * 0.3).textSelection(.enabled)
+              .lineSpacing(base * density.leading * 0.3 / 0.37).textSelection(.enabled)
               .fixedSize(horizontal: false, vertical: true)
           }
           .padding(.leading, CGFloat(item.depth) * base * 1.45)
         }
-      }.padding(.vertical, 5).padding(.leading, 2)
+      }.padding(.vertical, gap(5)).padding(.leading, 2)
 
     case .quote(let lines):
-      HStack(alignment: .top, spacing: 10) {
-        RoundedRectangle(cornerRadius: 1).fill(Palette.accent.opacity(0.4)).frame(width: 2)
-        prose(lines.joined(separator: "\n"), size: base - 0.5, tint: Palette.inkSoft, live: live)
-          .lineSpacing(base * 0.33).textSelection(.enabled)
-          .fixedSize(horizontal: false, vertical: true)
-      }.padding(.vertical, 7)
+      // The rule is an overlay sized by the text. As an HStack sibling a shape takes whatever height
+      // is offered, and a transcript shorter than the window offers it the spare height.
+      prose(lines.joined(separator: "\n"), size: base - 0.5, tint: Palette.inkSoft, live: live)
+        .lineSpacing(base * density.leading * 0.33 / 0.37).textSelection(.enabled)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.leading, 12)
+        .overlay(alignment: .leading) {
+          RoundedRectangle(cornerRadius: 1).fill(Palette.accent.opacity(0.4)).frame(width: 2)
+        }
+        .padding(.vertical, gap(7))
 
     case .code(let language, let body):
-      CodeBlock(language: language, code: body, size: base - 2).padding(.vertical, 7)
+      CodeBlock(language: language, code: body, size: base - 2).padding(.vertical, gap(7))
 
     case .table(let header, let alignments, let rows):
-      MarkdownTable(header: header, alignments: alignments, rows: rows, size: base - 1.5)
-        .padding(.vertical, 8)
+      MarkdownTable(header: header, alignments: alignments, rows: rows, size: base - 1.5,
+                    density: density)
+        .padding(.vertical, gap(8))
 
     case .math(let latex, let open):
-      MathDisplayBlock(latex: latex, size: base, open: open)
+      MathDisplayBlock(latex: latex, size: base, open: open, spacing: spacing)
 
     case .rule:
-      Hairline().padding(.vertical, 11)
+      Hairline().padding(.vertical, gap(11))
     }
   }
 
@@ -661,6 +679,7 @@ private struct MarkdownTable: View {
   let alignments: [MarkdownColumnAlignment]
   let rows: [[String]]
   var size: CGFloat = 12
+  var density: ReadingDensity = .standard
 
   /// beyond this many columns, wrapping leaves two or three characters per line; scroll instead
   private static let wrapLimit = 4
@@ -724,7 +743,8 @@ private struct MarkdownTable: View {
     .textSelection(.enabled)
     .fixedSize(horizontal: false, vertical: true)
     .frame(minWidth: 52, maxWidth: wraps ? .infinity : 230, alignment: alignment.frame)
-    .padding(.horizontal, 11).padding(.vertical, 7)
+    // 11 and 7 pt at the standard 12 pt
+    .padding(.horizontal, size * 11 / 12).padding(.vertical, size * 7 / 12 * density.space)
   }
 }
 

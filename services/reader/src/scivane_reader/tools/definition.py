@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
 from ..llm.types import ToolSchema
-from ..projects.workspace import WorkspaceError, check_confirmed
 
 if TYPE_CHECKING:
     from ..netproxy import CallNetwork
@@ -43,7 +42,8 @@ class ToolError(Exception):
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Everything a tool call can see, deliberately narrow: which project, and what was approved.
+    """Everything a tool call can see, deliberately narrow: which project, the cancel signal and
+    this call's network credential.
 
     The librarian's context has project_dir None, so project tools are unusable by construction,
     not by prompt.
@@ -52,22 +52,11 @@ class ToolContext:
     #: project root; None at the librarian level
     project_dir: str | None = None
     project_id: str | None = None
-    #: top-level dirs the user confirmed as writable for this call, e.g. ("notes",).
-    #: Only confirmable tiers (workspace.CONFIRMABLE_TIERS), see __post_init__.
-    confirmed: tuple[str, ...] = ()
     #: cancellation signal; long-running tools check it themselves
     cancelled: Callable[[], bool] = lambda: False
     #: This call's network credential (port and token); None means no network. Per call, never
     #: stored on the agent, and revoked by the dispatcher in `finally`.
     network: "CallNetwork | None" = None
-
-    def __post_init__(self) -> None:
-        # A context naming .lumen or similar can't be built. The route already returns a 422; this
-        # covers every other constructor: tests, scripts, dataclasses.replace, future sub-agents.
-        try:
-            check_confirmed(self.confirmed)
-        except WorkspaceError as exc:
-            raise ValueError(str(exc)) from exc
 
 
 @dataclass(frozen=True)

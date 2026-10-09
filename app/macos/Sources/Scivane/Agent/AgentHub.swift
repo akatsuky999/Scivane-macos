@@ -340,28 +340,35 @@ extension AppModel {
     projectFiles[projectID] = found
   }
 
-  /// Files are sent one by one, so a bad file fails on its own.
+  /// Files are sent one by one, so a bad file fails on its own. The backend puts Markdown into
+  /// notes/ and the rest into files/; the notice names where they went.
   func addProjectFiles(_ urls: [URL]) async {
     guard let projectID = activeProjectID else {
       notifyProject(L("先打开一个项目，文件才知道该放哪儿", "Open a project first, so the files know where to go"))
       return
     }
     guard await awaitBackend() else { return }
-    var added: [String] = []
+    var added: [ProjectFile] = []
     for url in urls {
       do {
-        added.append(try await projectClient.addFile(projectID, path: url.path).name)
+        added.append(try await projectClient.addFile(projectID, path: url.path))
       } catch {
         notifyProject(L("「\(url.lastPathComponent)」没放进去：", "Couldn't add “\(url.lastPathComponent)”: ")
                       + error.localizedDescription)
       }
     }
     await refreshProjectFiles(projectID)
-    if !added.isEmpty {
+    await refreshProjectNotes(projectID)
+    guard let first = added.first else { return }
+    let folders = Set(added.map { ($0.path as NSString).pathComponents.first ?? "" })
+    if folders.count > 1 {
+      notifyProject(L("已放进项目：\(added.count) 个文件", "Added to the project: \(added.count) files"))
+    } else {
+      let folder = (folders.first ?? "files") + "/"
       notifyProject(
         added.count == 1
-          ? L("已放进 files/：\(added[0])", "Added to files/: \(added[0])")
-          : L("已放进 files/：\(added.count) 个文件", "Added to files/: \(added.count) files"))
+          ? L("已放进 \(folder)：\(first.name)", "Added to \(folder): \(first.name)")
+          : L("已放进 \(folder)：\(added.count) 个文件", "Added to \(folder): \(added.count) files"))
     }
   }
 

@@ -9,7 +9,8 @@ struct MarkdownWebView: NSViewRepresentable {
     /// Passed in explicitly so a change always goes through updateNSView, rather than relying on
     /// Observation tracking inside an AppKit view.
     var language: AppLanguage = .zh
-    @AppStorage("readerFontSize") private var fontSize = 17.0
+    @AppStorage(TypeScale.paper.sizeKey) private var fontSize = TypeScale.paper.standardSize
+    @AppStorage(TypeScale.paper.densityKey) private var density = ReadingDensity.standard
     @Environment(\.colorScheme) private var colorScheme
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
@@ -17,7 +18,9 @@ struct MarkdownWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(LocalAssetHandler(root: model.backend.jobsRoot), forURLScheme: "scivane-asset")
-        config.setURLSchemeHandler(DocumentAssetHandler(directory: { [weak model] in model?.readingDocument?.isMarkdown == true ? model?.readingDocument?.url.deletingLastPathComponent() : nil }), forURLScheme: "scivane-document")
+        config.setURLSchemeHandler(
+            DocumentAssetHandler(directory: { [weak model] in model?.readingDocumentRoot }),
+            forURLScheme: "scivane-document")
         config.userContentController.add(context.coordinator, name: "scivane")
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
@@ -41,7 +44,8 @@ struct MarkdownWebView: NSViewRepresentable {
 
     func updateNSView(_ web: WKWebView, context: Context) {
         context.coordinator.apply(theme: colorScheme == .dark ? "dark" : "light")
-        context.coordinator.apply(fontSize: fontSize)
+        context.coordinator.apply(fontSize: TypeScale.paper.clamp(fontSize))
+        context.coordinator.apply(density: density)
         context.coordinator.apply(language: language)
     }
 
@@ -56,6 +60,7 @@ struct MarkdownWebView: NSViewRepresentable {
         private var pending: [(String, [Any])] = []
         private var theme = "light"
         private var fontSize: Double?
+        private var density: ReadingDensity?
 
         init(model: AppModel) { self.model = model }
 
@@ -77,11 +82,17 @@ struct MarkdownWebView: NSViewRepresentable {
             }
         }
 
-        func apply(fontSize newSize: Double) {
-            let size = min(22, max(14, newSize.isFinite ? newSize : 17))
+        /// Takes the size as clamped by TypeScale.paper, the same range the slider offers.
+        func apply(fontSize size: Double) {
             guard size != fontSize else { return }
             fontSize = size
             call("setFontSize", [size])
+        }
+
+        func apply(density newDensity: ReadingDensity) {
+            guard newDensity != density else { return }
+            density = newDensity
+            call("setDensity", [newDensity.rawValue])
         }
 
         func apply(theme newTheme: String) {

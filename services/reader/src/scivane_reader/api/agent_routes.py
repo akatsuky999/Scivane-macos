@@ -18,7 +18,7 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from .. import config
 from ..i18n import ui
@@ -33,7 +33,6 @@ from ..projects.compaction import Compactor, CompactionError, auto_threshold, oc
 from ..projects.compaction import release as release_conversation
 from ..projects.context import paper_message
 from ..projects.meter import calibration, measure
-from ..projects.workspace import WorkspaceError, check_confirmed
 from ..projects.session import derive_messages, derive_transcript, summarise_call
 from ..tools import AgentLoop, StoreJournal, librarian, reader
 from ..tools.approval import APPROVAL_TIMEOUT, approvals
@@ -56,8 +55,6 @@ class ChatIn(BaseModel):
     question: str = ""
     provider: str = Field(min_length=1)
     model: str | None = None
-    #: Top-level dirs the user confirmed as writable for this call, e.g. ["notes"].
-    confirmed: list[str] = Field(default_factory=list)
     max_steps: int | None = None
     #: Conversation to continue; defaults to the most recent one (or a new one).
     conversation: str | None = None
@@ -68,18 +65,6 @@ class ChatIn(BaseModel):
         if not self.question.strip() and not self.images:
             raise ValueError("question 与 images 至少要有一个")
         return self
-
-    @field_validator("confirmed")
-    @classmethod
-    def _only_confirmable(cls, value: list[str]) -> list[str]:
-        """Validated at the door: `confirmed` flows straight into the sandbox policy, so only
-        confirmable tiers (today notes/) pass; anything else is a 422.
-        """
-        try:
-            check_confirmed(value)
-        except WorkspaceError as exc:
-            raise ValueError(str(exc)) from exc
-        return value
 
 
 class CancelIn(BaseModel):
@@ -442,7 +427,6 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
     agent = reader(
         project_dir=str(projects.dir_for(project_id)),
         project_id=project_id,
-        confirmed=tuple(body.confirmed),
         cancelled=lambda: jobs.is_cancelled(job_id),
     )
     try:

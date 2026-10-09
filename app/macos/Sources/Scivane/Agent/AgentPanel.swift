@@ -105,6 +105,7 @@ struct AgentPanel: View {
     .task(id: model.activeProjectID) {
       guard let projectID = model.activeProjectID else { return }
       await model.refreshProjectFiles(projectID)
+      await model.refreshProjectNotes(projectID)
     }
     // refetch on opening a conversation, switching cards or changing the window; during a turn it
     // comes from events (AgentSession)
@@ -115,9 +116,13 @@ struct AgentPanel: View {
     .onDisappear { pasteMonitor.stop() }
     .onChange(of: composing) { _, focused in pasteMonitor.active = focused && !isDesk }
     .onChange(of: session.running) { _, running in
-      // Refresh the list after each turn: the backend names a conversation after its first question.
+      // After each turn: the backend names a conversation after its first question, and the agent
+      // may have written a note or edited the document on screen.
       guard !running, let projectID = model.activeProjectID else { return }
-      Task { await model.refreshConversations(projectID) }
+      Task {
+        await model.refreshConversations(projectID)
+        await model.refreshAfterAgentTurn(projectID)
+      }
     }
   }
 
@@ -305,9 +310,9 @@ struct AgentPanel: View {
     }
     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
     .help(model.activeVision == false
-          ? L("这张卡看不到图片；材料可以放进 files/", "This card can't see images; files can go into files/")
-          : L("图片随这条消息发送；材料放进项目的 files/（都可以直接拖进来）",
-              "Images go with this message; files go into the project's files/ (or drag them in)"))
+          ? L("这张卡看不到图片；材料可以放进项目", "This card can't see images; files can go into the project")
+          : L("图片随这条消息发送；材料放进项目，Markdown 进 notes/（都可以直接拖进来）",
+              "Images go with this message; files go into the project, Markdown into notes/ (or drag them in)"))
     .accessibilityLabel(L("添加附件", "Attach"))
   }
 
@@ -507,16 +512,14 @@ private struct SuggestionRow: View {
 
 
 /// The paper text in the composer, and the one place to change it: recognise the original again,
-/// or replace it with a Markdown file (one already in files/, or any other).
+/// or replace it with a Markdown file (a note from notes/, or any other).
 private struct ContextChip: View {
   @ObservedObject var model: AppModel
   let project: Project
   /// while a turn runs: a new text would only reach the next turn
   let locked: Bool
 
-  private var markdownFiles: [ProjectFile] {
-    model.activeProjectFiles.filter { ["md", "markdown"].contains(($0.name as NSString).pathExtension.lowercased()) }
-  }
+  private var notes: [ProjectNote] { model.projectNotes[project.id] ?? [] }
 
   var body: some View {
     Menu {
@@ -526,13 +529,13 @@ private struct ContextChip: View {
         }
       }
       Menu(L("替换为 Markdown", "Replace with Markdown")) {
-        ForEach(markdownFiles) { file in
-          Button(file.name) {
-            let url = project.directoryURL.appendingPathComponent(file.path)
+        ForEach(notes) { note in
+          Button(note.folder.isEmpty ? note.title : "\(note.folder)/\(note.title)") {
+            let url = project.directoryURL.appendingPathComponent(note.path)
             Task { await model.replaceProjectContext(with: url) }
           }
         }
-        if !markdownFiles.isEmpty { Divider() }
+        if !notes.isEmpty { Divider() }
         Button(L("其他文件…", "Other File…")) { model.chooseMarkdownToReplaceContext() }
       }
     } label: {

@@ -190,7 +190,7 @@ struct ContentView: View {
           Divider()
         }
         // Not disabled without a text pane: the dialog also sets the conversation text size.
-        Button(L("字号…", "Text Size…")) { showReadingOptions = true }
+        Button(L("字号与间距…", "Text Size & Spacing…")) { showReadingOptions = true }
         Toggle(L("原稿缩略图", "Page Thumbnails"), isOn: $model.showThumbnails)
           .disabled(model.readingSource?.isPDF != true)
         if model.readingDocument?.isMarkdown == true, model.readingSource?.hasResult == true {
