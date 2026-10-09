@@ -143,6 +143,9 @@ def classify_status(status: int, detail: str = "") -> str:
         return INVALID_ARGS
     if status == 401:
         return AUTH
+    if status == 402:
+        # Payment Required: no credits left (OpenRouter's documented meaning)
+        return QUOTA
     if status == 403:
         # some providers use 403 for an exhausted balance
         return QUOTA if looks_like_quota_exhausted(detail) else AUTH

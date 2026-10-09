@@ -6,12 +6,20 @@ Caching is implicit prefix caching: our only job is keeping the prefix byte-stab
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from ...i18n import ui
 from .. import timing
 from ..cache import CacheCapability
-from ..errors import CONTEXT_WINDOW_EXCEEDED, INVALID_ARGS, QUOTA, RATE_LIMIT
+from ..errors import (
+    CONTEXT_WINDOW_EXCEEDED,
+    EMPTY_RESPONSE,
+    INVALID_ARGS,
+    QUOTA,
+    RATE_LIMIT,
+    LlmFailure,
+    classify_status,
+)
 from ..types import (
     CallRequest,
     Finish,
@@ -99,13 +107,15 @@ def _openai_messages(request: CallRequest) -> list[dict[str, object]]:
 
 
 class OpenAiTranslator(StreamTranslator):
-    def __init__(self) -> None:
+    def __init__(self, classify: Callable[[int, str], str] = classify_status) -> None:
         self._usage = Usage()
         self._finish_reason: str | None = None
         self._emitted = False
         # index -> call being assembled; arguments stream as JSON fragments
         self._pending: dict[int, dict[str, str]] = {}
         self._flushed = False
+        self._classify = classify
+        self._failure: LlmFailure | None = None
 
     def feed(self, event: SseEvent) -> Iterable[StreamChunk]:
         if event.data.strip() == DONE_SENTINEL:
@@ -125,6 +135,13 @@ class OpenAiTranslator(StreamTranslator):
             clock.note("upstream", payload.get("provider"))
             clock.note("resolved_model", payload.get("model"))
             clock.note("generation", payload.get("id"))
+
+        error = payload.get("error")
+        if isinstance(error, dict) and self._failure is None:
+            # A failure after the 200 is reported inside the stream (OpenRouter documents this, and
+            # it can come before the first token). Unread, it looks like an empty answer, or like an
+            # answer that simply stopped partway.
+            self._failure = self._stream_failure(error)
 
         usage = payload.get("usage")
         if isinstance(usage, dict):
@@ -202,11 +219,25 @@ class OpenAiTranslator(StreamTranslator):
                 arguments=_parse_arguments(slot["arguments"]),
             )
 
+    def _stream_failure(self, error: dict[str, object]) -> LlmFailure:
+        raw = error.get("code")
+        # an HTTP-style number when there is one; otherwise the provider failed after accepting
+        status = raw if isinstance(raw, int) and not isinstance(raw, bool) and 400 <= raw < 600 else 500
+        message = error.get("message")
+        return LlmFailure(
+            (message if isinstance(message, str) else "")[:500]
+            or ui("上游在生成途中出错", "The provider failed partway through"),
+            self._classify(status, json.dumps({"error": error}, ensure_ascii=False)),
+            status=status,
+        )
+
     def finish(self) -> Finish:
+        if self._failure is None and self._finish_reason == "error":
+            self._failure = self._stream_failure({})
+        if self._failure is not None:
+            return Finish(kind="error", failure=self._failure, usage=self._usage)
         if not self._emitted:
             # A normal end with no content is a failure, or the turn would silently end with nothing.
-            from ..errors import EMPTY_RESPONSE, LlmFailure
-
             return Finish(
                 kind="error",
                 failure=LlmFailure(ui("模型返回了空响应", "The model returned an empty response"),
@@ -220,6 +251,14 @@ class OpenAiTranslator(StreamTranslator):
         else:
             kind = "stop"
         return Finish(kind=kind, usage=self._usage)
+
+
+def _listed(payload: object, model: str) -> dict[str, object] | None:
+    """This model's entry in a /models listing (exact id), or None."""
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return None
+    return next((e for e in entries if isinstance(e, dict) and e.get("id") == model), None)
 
 
 def _parse_arguments(text: str) -> dict[str, object]:
@@ -285,17 +324,28 @@ class OpenAiCompatAdapter(ProtocolAdapter):
         Field names vary (context_length, context_window, max_model_len); OpenAI and DeepSeek report
         none. When OpenRouter also reports top_provider.context_length, take the smaller.
         """
-        entries = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(entries, list):
+        entry = _listed(payload, model)
+        if entry is None:
             return None
-        for entry in entries:
-            if isinstance(entry, dict) and entry.get("id") == model:
-                top = entry.get("top_provider")
-                candidates = [entry.get(key) for key in ("context_length", "context_window", "max_model_len")]
-                if isinstance(top, dict):
-                    candidates.append(top.get("context_length"))
-                sizes = [v for v in candidates if isinstance(v, int) and not isinstance(v, bool) and v > 0]
-                return min(sizes) if sizes else None
+        top = entry.get("top_provider")
+        candidates = [entry.get(key) for key in ("context_length", "context_window", "max_model_len")]
+        if isinstance(top, dict):
+            candidates.append(top.get("context_length"))
+        sizes = [v for v in candidates if isinstance(v, int) and not isinstance(v, bool) and v > 0]
+        return min(sizes) if sizes else None
+
+    def input_modalities_from(self, payload: object, model: str) -> frozenset[str] | None:
+        """OpenRouter lists architecture.input_modalities; a top-level input_modalities is the same
+        idea elsewhere. OpenAI and DeepSeek list names only: None, and nothing is assumed.
+        """
+        entry = _listed(payload, model)
+        if entry is None:
+            return None
+        architecture = entry.get("architecture")
+        for declared in (architecture.get("input_modalities") if isinstance(architecture, dict) else None,
+                         entry.get("input_modalities")):
+            if isinstance(declared, list) and declared and all(isinstance(m, str) for m in declared):
+                return frozenset(m.lower() for m in declared)
         return None
 
     def headers(self, api_key: str) -> dict[str, str]:
@@ -327,7 +377,7 @@ class OpenAiCompatAdapter(ProtocolAdapter):
         return body
 
     def translator(self) -> StreamTranslator:
-        return OpenAiTranslator()
+        return OpenAiTranslator(self.classify)
 
     def classify(self, status: int, body: str) -> str:
         detail = self.error_detail(body)

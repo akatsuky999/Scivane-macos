@@ -3,7 +3,6 @@ import SwiftUI
 @main
 struct ScivaneApp: App {
 
-    @AppStorage("appearance") private var appearance: AppAppearance = .system
     @AppStorage("sidebarVisible") private var sidebarVisible = true
     @StateObject private var backend: BackendManager
     @StateObject private var model: AppModel
@@ -24,10 +23,7 @@ struct ScivaneApp: App {
             ContentView(model: model, backend: backend)
                 .frame(minWidth: 960, minHeight: 580)
                 .ignoresSafeArea(.container, edges: .top)
-                .preferredColorScheme(appearance.colorScheme)
-                .onChange(of: appearance) { _, value in value.apply() }
                 .onAppear {
-                    appearance.apply()
                     delegate.backend = backend
                     delegate.model = model
 
@@ -77,7 +73,6 @@ struct ScivaneApp: App {
 
         Settings {
             SettingsView(backend: backend, model: model)
-                .preferredColorScheme(appearance.colorScheme)
         }
     }
 }
@@ -97,6 +92,10 @@ var model: AppModel? {
     }
 }
 
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { AppAppearance.applyStored() }
+    }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
         MainActor.assumeIsolated { let urls = filenames.map { URL(fileURLWithPath: $0) }; if let model { model.add(urls: urls) } else { pendingFiles.append(contentsOf: urls) } }

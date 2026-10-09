@@ -24,12 +24,24 @@ enum AppAppearance: String, CaseIterable, Identifiable {
         case .dark: return .dark
         }
     }
+    /// The app's appearance is NSApp.appearance alone; every window, sheet and popover follows it.
+    /// SwiftUI's preferredColorScheme is deliberately not layered on top: given nil (System) it
+    /// leaves SwiftUI's colorScheme stale while the windows have already switched, so a switch to or
+    /// from System lagged and redrew in bursts.
     @MainActor func apply() {
-        switch self {
-        case .system: NSApp.appearance = nil
-        case .light: NSApp.appearance = NSAppearance(named: .aqua)
-        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        let target: NSAppearance.Name? = switch self {
+        case .system: nil
+        case .light: .aqua
+        case .dark: .darkAqua
         }
+        // every control showing the choice reacts to the same stored value: propagate it once
+        guard NSApp.appearance?.name != target else { return }
+        NSApp.appearance = target.flatMap { NSAppearance(named: $0) }
+    }
+
+    /// The stored choice, applied before the first window draws so it never flashes the system one.
+    @MainActor static func applyStored(from defaults: UserDefaults = .standard) {
+        (defaults.string(forKey: "appearance").flatMap(AppAppearance.init(rawValue:)) ?? .system).apply()
     }
 }
 

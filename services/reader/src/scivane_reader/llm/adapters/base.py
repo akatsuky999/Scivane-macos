@@ -117,6 +117,13 @@ class ProtocolAdapter(ABC):
         """Read the window from the model_info_url response, or None."""
         return None
 
+    def input_modalities_from(self, payload: object, model: str) -> frozenset[str] | None:
+        """What the endpoint declares the model accepts ("text", "image", ...), from the same
+        response; None when it doesn't say. A declaration is the gateway's own contract, so it
+        outranks anything inferred from behaviour.
+        """
+        return None
+
     def classify(self, status: int, body: str) -> str:
         """Map a vendor error to a stable code. Override for structured errors, then fall back to super()."""
         return classify_status(status, body)

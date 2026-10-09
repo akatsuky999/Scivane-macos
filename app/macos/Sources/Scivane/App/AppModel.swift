@@ -462,6 +462,20 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// Drop documents for good, pairings and project links included. A recognition still running on
+  /// one of them is stopped first: its file is about to be gone.
+  func forget(_ ids: Set<DocumentJob.ID>) {
+    guard !ids.isEmpty else { return }
+    if jobs.contains(where: { ids.contains($0.id) && $0.status.isRunning }) { cancelCurrent() }
+    jobs.removeAll { ids.contains($0.id) }
+    comparisons = comparisons.filter { !ids.contains($0.key) && !ids.contains($0.value) }
+    jobProjects = jobProjects.filter { !ids.contains($0.key) }
+    if let selection, ids.contains(selection) {
+      self.selection = nil
+      replayIntoRenderer()
+    }
+  }
+
   func clearFinished() {
     jobs.removeAll { $0.status.isFinished }
     if !jobs.contains(where: { $0.id == selection }) {

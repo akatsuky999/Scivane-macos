@@ -68,11 +68,13 @@ def challenge(rng: random.Random | None = None) -> str:
 
 
 def render(code: str) -> bytes:
-    """The code as a black-on-white greyscale PNG."""
+    """The code as a black-on-white PNG. RGB like every real image this app sends (screenshots,
+    page renders): the probe should take the same decoding path, not a greyscale special case.
+    """
     columns = len(code) * 5 + max(0, len(code) - 1) * _GAP
     width = columns * _SCALE + 2 * _PAD
     height = 7 * _SCALE + 2 * _PAD
-    rows = [bytearray(b"\xff" * width) for _ in range(height)]
+    rows = [bytearray(b"\xff" * (width * 3)) for _ in range(height)]
     for position, char in enumerate(code):
         glyph = _GLYPHS[char]
         left = _PAD + position * (5 + _GAP) * _SCALE
@@ -82,8 +84,8 @@ def render(code: str) -> bytes:
                     continue
                 for dy in range(_SCALE):
                     row = rows[_PAD + y * _SCALE + dy]
-                    start = left + x * _SCALE
-                    row[start:start + _SCALE] = b"\x00" * _SCALE
+                    start = (left + x * _SCALE) * 3
+                    row[start:start + _SCALE * 3] = b"\x00" * (_SCALE * 3)
     raw = b"".join(b"\x00" + bytes(row) for row in rows)
     return _png(width, height, raw)
 
@@ -93,7 +95,7 @@ def _png(width: int, height: int, raw: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + kind + data
                 + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
 
-    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
             + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
@@ -136,18 +138,20 @@ Stream = Callable[[CallRequest], AsyncIterator[StreamChunk]]
 
 
 async def probe(stream: Stream, model: str, *, rng: random.Random | None = None) -> VisionCheck:
-    """Ask once with an image; when the request is rejected as malformed, ask once without one to
-    tell "can't take images" from a card that can't answer anything.
+    """Ask with an image; when the request is rejected as malformed, ask once without one to tell
+    "can't take images" from a card that can't answer anything. A wrong reading is confirmed with
+    a fresh code before it counts as blind: one misread must not shut images off for days, while
+    a model that never saw the image can't read two random codes.
     """
     code = challenge(rng)
-    image = ImageBlock(data=base64.b64encode(render(code)).decode("ascii"), media_type="image/png")
-    request = CallRequest(
-        model=model, messages=(Message("user", (image, TextBlock(PROMPT))),), purpose="background")
-    answer, failure = await _collect(stream, request)
+    answer, failure = await _collect(stream, _request(model, code))
+    if failure is None and not matches(answer, code):
+        code = challenge(rng)
+        answer, failure = await _collect(stream, _request(model, code))
+        if failure is None and not matches(answer, code):
+            return VisionCheck(False, NO_VISION, _blind())
     if failure is None:
-        if matches(answer, code):
-            return VisionCheck(True)
-        return VisionCheck(False, NO_VISION, _blind())
+        return VisionCheck(True)
     if failure.code == NO_VISION:
         return VisionCheck(False, NO_VISION, failure.message)
     if failure.code in (INVALID_ARGS, UNKNOWN):
@@ -158,6 +162,12 @@ async def probe(stream: Stream, model: str, *, rng: random.Random | None = None)
             return VisionCheck(False, NO_VISION, failure.message or _blind())
         return VisionCheck(None, control_failure.code, control_failure.message)
     return VisionCheck(None, failure.code, failure.message)
+
+
+def _request(model: str, code: str) -> CallRequest:
+    image = ImageBlock(data=base64.b64encode(render(code)).decode("ascii"), media_type="image/png")
+    return CallRequest(
+        model=model, messages=(Message("user", (image, TextBlock(PROMPT))),), purpose="background")
 
 
 def _blind() -> str:

@@ -13,6 +13,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -58,9 +59,10 @@ from .types import (
 
 logger = logging.getLogger("scivane.llm")
 
-#: Detected windows expire: '-latest' aliases can switch versions.
+#: What the endpoint's model list says (window, input modalities) expires: '-latest' aliases can
+#: switch versions.
 WINDOW_TTL = 6 * 3600.0
-#: retry a failed probe after this long
+#: ask again after this long when the list said nothing or couldn't be read
 WINDOW_RETRY = 600.0
 #: OpenRouter's model list is several hundred KB
 WINDOW_PROBE_TIMEOUT = 8.0
@@ -110,6 +112,23 @@ class ProviderConfig:
         return self.base_url or self.adapter.default_base_url
 
 
+@dataclass(frozen=True)
+class ModelListing:
+    """What the endpoint's model list says about one model; None where it says nothing."""
+
+    window: int | None = None
+    #: declared input modalities ("text", "image", ...)
+    modalities: frozenset[str] | None = None
+
+    @property
+    def vision(self) -> bool | None:
+        return None if self.modalities is None else "image" in self.modalities
+
+    @property
+    def said_anything(self) -> bool:
+        return self.window is not None or self.modalities is not None
+
+
 @dataclass
 class LlmRegistry:
     credentials: CredentialStore = field(default_factory=lambda: default_credentials)
@@ -128,9 +147,9 @@ class LlmRegistry:
     _gate: asyncio.Semaphore | None = field(default=None, init=False)
     _http: httpx.AsyncClient | None = field(default=None, init=False)
     _http_key: tuple | None = field(default=None, init=False)
-    #: Detected windows keyed by (protocol, base URL, model), so editing a card never reuses a
+    #: Model-list facts keyed by (protocol, base URL, model), so editing a card never reuses a
     #: stale value.
-    _windows: dict[tuple[str, str, str], tuple[int | None, float]] = field(default_factory=dict, init=False)
+    _listings: dict[tuple[str, str, str], tuple[ModelListing, float]] = field(default_factory=dict, init=False)
     #: Vision verdicts, same key; loaded from vision_store on first use. Wall-clock times, since
     #: they are persisted.
     _vision: dict[tuple[str, str, str], tuple[bool, float]] | None = field(default=None, init=False)
@@ -182,26 +201,32 @@ class LlmRegistry:
         return await self.detected_window(provider_id)
 
     async def detected_window(self, provider_id: str) -> int | None:
-        """Ask the endpoint for the model's window. Hits are cached for WINDOW_TTL, misses for WINDOW_RETRY."""
-        config = self.get(provider_id)
-        key = (config.protocol, config.effective_base_url, config.model)
-        found = self._windows.get(key)
-        now = time.monotonic()
-        if found is not None and now - found[1] < (WINDOW_TTL if found[0] else WINDOW_RETRY):
-            return found[0]
-        window = await self._probe_window(config)
-        self._windows[key] = (window, now)
-        return window
+        """Ask the endpoint for the model's window (see _listing for caching)."""
+        return (await self._listing(self.get(provider_id))).window
 
     def _cached_window(self, config: ProviderConfig) -> int | None:
-        found = self._windows.get((config.protocol, config.effective_base_url, config.model))
-        return found[0] if found is not None else None
+        found = self._listings.get(self._model_key(config))
+        return found[0].window if found is not None else None
 
-    async def _probe_window(self, config: ProviderConfig) -> int | None:
+    async def _listing(self, config: ProviderConfig, *, refresh: bool = False) -> ModelListing:
+        """The endpoint's model list, read once for both the window and the modalities. Lists that
+        said something are kept for WINDOW_TTL, the rest for WINDOW_RETRY.
+        """
+        key = self._model_key(config)
+        found = self._listings.get(key)
+        now = time.monotonic()
+        if (not refresh and found is not None
+                and now - found[1] < (WINDOW_TTL if found[0].said_anything else WINDOW_RETRY)):
+            return found[0]
+        listing = await self._read_listing(config)
+        self._listings[key] = (listing, now)
+        return listing
+
+    async def _read_listing(self, config: ProviderConfig) -> ModelListing:
         adapter = config.adapter
         url = adapter.model_info_url(config.effective_base_url, config.model)
         if url is None:
-            return None
+            return ModelListing()
         headers = {"Accept": "application/json"}
         try:
             # same auth headers as chat; ask even without a key, since OpenRouter's list is public
@@ -211,42 +236,73 @@ class LlmRegistry:
         try:
             response = await (await self._client()).get(url, headers=headers, timeout=WINDOW_PROBE_TIMEOUT)
             if response.status_code != 200:
-                return None
-            return adapter.context_window_from(response.json(), config.model)
+                return ModelListing()
+            payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             # provider id and exception type only: URLs and messages may echo secrets
-            logger.info("问上下文窗口没成 provider=%s：%s", config.id, exc.__class__.__name__)
-            return None
+            logger.info("读模型列表没成 provider=%s：%s", config.id, exc.__class__.__name__)
+            return ModelListing()
+        return ModelListing(
+            window=adapter.context_window_from(payload, config.model),
+            modalities=adapter.input_modalities_from(payload, config.model),
+        )
 
     def cached_vision(self, provider_id: str) -> bool | None:
-        """The last vision verdict for this card's model, or None when never checked or expired."""
+        """Whether the card's model reads images, from what is already known: the endpoint's
+        declaration if its list has been read, else the last remembered verdict. None when neither
+        (or it expired). Never makes a request.
+        """
         try:
             config = self.get(provider_id)
         except LlmError:
             return None
+        found = self._listings.get(self._model_key(config))
+        if found is not None and found[0].vision is not None:
+            return found[0].vision
+        return self._remembered_vision(config)
+
+    async def vision(self, provider_id: str, *, refresh: bool = False) -> vision_probe.VisionCheck:
+        """Whether the card's model reads images.
+
+        What the endpoint declares comes first (OpenRouter lists each model's input modalities):
+        it costs no model request, and no misread or routing hiccup can turn into a verdict.
+        Only when nothing is declared is the model shown a probe image. Definite answers are
+        remembered; a probe that couldn't run (no key, quota) is asked again next time.
+        """
+        config = self.get(provider_id)
+        declared = (await self._listing(config, refresh=refresh)).vision
+        if declared is not None:
+            self._remember_vision(config, declared)
+            logger.info("看图检测 provider=%s 结果=%s 来源=接入点声明", provider_id, declared)
+            return _verdict(declared)
+        if not refresh:
+            remembered = self._remembered_vision(config)
+            if remembered is not None:
+                return _verdict(remembered)
+        check = await vision_probe.probe(
+            lambda request: self.stream(provider_id, request), config.model)
+        if check.supported is not None:
+            self._remember_vision(config, check.supported)
+        logger.info("看图检测 provider=%s 结果=%s code=%s 来源=试图", provider_id, check.supported, check.code)
+        return check
+
+    def _remembered_vision(self, config: ProviderConfig) -> bool | None:
         found = self._vision_table().get(self._model_key(config))
         if found is None or time.time() - found[1] > VISION_TTL:
             return None
         return found[0]
 
-    async def vision(self, provider_id: str, *, refresh: bool = False) -> vision_probe.VisionCheck:
-        """Whether the card's model reads images: the cached verdict, else one probe request.
-        Only definite answers are cached; a probe that couldn't run (no key, quota) is asked again.
+    def _remember_vision(self, config: ProviderConfig, verdict: bool) -> None:
+        """Persisted, so a restarted backend (it stops when idle) lists it without a request.
+        Rewritten only when it changes or is halfway to expiring: a declaration is re-read before
+        every transcription.
         """
-        if not refresh:
-            cached = self.cached_vision(provider_id)
-            if cached is not None:
-                return vision_probe.VisionCheck(
-                    cached, None if cached else NO_VISION,
-                    "" if cached else ui("这个模型看不到图片", "This model can't see images"))
-        config = self.get(provider_id)
-        check = await vision_probe.probe(
-            lambda request: self.stream(provider_id, request), config.model)
-        if check.supported is not None:
-            self._vision_table()[self._model_key(config)] = (check.supported, time.time())
-            self._save_vision()
-        logger.info("看图检测 provider=%s 结果=%s code=%s", provider_id, check.supported, check.code)
-        return check
+        key = self._model_key(config)
+        stored = self._vision_table().get(key)
+        if stored is not None and stored[0] == verdict and time.time() - stored[1] < VISION_TTL / 2:
+            return
+        self._vision_table()[key] = (verdict, time.time())
+        self._save_vision()
 
     @staticmethod
     def _model_key(config: ProviderConfig) -> tuple[str, str, str]:
@@ -358,10 +414,13 @@ class LlmRegistry:
         )
 
         async with self._semaphore():
-            async for chunk in self._attempts(
+            # aclosing: a consumer that stops early closes this generator, and the response inside
+            # must close with it rather than whenever the abandoned inner one is collected
+            async with aclosing(self._attempts(
                 await self._client(), adapter, url, headers, payload, request
-            ):
-                yield chunk
+            )) as attempts:
+                async for chunk in attempts:
+                    yield chunk
 
     async def _attempts(
         self,
@@ -396,11 +455,7 @@ class LlmRegistry:
                             raw.decode("utf-8", errors="replace")
                         )
                         detail = adapter.error_detail(body)
-                        code = adapter.classify(response.status_code, body)
-                        # Only with images aboard: elsewhere the same words mean something else.
-                        if (request.has_images and code in (INVALID_ARGS, UNKNOWN)
-                                and looks_like_no_vision(detail)):
-                            code = NO_VISION
+                        code = _vision_aware(adapter.classify(response.status_code, body), detail, request)
                         failure = LlmFailure(
                             message=detail[:500]
                             or ui("上游返回错误", "The provider returned an error"),
@@ -433,7 +488,11 @@ class LlmRegistry:
                         if settled.kind != "error" or settled.failure is None:
                             yield settled
                             return
-                        failure = settled.failure
+                        # reported inside the stream: the same care as an HTTP error body
+                        message = self.credentials.redact(settled.failure.message)
+                        failure = replace(
+                            settled.failure, message=message,
+                            code=_vision_aware(settled.failure.code, message, request))
 
             except asyncio.CancelledError:
                 # Cancellation propagates: async with closes the connection so nothing keeps running.
@@ -471,32 +530,52 @@ class LlmRegistry:
         return self.credentials.redact(str(exc) or exc.__class__.__name__)
 
     async def test(self, provider_id: str) -> dict[str, object]:
-        """Send one minimal request to prove the provider works. Never returns credentials."""
+        """Prove the card works: one request shaped like a chat request, read until the model
+        starts generating. Never returns credentials.
+
+        The model starting to answer (thinking counts) already proves the address, key and model
+        name; the stream is closed there. No output cap is set: a reasoning model spends a small
+        cap on thinking and the answer comes back empty, and some APIs reject the cap's parameter
+        on reasoning models outright. Closing early keeps the cost to the first few tokens.
+        """
         config = self.get(provider_id)
         request = CallRequest(
             model=config.model,
             messages=(Message.text("user", "ping"),),
-            max_tokens=16,
             purpose="background",
         )
-        usage = None
         try:
-            async for chunk in self.stream(provider_id, request):
-                if isinstance(chunk, Finish):
-                    if chunk.kind == "error" and chunk.failure is not None:
-                        return {
-                            "ok": False,
-                            "code": chunk.failure.code,
-                            "message": chunk.failure.message,
-                        }
-                    usage = chunk.usage
+            async with aclosing(self.stream(provider_id, request)) as chunks:
+                async for chunk in chunks:
+                    if isinstance(chunk, (TextDelta, ThinkingDelta, ToolCall)):
+                        break
+                    if isinstance(chunk, Finish):
+                        if chunk.kind == "error" and chunk.failure is not None:
+                            return {
+                                "ok": False,
+                                "code": chunk.failure.code,
+                                "message": chunk.failure.message,
+                            }
+                        break
         except LlmError as exc:
             return {"ok": False, "code": exc.code, "message": exc.failure.message}
-        return {
-            "ok": True,
-            "model": config.model,
-            "usage": usage.as_dict() if usage is not None else None,
-        }
+        return {"ok": True, "model": config.model}
+
+
+def _vision_aware(code: str, detail: str, request: CallRequest) -> str:
+    """A rejection that reads like "this model takes no images" is NO_VISION, but only with images
+    aboard: elsewhere the same words mean something else.
+    """
+    if request.has_images and code in (INVALID_ARGS, UNKNOWN) and looks_like_no_vision(detail):
+        return NO_VISION
+    return code
+
+
+def _verdict(supported: bool) -> vision_probe.VisionCheck:
+    if supported:
+        return vision_probe.VisionCheck(True)
+    return vision_probe.VisionCheck(
+        False, NO_VISION, ui("这个模型看不到图片", "This model can't see images"))
 
 
 async def _counted(

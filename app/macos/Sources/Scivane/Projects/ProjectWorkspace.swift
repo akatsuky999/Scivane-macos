@@ -388,11 +388,18 @@ extension AppModel {
     alert.addButton(withTitle: L("删除", "Delete"))
     alert.addButton(withTitle: L("取消", "Cancel"))
     guard alert.runModal() == .alertFirstButtonReturn else { return }
+    await removeProject(project)
+  }
 
+  /// The deletion itself, once confirmed.
+  func removeProject(_ project: Project) async {
     do {
       try await projectClient.delete(project.id)
       if activeProjectID == project.id { leaveProject() }
-      jobProjects = jobProjects.filter { $0.value != project.id }
+      // Its documents (source, paper text, Markdown from files/) go with it. Only unlinked, they
+      // would turn up among this session's loose documents, pointing at files no longer there.
+      forget(Set(jobProjects.filter { $0.value == project.id }.map(\.key)))
+      projectDocument.removeValue(forKey: project.id)
       await refreshProjects()
       notifyProject(L("已删除项目", "Project deleted"))
     } catch {
