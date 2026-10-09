@@ -7,6 +7,11 @@ from typing import Final
 
 
 class Event:
+    """Events of a recognition stream: local OCR (/ocr) and cloud transcription (/transcribe)
+    alike. Transcription adds usage to page and done, failed_pages to done, and a stable code to
+    error; the names are the same, so one Swift client reads both.
+    """
+
     META: Final = "meta"            # once at start: job_id, page count, file name
     PROGRESS: Final = "progress"    # page N started
     PAGE: Final = "page"            # page N result

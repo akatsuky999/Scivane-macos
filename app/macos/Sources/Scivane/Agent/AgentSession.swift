@@ -201,7 +201,10 @@ final class AgentSession: ObservableObject {
 
   // MARK: - Asking
 
-  func ask(_ question: String, base: URL, provider: String, confirmed: [String] = []) {
+  func ask(
+    _ question: String, base: URL, provider: String, confirmed: [String] = [],
+    images: [ComposerImage] = []
+  ) {
     guard !running, !preparing else { return }
     preparing = true
     running = true
@@ -211,7 +214,7 @@ final class AgentSession: ObservableObject {
     usage = AgentUsage()
     askedAt = Date()
     pacer.reset()
-    items.append(.user(question))
+    items.append(.user(question, images: images.map(TranscriptImage.init(composed:))))
     streamingIndex = nil
 
     let client = AgentClient(base: base)
@@ -228,7 +231,7 @@ final class AgentSession: ObservableObject {
       projectID.map {
         client.chat(
           projectID: $0, question: question, provider: provider,
-          confirmed: confirmed, conversation: conversationID)
+          confirmed: confirmed, conversation: conversationID, images: images)
       } ?? client.deskChat(question: question, provider: provider)
 
     task = Task { [weak self] in
@@ -509,6 +512,35 @@ final class AgentSession: ObservableObject {
 
 // MARK: - Transcript item
 
+/// An image in a question: the bytes just sent, or the stored file of a restored conversation.
+struct TranscriptImage: Identifiable, Hashable {
+  let id: String
+  var data: Data?
+  var path: String?
+  var width: Int?
+  var height: Int?
+
+  init(composed image: ComposerImage) {
+    id = image.id.uuidString
+    data = image.data
+    width = image.width
+    height = image.height
+  }
+
+  init?(restored raw: [String: Any]) {
+    guard let sha = raw["sha256"] as? String else { return nil }
+    id = sha
+    path = raw["path"] as? String
+    width = raw["width"] as? Int
+    height = raw["height"] as? Int
+  }
+
+  var image: NSImage? {
+    if let data { return NSImage(data: data) }
+    return path.flatMap { NSImage(contentsOfFile: $0) }
+  }
+}
+
 /// A struct with a kind rather than an enum: streaming updates edit in place (appended text,
 /// filled-in results, enforcement attached later).
 struct TranscriptItem: Identifiable {
@@ -538,6 +570,8 @@ struct TranscriptItem: Identifiable {
   let id = UUID()
   var kind: Kind
   var text = ""
+  /// user messages: the images sent with the question
+  var images: [TranscriptImage] = []
   /// collapsed by default: useful to judge understanding, but it would push the answer down
   var thinking = ""
 
@@ -579,8 +613,11 @@ struct TranscriptItem: Identifiable {
   }
 
 
-  static func user(_ text: String) -> TranscriptItem {
-    var item = TranscriptItem(kind: .user); item.text = text; return item
+  static func user(_ text: String, images: [TranscriptImage] = []) -> TranscriptItem {
+    var item = TranscriptItem(kind: .user)
+    item.text = text
+    item.images = images
+    return item
   }
   static func assistant(_ text: String) -> TranscriptItem {
     var item = TranscriptItem(kind: .assistant); item.text = text; return item
@@ -668,6 +705,10 @@ struct TranscriptItem: Identifiable {
       return
     }
     text = raw["text"] as? String ?? ""
+    if kind == .user {
+      // field names follow ImageRecord.as_dict(); the backend adds where the file is
+      images = (raw["images"] as? [[String: Any]] ?? []).compactMap(TranscriptImage.init(restored:))
+    }
     if kind == .tool {
       callID = raw["call_id"] as? String ?? ""
       toolName = raw["name"] as? String ?? "?"

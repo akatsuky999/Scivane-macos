@@ -28,13 +28,14 @@ from .types import (
     Usage,
     UsageUpdate,
 )
+from .vision import VisionCheck
 
 logger = logging.getLogger("scivane.llm")
 
 __all__ = [
     "CallRequest", "Message", "TextBlock", "ImageBlock", "ContentBlock",
     "StreamChunk", "TextDelta", "ThinkingDelta", "UsageUpdate", "Finish",
-    "Usage", "Purpose",
+    "Usage", "Purpose", "VisionCheck",
     "LlmError", "LlmFailure", "ALL_CODES",
     "CacheCapability", "CachePlan", "plan_cache", "prefix_fingerprint",
     "RetryPolicy", "Timeouts", "is_retryable", "compute_delay",

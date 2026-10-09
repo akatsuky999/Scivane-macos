@@ -114,7 +114,7 @@ READER_NO_OCR_NOTE = """
 
 ## Local OCR is unavailable
 
-The `reocr` tool mentioned above is not currently available because the optional local OCR component is not installed. Continue to use `edit` for corrections that can be established confidently from context. If a passage is severely corrupted and its intended form cannot be inferred, do not guess: tell the user which pages have unreliable OCR and recommend installing local OCR before rerunning those pages."""
+The `reocr` tool mentioned above is not currently available because the optional local OCR component is not installed. Continue to use `edit` for corrections that can be established confidently from context. If a passage is severely corrupted and its intended form cannot be inferred, do not guess: tell the user which pages are unreliable and suggest recognizing the original again from the app, either with local OCR or with a model that reads images."""
 
 
 class ProjectSource(Protocol):

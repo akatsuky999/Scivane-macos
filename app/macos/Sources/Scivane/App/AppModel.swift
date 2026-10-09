@@ -85,6 +85,11 @@ final class AppModel: ObservableObject {
 
   @Published var projects: [Project] = []
   @Published var activeProjectID: Project.ID?
+  /// project id -> Markdown file under files/ shown in the text pane; absent means the paper text.
+  /// Viewing never changes what the model reads.
+  @Published var projectDocument: [String: String] = [:]
+  /// non-nil: the engine chooser is up for that document
+  @Published var recognitionRequest: RecognitionRequest?
   @Published var projectBusy = false
   @Published var sidebarNavigationBusy = false
   /// A project job's OCR result becomes that project's context.
@@ -266,14 +271,14 @@ final class AppModel: ObservableObject {
   // MARK: - Queue
 
   func add(urls: [URL], to pane: ReadingPane? = nil) {
-    // Markdown imported inside a project means "use this as the paper's text", so it goes through the
-    // project context and its confirmation.
-    if let project = activeProject, pane != .source {
+    // Markdown dropped into a project is kept in its files/ and shown in the text pane. It never
+    // becomes the paper text this way; that takes Replace on the text chip in the chat.
+    if activeProject != nil, pane != .source {
       let markdown = urls.first {
         ["md", "markdown"].contains($0.pathExtension.lowercased())
       }
       if let markdown {
-        Task { await importMarkdownIntoProject(markdown, project: project) }
+        Task { await viewMarkdownInProject(markdown) }
         return
       }
     }
@@ -398,8 +403,28 @@ final class AppModel: ObservableObject {
     startRunner()
   }
 
-  func startOCR(_ job: DocumentJob) {
-    guard job.canStartOCR else { return }
+  /// Open the engine chooser for a document: first recognition or a re-run.
+  func requestRecognition(_ job: DocumentJob) {
+    guard !job.isMarkdown, !job.status.isRunning, job.status != .queued else { return }
+    recognitionRequest = RecognitionRequest(job: job.id)
+  }
+
+  /// Queue a recognition with the chosen engine. Earlier results are cleared: the run replaces them.
+  func startRecognition(_ job: DocumentJob, engine: RecognitionEngine) {
+    guard !job.isMarkdown, !job.status.isRunning, job.status != .queued else { return }
+    job.engine = engine
+    job.engineModel = engine.provider.flatMap { id in providers.first { $0.id == id }?.model } ?? ""
+    if job.hasResult {
+      job.pages = [:]
+      job.consolidated = ""
+      job.plainText = ""
+      job.exportedTo = nil
+      if job.id == readingDocument?.id { replayIntoRenderer() }
+    }
+    job.elapsed = 0
+    job.activePage = 0
+    job.usage = nil
+    job.failedPages = []
     job.status = .queued
     startRunner()
   }
@@ -465,19 +490,25 @@ final class AppModel: ObservableObject {
   }
 
   private func run(_ job: DocumentJob) async {
-    // Local OCR is optional: ask the light backend before upgrading. Upgrading stops the light
-    // backend, and a full backend that can't start would take recognition and the project list down
-    // with it, behind an unrelated error.
-    if backend.runningMode != .full, !(await ocrAvailable()) {
-      for pending in jobs where pending.id == job.id || pending.status == .queued {
-        pending.status = .ready
-        if !awaitingOCR.contains(pending.id) { awaitingOCR.append(pending.id) }
-      }
-      return
-    }
-    // it may have been stopped after idling; make sure it is up
     let generation = runGeneration
-    backend.ensureRunning()
+    let provider = job.engine.provider
+    if provider == nil {
+      // Local OCR is optional: ask the light backend before upgrading. Upgrading stops the light
+      // backend, and a full backend that can't start would take recognition and the project list
+      // down with it, behind an unrelated error.
+      if backend.runningMode != .full, !(await ocrAvailable()) {
+        for pending in jobs where pending.id == job.id
+          || (pending.status == .queued && pending.engine == .local)
+        {
+          pending.status = .ready
+          if !awaitingOCR.contains(pending.id) { awaitingOCR.append(pending.id) }
+        }
+        return
+      }
+    }
+    // It may have been stopped after idling; make sure it is up. A model card needs no OCR engine,
+    // so the light backend is enough.
+    backend.ensureRunning(mode: provider == nil ? .full : .lite)
     while !backend.state.isReady {
       if case .failed(let message) = backend.state {
         job.status = .failed(message)
@@ -486,15 +517,18 @@ final class AppModel: ObservableObject {
       try? await Task.sleep(nanoseconds: 800_000_000)
       if Task.isCancelled { return }
     }
+    if provider != nil { await injectCredentials() }
 
     guard generation == runGeneration, !Task.isCancelled else { return }
     job.status = .running(done: 0, total: job.pageCount)
     job.activePage = 0
     let client = OCRClient(base: backend.apiBase)
     self.client = client
+    let stream = provider.map { client.transcribe(path: job.url.path, provider: $0) }
+      ?? client.recognise(path: job.url.path)
 
     do {
-      for try await event in client.recognise(path: job.url.path) {
+      for try await event in stream {
         guard generation == runGeneration else { return }
         if Task.isCancelled {
           job.status = .cancelled
@@ -514,20 +548,23 @@ final class AppModel: ObservableObject {
             job.status = .running(done: job.pages.count, total: total)
           }
 
-        case .page(let index, let total, let markdown, let elapsed):
+        case .page(let index, let total, let markdown, let elapsed, let usage):
           // first page is back: a fresh install's first load is over
-          ocrInstaller.freshlyInstalled = false
+          if provider == nil { ocrInstaller.freshlyInstalled = false }
           job.pages[index] = markdown
           job.elapsed = elapsed
+          if let usage { job.usage = usage }
           job.status = .running(done: job.pages.count, total: max(total, job.pageCount))
           if job.id == readingDocument?.id && mode == .read {
             renderBridge?("setPage", [index, markdown])
           }
 
-        case .done(let markdown, let text, let elapsed, let cancelled):
+        case .done(let markdown, let text, let elapsed, let cancelled, let failedPages, let usage):
           job.elapsed = elapsed
           job.consolidated = markdown
           job.plainText = text
+          job.failedPages = failedPages
+          if let usage { job.usage = usage }
           job.status = cancelled ? .cancelled : .finished(seconds: elapsed)
           if !cancelled {
             ResultCache.save(job, root: backend.varRoot)
@@ -540,9 +577,9 @@ final class AppModel: ObservableObject {
             }
           }
 
-        case .failed(let message):
-          // the backend's own wording, in the language of the request
-          job.status = .failed(.verbatim(message))
+        case .failed(let message, let code):
+          // stable codes are phrased here; anything else is the backend's own wording
+          job.status = .failed(ModelFailure.describe(code: code, message: message))
         }
       }
       if generation == runGeneration, case .running = job.status {
@@ -579,16 +616,9 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// Run again with the same engine (the progress bar's Retry).
   func retry(_ job: DocumentJob) {
-    guard !job.isMarkdown, !job.status.isRunning, job.status != .queued else { return }
-    job.elapsed = 0
-    job.activePage = 0
-    job.plainText = ""
-    job.exportedTo = nil
-    job.pages = [:]
-    job.consolidated = ""
-    job.status = .queued
-    startRunner()
+    startRecognition(job, engine: job.engine)
   }
 
   // MARK: - Export

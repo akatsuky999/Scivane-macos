@@ -7,16 +7,18 @@ struct DocumentActions: View {
         if model.canBuildProject(job) {
             Button(L("构建项目", "Build Project")) { Task { await model.buildProject(from: job) } }
         }
-        if job.canStartOCR { Button(L("开始 OCR", "Start OCR")) { model.startOCR(job) } }
+        // every engine choice goes through the chooser: local OCR may not be installed here
+        if job.canStartOCR {
+            Button(L("识别原稿…", "Recognize Original…")) { model.requestRecognition(job) }
+        } else if !job.isMarkdown && !job.status.isRunning && job.status != .queued {
+            Button(L("重新识别…", "Recognize Again…")) { model.requestRecognition(job) }
+        }
         Button(L("阅读文档", "Read Document")) { model.select(job); model.mode = .read }
         Button(L("复制 Markdown", "Copy Markdown")) { model.copyMarkdown(job) }.disabled(!job.hasResult)
         Button(L("导出 Markdown…", "Export Markdown…")) { model.exportOne(job) }.disabled(!job.hasResult)
         if job.isMarkdown { Button(L("重新载入 Markdown", "Reload Markdown")) { model.reloadMarkdown(job) } }
-        if !job.isMarkdown && job.hasResult && !job.status.isRunning { Button(L("重新 OCR", "Re-run OCR")) { model.retry(job) } }
         Divider()
         Button(L("在 Finder 中显示原文件", "Show Original in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
-        if case .failed = job.status { Button(L("重新识别", "Run OCR Again")) { model.retry(job) } }
-        if case .cancelled = job.status { Button(L("重新识别", "Run OCR Again")) { model.retry(job) } }
         Divider()
         Button(L("从列表移除", "Remove from List")) { model.remove(job) }.disabled(job.status.isRunning)
     }

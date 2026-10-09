@@ -9,16 +9,22 @@ at runtime.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ..i18n import ui
-from ..llm.types import Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ..llm.types import ContentBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
 from .annotations import COLOR_NAMES, KIND_NAMES
+from .attachments import ImageRecord
 from .model import ProjectEvent
 
+#: Turns an image named in the log into what the model sees (attachments.AttachmentStore.block).
+ImageLoader = Callable[[ImageRecord], ContentBlock]
+
 __all__ = [
-    "History", "derive_history", "derive_messages", "derive_transcript", "summarise_call",
+    "History", "ImageLoader", "derive_history", "derive_messages", "derive_transcript",
+    "summarise_call", "user_content",
     "MISSING_RESULT_TEXT", "MISSING_RESULT_CODE", "CHECKPOINT_PREAMBLE", "checkpoint_text",
     "compaction_item",
 ]
@@ -107,13 +113,25 @@ class History:
         return tuple(messages)
 
 
-def derive_history(events: Iterable[dict[str, Any]]) -> History:
+def user_content(text: str, images: Iterable[ContentBlock]) -> tuple[ContentBlock, ...]:
+    """A question as the model sees it: images first, as providers recommend, then the words."""
+    blocks = list(images)
+    if text:
+        blocks.append(TextBlock(text))
+    return tuple(blocks)
+
+
+def derive_history(
+    events: Iterable[dict[str, Any]], *, images: ImageLoader | None = None
+) -> History:
     """Project log events into a history grouped by turn.
 
     Only message, tool and compaction events count. Lifecycle events and tool/decision are skipped:
     approvals are host-side facts and would make the model comment on its own permissions.
     Malformed events are skipped; a compaction claiming more turns than existed when it was
-    written is clamped.
+    written is clamped. Images in user messages are named by hash; `images` turns them back into
+    blocks (without it, they become a fixed note, which is all a projection that sends nothing
+    needs).
     """
     turns: list[list[Message]] = [[]]
     turn = _Turn()
@@ -157,8 +175,13 @@ def derive_history(events: Iterable[dict[str, Any]]) -> History:
         if kind == ProjectEvent.USER_MESSAGE:
             flush()
             text = data.get("text")
-            if isinstance(text, str) and text:
-                turns.append([Message.text("user", text)])
+            text = text if isinstance(text, str) else ""
+            records = [r for r in map(ImageRecord.from_dict, data.get("images") or []) if r is not None]
+            blocks = user_content(text, (
+                images(record) if images is not None else TextBlock(f"[image {record.sha256[:12]}]")
+                for record in records))
+            if blocks:
+                turns.append([Message("user", blocks)])
 
         elif kind == ProjectEvent.ASSISTANT_MESSAGE:
             # a new assistant message ends the previous step and its results
@@ -209,9 +232,11 @@ def derive_history(events: Iterable[dict[str, Any]]) -> History:
     )
 
 
-def derive_messages(events: Iterable[dict[str, Any]]) -> tuple[Message, ...]:
+def derive_messages(
+    events: Iterable[dict[str, Any]], *, images: ImageLoader | None = None
+) -> tuple[Message, ...]:
     """History sent to the model: the latest summary (if any) plus the turns after it."""
-    return derive_history(events).visible()
+    return derive_history(events, images=images).visible()
 
 
 def summarise_call(name: str, arguments: dict) -> str:
@@ -292,8 +317,13 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
         if kind == ProjectEvent.USER_MESSAGE:
             text = data.get("text")
-            if isinstance(text, str) and text:
-                items.append({"kind": "user", "text": text, "at": at})
+            text = text if isinstance(text, str) else ""
+            records = [r for r in map(ImageRecord.from_dict, data.get("images") or []) if r is not None]
+            if text or records:
+                item: dict[str, Any] = {"kind": "user", "text": text, "at": at}
+                if records:
+                    item["images"] = [record.as_dict() for record in records]
+                items.append(item)
 
         elif kind == ProjectEvent.ASSISTANT_MESSAGE:
             text = data.get("text")

@@ -8,6 +8,8 @@ bodies are never forwarded, and every cancelled tool call still gets a result.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -16,7 +18,7 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .. import config
 from ..i18n import ui
@@ -26,6 +28,7 @@ from ..llm.registry import registry as llm_registry
 from ..llm.estimate import estimate_request
 from ..llm.types import CallRequest, Finish, TextDelta, ThinkingDelta, UsageUpdate
 from ..projects import ProjectError, assemble, projects
+from ..projects.attachments import AttachmentError, ImageRecord
 from ..projects.compaction import Compactor, CompactionError, auto_threshold, occupy
 from ..projects.compaction import release as release_conversation
 from ..projects.context import paper_message
@@ -41,8 +44,16 @@ logger = logging.getLogger("scivane.api.agent")
 router = APIRouter(tags=["agent"])
 
 
+class ImageIn(BaseModel):
+    """An image attached to a question, base64-encoded. The type is read from the bytes, not
+    taken from the client."""
+
+    data: str = Field(min_length=1)
+
+
 class ChatIn(BaseModel):
-    question: str = Field(min_length=1)
+    #: may be empty when images carry the question
+    question: str = ""
     provider: str = Field(min_length=1)
     model: str | None = None
     #: Top-level dirs the user confirmed as writable for this call, e.g. ["notes"].
@@ -50,6 +61,13 @@ class ChatIn(BaseModel):
     max_steps: int | None = None
     #: Conversation to continue; defaults to the most recent one (or a new one).
     conversation: str | None = None
+    images: list[ImageIn] = Field(default_factory=list, max_length=config.CHAT_IMAGES_PER_MESSAGE)
+
+    @model_validator(mode="after")
+    def _something_to_ask(self) -> "ChatIn":
+        if not self.question.strip() and not self.images:
+            raise ValueError("question 与 images 至少要有一个")
+        return self
 
     @field_validator("confirmed")
     @classmethod
@@ -149,9 +167,9 @@ class StreamingJournal:
             record = self._meter.step_record() if self._meter is not None else {}
             self._store.assistant_message(text, stop=stop, **record)
 
-    def user_message(self, text: str) -> None:
+    def user_message(self, text: str, images: list[dict] | None = None) -> None:
         if self._store:
-            self._store.user_message(text)
+            self._store.user_message(text, images)
 
 
 async def _pump(
@@ -209,6 +227,32 @@ def _request_shape(request, provider_id: str, job_id: str) -> dict[str, object]:
         "paper_chars": sum(len(getattr(b, "text", "")) for b in paper.content) if paper else 0,
         "messages": len(request.messages),
     }
+
+
+def _store_images(body: ChatIn, attachments) -> list[ImageRecord]:
+    """Decode, check and store the question's images. A card known to be text-only is refused
+    before anything is written or sent; an unchecked card is tried, and the provider's refusal
+    then comes back as NO_VISION.
+    """
+    if not body.images:
+        return []
+    if llm_registry.cached_vision(body.provider) is False:
+        raise HTTPException(status_code=409, detail=ui(
+            "这张模型卡看不到图片 —— 换一张能看图的卡，或者去掉图片再发。",
+            "This model card can't see images — switch to one that can, or send without the images."))
+    records = []
+    for image in body.images:
+        try:
+            data = base64.b64decode(image.data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=ui("图片数据不是合法的 base64",
+                                                           "The image data isn't valid base64")) from exc
+        try:
+            records.append(attachments.put(data))
+        except AttachmentError as exc:
+            raise HTTPException(status_code=413 if exc.code == "IMAGE_TOO_LARGE" else 400,
+                                detail=str(exc)) from exc
+    return records
 
 
 def _provider_model(provider_id: str, override: str | None) -> str:
@@ -376,11 +420,13 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
     if not markdown.strip():
         raise HTTPException(
             status_code=409,
-            detail=ui("这个项目还没有正文 —— 先识别原稿，或导入一份 Markdown。",
-                      "This project has no text yet — run OCR on the original, or import a Markdown file."),
+            detail=ui("这个项目还没有正文 —— 先识别原稿，或换成一份 Markdown。",
+                      "This project has no text yet — recognize the original, or use a Markdown file."),
         )
 
     model = _provider_model(body.provider, body.model)
+    attachments = projects.attachments(project_id)
+    records = _store_images(body, attachments)
     try:
         conversation = projects.ensure_conversation(project_id, body.conversation)
     except ProjectError as exc:
@@ -388,7 +434,7 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
     # History is projected from the log, the only reason a conversation survives a restart.
     # Never keep a second copy.
     events = list(projects.events(project_id, conversation=conversation))
-    history = list(derive_messages(events))
+    history = list(derive_messages(events, images=attachments.block))
 
     # Fix the job id first so the reader's context carries the cancel signal; only reader()
     # builds that context.
@@ -403,14 +449,11 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
         request = assemble(
             project, markdown, body.question, history,
             model=model, tools=agent.schemas(), system=agent.system,
+            images=[attachments.block(record) for record in records],
         )
     except ValueError as exc:
         # Unconfirmed context must never reach the model; say what to do instead of a 500.
-        raise HTTPException(
-            status_code=409,
-            detail=ui(f"{exc} —— 在项目上右键确认这份正文之后再提问。",
-                      f"{exc} — right-click the project and confirm this text, then ask again."),
-        ) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     window = await _window(body.provider)
     # One writer per conversation: a concurrent turn or compaction would interleave the log.
@@ -431,11 +474,12 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
             on_context=lambda report: emitter.emit(AgentEvent.CONTEXT, report.as_dict()),
             on_compaction=lambda payload: emitter.emit(AgentEvent.COMPACTION, payload),
             cancelled=lambda: jobs.is_cancelled(job_id),
+            images=attachments.block,
         )
         journal = StreamingJournal(
             StoreJournal(projects, project_id, conversation), emitter, meter=compactor
         )
-        journal.user_message(body.question)
+        journal.user_message(body.question, [record.as_dict() for record in records])
 
         # No proxy means no network: tools get no credentials and the sandbox stays offline.
         network = getattr(http.app.state, "network", None)
@@ -499,6 +543,13 @@ async def project_transcript(project_id: str, conversation: str | None = None):
         items = derive_transcript(projects.events(project_id, conversation=target))
     except ProjectError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # the app shows attached images from disk, like the source PDF
+    store = projects.attachments(project_id)
+    for item in items:
+        for image in item.get("images", ()):
+            record = ImageRecord.from_dict(image)
+            if record is not None:
+                image["path"] = str(store.path(record))
     return {"items": items, "conversation": target}
 
 
@@ -536,6 +587,7 @@ async def project_context(
         tools=agent.schemas(), paper=paper,
         stream=lambda call: llm_registry.stream(provider or "", call),
         window=window, ratio=calibration(events),
+        images=projects.attachments(project_id).block,
     )
     return meter.idle_report().as_dict()
 
@@ -562,8 +614,8 @@ async def project_compact(project_id: str, body: CompactIn):
     markdown = _paper_text(project_id)
     if not markdown.strip():
         raise HTTPException(status_code=409, detail=ui(
-            "这个项目还没有正文 —— 先识别原稿，或导入一份 Markdown。",
-            "This project has no text yet — run OCR on the original, or import a Markdown file."))
+            "这个项目还没有正文 —— 先识别原稿，或换成一份 Markdown。",
+            "This project has no text yet — recognize the original, or use a Markdown file."))
     model = _provider_model(body.provider, body.model)
     window = await _window(body.provider)
     if not occupy(project_id, target):
@@ -583,6 +635,7 @@ async def project_compact(project_id: str, body: CompactIn):
             on_context=lambda report: emitter.emit(AgentEvent.CONTEXT, report.as_dict()),
             on_compaction=lambda payload: emitter.emit(AgentEvent.COMPACTION, payload),
             cancelled=lambda: jobs.is_cancelled(job_id),
+            images=projects.attachments(project_id).block,
         )
 
         async def work() -> None:

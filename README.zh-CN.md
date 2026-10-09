@@ -64,9 +64,12 @@ make app
 
 用 Claude 或 Gemini：点「＋ 新建卡片」→「自定义」，协议选 Anthropic 或 Google Gemini，接入地址分别填 `https://api.anthropic.com` 和 `https://generativelanguage.googleapis.com`。
 
-### 4 · 本地 OCR（可选）
+### 4 · 把 PDF 识别成 Markdown
 
-只有把 PDF 识别成 Markdown 时才需要。第一次点「开始 OCR」时按提示安装即可，下载约 2.2 GB。
+问答之前，先把论文识别成 Markdown。点「识别原稿…」，二选一：
+
+- **云端模型**：用你配好 key 的模型卡逐页转写，什么都不用装，费用走你自己的 key。卡上的模型要能读图片 —— 纯文字模型做不了，面板上会标出来。
+- **本地 OCR**（可选）：在本机识别，不花 token。第一次选它时按提示安装，下载约 2.2 GB。
 
 ### 更新
 

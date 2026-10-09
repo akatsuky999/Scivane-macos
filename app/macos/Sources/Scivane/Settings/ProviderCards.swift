@@ -61,6 +61,11 @@ struct ProviderCardHeader: View {
           if let window = provider.window {
             chip(UsageMeter.compact(window), tint: Palette.inkFaint)
           }
+          // known only after a check; nothing is guessed from the model name
+          if let vision = provider.vision {
+            chip(vision ? L("看图", "Images") : L("纯文字", "Text only"),
+                 tint: vision ? Palette.accent : Palette.inkFaint)
+          }
           keyChip
           Spacer(minLength: 0)
         }

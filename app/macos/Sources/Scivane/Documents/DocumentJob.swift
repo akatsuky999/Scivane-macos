@@ -48,6 +48,13 @@ final class DocumentJob: ObservableObject, Identifiable {
     @Published var elapsed: Double = 0
     /// dense pages take over ten seconds; without this the UI looks frozen
     @Published var activePage: Int = 0
+    /// what this run recognises with; a retry keeps it
+    @Published var engine: RecognitionEngine = .local
+    /// the card's model name while a cloud run is on, for the status line
+    @Published var engineModel = ""
+    /// cloud runs only: tokens so far, and pages that still failed after their retries
+    @Published var usage: AgentUsage?
+    @Published var failedPages: [Int] = []
 
     let pdf: PDFDocument?
     let image: NSImage?

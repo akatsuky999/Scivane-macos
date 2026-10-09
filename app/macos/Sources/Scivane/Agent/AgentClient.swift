@@ -161,12 +161,16 @@ final class AgentClient: NSObject, @unchecked Sendable {
   /// - Parameter conversation: nil means the most recent one.
   func chat(
     projectID: String, question: String, provider: String,
-    confirmed: [String] = [], conversation: String? = nil
+    confirmed: [String] = [], conversation: String? = nil, images: [ComposerImage] = []
   ) -> AsyncThrowingStream<Event, Error> {
     var body: [String: Any] = [
       "question": question, "provider": provider, "confirmed": confirmed,
     ]
     if let conversation { body["conversation"] = conversation }
+    if !images.isEmpty {
+      // the backend reads the type from the bytes; only the data goes
+      body["images"] = images.map { ["data": $0.data.base64EncodedString()] }
+    }
     return stream(path: "projects/\(projectID)/agent/chat", body: body)
   }
 

@@ -16,6 +16,8 @@ __all__ = [
     "VL_MAX_CONCURRENCY", "LLAMA_CTX_SIZE",
     "LLM_PROVIDERS_PATH", "LLM_CONNECT_TIMEOUT", "LLM_FIRST_TOKEN_TIMEOUT",
     "LLM_TOTAL_TIMEOUT", "LLM_MAX_RETRIES", "LLM_CONCURRENCY", "LLM_KEEPALIVE",
+    "VISION_CACHE_PATH", "TRANSCRIBE_LONG_EDGE", "TRANSCRIBE_CONCURRENCY",
+    "CHAT_IMAGE_MAX_BYTES", "CHAT_IMAGES_PER_MESSAGE",
     "TIMING", "TIMING_LOG",
     "PROJECTS_DIR",
     "AGENT_RUNTIME_DIR", "ANALYSIS_ENV_DIR", "PYTHON_DIR", "SANDBOX_DIR", "SANDBOX_HOOKS_DIR",
@@ -71,6 +73,23 @@ LLM_CONCURRENCY = int(os.environ.get("SCIVANE_LLM_CONCURRENCY", "4"))
 # Keep idle provider connections well past httpx's 5 s default;
 # reconnecting before every question added seconds to each turn.
 LLM_KEEPALIVE = float(os.environ.get("SCIVANE_LLM_KEEPALIVE", "300"))
+
+# Whether each card's model reads images, as last probed. Disposable: a missing file costs one
+# small request per card.
+VISION_CACHE_PATH = VAR_DIR / "vision.json"
+
+# Cloud transcription renders each page at this long edge (pixels). Dense two-column pages need
+# about this much for subscripts; providers downscale anything larger anyway.
+TRANSCRIBE_LONG_EDGE = int(os.environ.get("SCIVANE_TRANSCRIBE_LONG_EDGE", "2000"))
+# Pages in flight at once. Kept below LLM_CONCURRENCY so a chat question still gets a connection
+# while a paper is being transcribed.
+TRANSCRIBE_CONCURRENCY = max(1, min(
+    int(os.environ.get("SCIVANE_TRANSCRIBE_CONCURRENCY", "3")), LLM_CONCURRENCY - 1 or 1))
+
+# Images attached to a chat message. The app scales them down first; these are the backstop.
+# 3.75 MB raw stays under the strictest provider limit (5 MB once base64-encoded).
+CHAT_IMAGE_MAX_BYTES = 3_750_000
+CHAT_IMAGES_PER_MESSAGE = 8
 
 # Per-turn timing log (llm/timing.py). Off by default; numbers only, never content or credentials.
 TIMING = os.environ.get("SCIVANE_TIMING", "") == "1"

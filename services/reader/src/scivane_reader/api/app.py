@@ -15,6 +15,7 @@ from .agent_routes import router as agent_router
 from .llm_routes import router as llm_router
 from .project_routes import router as project_router
 from .routes import router
+from .transcribe_routes import router as transcribe_router
 
 logger = logging.getLogger("scivane.api")
 
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
     llm_registry.policy = RetryPolicy(max_retries=config.LLM_MAX_RETRIES)
     llm_registry.max_concurrency = config.LLM_CONCURRENCY
     llm_registry.keepalive = config.LLM_KEEPALIVE
+    llm_registry.vision_store = config.VISION_CACHE_PATH
     loaded = load_providers(config.LLM_PROVIDERS_PATH)
     logger.info(
         "大模型 provider 已加载 %d 个（配置：%s）", loaded, config.LLM_PROVIDERS_PATH
@@ -87,9 +89,10 @@ class UILanguage:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Scivane Reader", version="0.0.3", lifespan=lifespan)
+    app = FastAPI(title="Scivane Reader", version="0.0.4", lifespan=lifespan)
     app.add_middleware(UILanguage)
     app.include_router(router)
+    app.include_router(transcribe_router)
     app.include_router(llm_router)
     app.include_router(project_router)
     app.include_router(agent_router)

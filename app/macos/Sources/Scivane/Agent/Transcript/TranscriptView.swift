@@ -165,7 +165,7 @@ struct AgentTranscript: View {
   @ViewBuilder
   private func row(_ item: TranscriptItem) -> some View {
     switch item.kind {
-    case .user: UserLine(text: item.text)
+    case .user: UserLine(text: item.text, images: item.images)
     case .assistant:
       AssistantLine(item: item, streaming: item.id == session.streamingID,
                     live: session.pacer, showThinking: expansion(for: item.id.uuidString))

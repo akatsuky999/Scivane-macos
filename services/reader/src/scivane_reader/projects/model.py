@@ -12,8 +12,9 @@ TitleSource: TypeAlias = Literal[
     "placeholder", "filename", "pdf-metadata", "pdf-heading", "markdown-heading", "manual"
 ]
 
-#: OCR output belongs to the source document by construction; uploads need confirmation.
-ContextOrigin: TypeAlias = Literal["ocr", "upload"]
+#: How the paper text came to be: local OCR, a vision model transcribing the source, or a Markdown
+#: file the user chose. Each is a deliberate act of the user, which is what lets it feed answers.
+ContextOrigin: TypeAlias = Literal["ocr", "model", "upload"]
 
 #: On-disk layout version.
 #:
@@ -35,11 +36,13 @@ class ContextState:
     chars: int
     tokens: int
     updated_at: str
-    #: Uploaded Markdown may not be this paper; it counts only once a person confirms it.
-    #: OCR output is confirmed from the start.
+    #: Always true for text written now. Older versions let an imported Markdown file wait for a
+    #: confirmation that no longer exists; such text stays out of answers until it is replaced.
     confirmed: bool = True
-    #: OCR job that produced this context, to trace image crops
+    #: OCR or transcription job that produced this context, to trace image crops
     job_id: str | None = None
+    #: the model that transcribed the source (origin "model"), for display
+    model: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -54,6 +57,7 @@ class ContextState:
             updated_at=raw.get("updated_at", ""),
             confirmed=bool(raw.get("confirmed", True)),
             job_id=raw.get("job_id"),
+            model=raw.get("model") if isinstance(raw.get("model"), str) else None,
         )
 
 
@@ -82,7 +86,7 @@ class Project:
 
     @property
     def has_usable_context(self) -> bool:
-        """Whether the context may be fed to the model; unconfirmed uploads may not."""
+        """Whether the context may be fed to the model; an old unconfirmed import may not."""
         return self.context is not None and self.context.confirmed
 
     def as_dict(self) -> dict[str, Any]:
@@ -120,6 +124,8 @@ class ProjectEvent:
     CREATED = "project/created"
     TITLE_CHANGED = "project/title-changed"
     CONTEXT_REPLACED = "context/replaced"
+    #: written by older versions when an imported Markdown file was confirmed or withdrawn; read
+    #: only, kept so old logs still name their events
     CONTEXT_CONFIRMED = "context/confirmed"
     CONTEXT_REJECTED = "context/rejected"
     #: layout upgrade: from, to, and where the backup is

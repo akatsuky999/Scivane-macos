@@ -41,6 +41,15 @@ struct ContentView: View {
           .padding(.bottom, 58).allowsHitTesting(false)
       }
     }
+    .sheet(item: $model.recognitionRequest) { request in
+      if let job = model.jobs.first(where: { $0.id == request.job }) {
+        RecognitionSheet(
+          model: model, installer: model.ocrInstaller, job: job,
+          replacesText: model.jobProjects[job.id].flatMap { id in
+            model.projects.first { $0.id == id }?.hasUsableContext } ?? false,
+          dismiss: { model.recognitionRequest = nil })
+      }
+    }
     .task(id: model.noticeID) {
       guard model.notice != nil else { return }
       do { try await Task.sleep(nanoseconds: 2_200_000_000) } catch { return }
@@ -172,8 +181,12 @@ struct ContentView: View {
       }
 
       Menu {
-        if let source = model.readingSource, source.canStartOCR {
-          Button(L("开始 OCR", "Start OCR")) { model.startOCR(source) }
+        if let source = model.readingSource, !source.isMarkdown, !source.status.isRunning,
+          source.status != .queued
+        {
+          Button(hasText(source) ? L("重新识别…", "Recognize Again…") : L("识别原稿…", "Recognize Original…")) {
+            model.requestRecognition(source)
+          }
           Divider()
         }
         // Not disabled without a text pane: the dialog also sets the conversation text size.
@@ -203,6 +216,12 @@ struct ContentView: View {
     .buttonStyle(ToolButtonStyle()).foregroundStyle(Palette.inkSoft)
     .padding(.horizontal, 16).padding(.leading, sidebarVisible ? 0 : 76)
     .frame(height: 46)
+  }
+
+  /// Recognised already, in this session or as its project's paper text.
+  private func hasText(_ source: DocumentJob) -> Bool {
+    source.hasResult || model.jobProjects[source.id].flatMap { id in
+      model.projects.first { $0.id == id }?.hasUsableContext } == true
   }
 
   /// The project name, not the on-disk file name (every source copy is called source.pdf).

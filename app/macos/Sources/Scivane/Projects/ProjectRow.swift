@@ -58,11 +58,6 @@ struct ProjectRow<Trailing: View>: View {
           .font(.system(size: 12, weight: .medium))
           .lineLimit(1).truncationMode(.tail)
         Spacer(minLength: 6)
-        if project.awaitsConfirmation {
-          Image(systemName: "exclamationmark.circle").font(.system(size: 11))
-            .foregroundStyle(ActivityCard.amber)
-            .help(L("正文待确认", "Text awaiting confirmation"))
-        }
       }.foregroundStyle(isActive ? Palette.ink : Palette.inkSoft)
         .padding(.leading, toggleExpanded == nil ? SidebarMetrics.inset : 0).padding(.trailing, 4)
         .frame(height: SidebarMetrics.treeRow).frame(maxWidth: .infinity, alignment: .leading)
@@ -90,7 +85,8 @@ struct ProjectRow<Trailing: View>: View {
   }
 }
 
-/// Context menu: re-run OCR, replace with an upload, delete.
+/// Context menu: recognise the source, reveal, delete. Replacing the text with a Markdown file
+/// lives on the text chip in the chat, the one place that changes it.
 struct ProjectActions: View {
   @ObservedObject var model: AppModel
   let project: Project
@@ -108,7 +104,7 @@ struct ProjectActions: View {
     // An empty project has no source to recognise yet; offer to attach a PDF instead of two buttons
     // of which only one works.
     if project.hasSource {
-      Button(project.context == nil ? L("开始识别原稿", "Run OCR on the Original") : L("重新识别并覆盖正文", "Re-run OCR and Replace the Text")) {
+      Button(L("识别原稿…", "Recognize Original…")) {
         Task {
           await model.enterProject(project)
           model.reOCRActiveProject()
@@ -116,10 +112,6 @@ struct ProjectActions: View {
       }
     } else {
       Button(L("导入 PDF 作为原稿…", "Import a PDF as the Original…")) { model.chooseSourceForProject(project) }
-    }
-    Button(L("导入 Markdown 覆盖正文…", "Import Markdown to Replace the Text…")) {
-      Task { await model.enterProject(project) }
-      model.chooseMarkdownForProject(project)
     }
     Divider()
     Button(L("在 Finder 中显示项目", "Show Project in Finder")) {
@@ -129,35 +121,6 @@ struct ProjectActions: View {
     Button(L("删除项目…", "Delete Project…"), role: .destructive) {
       Task { await model.deleteProject(project) }
     }
-  }
-}
-
-/// Shown while the text awaits confirmation. An uploaded Markdown file may not be this paper, and
-/// the model would answer confidently from the wrong text, so it is excluded from answers until
-/// someone confirms it.
-struct ContextConfirmBar: View {
-  @ObservedObject var model: AppModel
-  let project: Project
-
-  var body: some View {
-    HStack(spacing: 10) {
-      Image(systemName: "questionmark.circle.fill")
-        .font(.system(size: 12)).foregroundStyle(Palette.accent)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(L("这份 Markdown 是「\(project.displayTitle)」的正文吗？", "Is this Markdown the text of “\(project.displayTitle)”?"))
-          .font(.system(size: 11.5, weight: .medium)).foregroundStyle(Palette.ink)
-        Text(L("确认后它才会参与问答", "It's used for questions only after you confirm"))
-          .font(.system(size: 10)).foregroundStyle(Palette.inkFaint)
-      }
-      Spacer(minLength: 8)
-      Button(L("撤销", "Withdraw")) { Task { await model.confirmProjectContext(false) } }
-        .buttonStyle(StudioButtonStyle())
-      Button(L("确认使用", "Confirm")) { Task { await model.confirmProjectContext(true) } }
-        .buttonStyle(StudioButtonStyle(primary: true))
-    }
-    .padding(.horizontal, 14).padding(.vertical, 9)
-    .background(Palette.accent.opacity(0.07))
-    .overlay(alignment: .bottom) { Hairline() }
   }
 }
 

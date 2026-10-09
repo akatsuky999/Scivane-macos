@@ -44,7 +44,7 @@ from ..llm.types import (
 from .context import settle_history
 from .meter import ContextReport, measure, ratio_of
 from .model import ProjectEvent
-from .session import History, compaction_item, derive_history
+from .session import History, ImageLoader, compaction_item, derive_history
 
 __all__ = [
     "AUTO_RATIO", "RETAIN_RATIO", "RETAIN_TOKENS_WITHOUT_WINDOW", "MAX_FAILURES", "MIN_SOURCE_TOKENS",
@@ -295,6 +295,8 @@ class Compactor:
     on_context: Callable[[ContextReport], None] | None = None
     on_compaction: Callable[[dict[str, Any]], None] | None = None
     cancelled: Callable[[], bool] | None = None
+    #: turns images named in the log back into blocks, so summaries and measures see them
+    images: ImageLoader | None = None
 
     _history: History | None = field(default=None, init=False, repr=False)
     _failures: int = field(default=0, init=False)
@@ -309,7 +311,8 @@ class Compactor:
     def history(self, *, fresh: bool = False) -> History:
         if fresh or self._history is None:
             self._history = derive_history(
-                self.store.events(self.project_id, conversation=self.conversation)
+                self.store.events(self.project_id, conversation=self.conversation),
+                images=self.images,
             )
         return self._history
 

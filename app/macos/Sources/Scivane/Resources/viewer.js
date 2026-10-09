@@ -67,7 +67,7 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
     },
     en: {
       page: function (n) { return "Page " + n; },
-      emptyTitle: "Waiting for OCR",
+      emptyTitle: "Not recognized yet",
       emptySub: "Load a document on the left; its pages appear here as they're recognized"
     }
   };

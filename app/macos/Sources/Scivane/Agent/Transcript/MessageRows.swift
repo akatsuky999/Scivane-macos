@@ -5,25 +5,69 @@ import SwiftUI
 // MARK: - User
 
 /// Right-aligned bubble that shrinks to its content, with at least 44 pt kept free on the left so
-/// long questions don't fill the column.
+/// long questions don't fill the column. Images sent with the question sit above it.
 struct UserLine: View {
   let text: String
+  var images: [TranscriptImage] = []
+
   var body: some View {
-    HStack(spacing: 0) {
-      Spacer(minLength: 44)
-      Text(text)
-        .font(.system(size: 13)).foregroundStyle(Palette.ink)
-        .textSelection(.enabled)
-        .multilineTextAlignment(.leading)
-        .fixedSize(horizontal: false, vertical: true)
-        .padding(.horizontal, 13).padding(.vertical, 9)
-        .background(
-          Palette.sunk, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .overlay(
-          RoundedRectangle(cornerRadius: 13, style: .continuous)
-            .strokeBorder(Palette.ruleSoft.opacity(0.6)))
+    VStack(alignment: .trailing, spacing: 6) {
+      if !images.isEmpty {
+        HStack(spacing: 6) {
+          Spacer(minLength: 44)
+          ForEach(images) { SentImage(image: $0) }
+        }
+      }
+      if !text.isEmpty {
+        HStack(spacing: 0) {
+          Spacer(minLength: 44)
+          Text(text)
+            .font(.system(size: 13)).foregroundStyle(Palette.ink)
+            .textSelection(.enabled)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 13).padding(.vertical, 9)
+            .background(
+              Palette.sunk, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(
+              RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(Palette.ruleSoft.opacity(0.6)))
+        }
+      }
     }
     .frame(maxWidth: .infinity, alignment: .trailing)
+  }
+}
+
+/// A thumbnail of a sent image; click for a larger look.
+private struct SentImage: View {
+  let image: TranscriptImage
+  @State private var enlarged = false
+
+  var body: some View {
+    let picture = image.image
+    Group {
+      if let picture {
+        Image(nsImage: picture).resizable().aspectRatio(contentMode: .fill)
+      } else {
+        Image(systemName: "photo").font(.system(size: 16, weight: .light))
+          .foregroundStyle(Palette.inkFaint)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .background(Palette.sunk)
+      }
+    }
+    .frame(width: 92, height: 72)
+    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Palette.ruleSoft))
+    .contentShape(Rectangle())
+    .onTapGesture { if picture != nil { enlarged = true } }
+    .popover(isPresented: $enlarged) {
+      if let picture {
+        Image(nsImage: picture).resizable().aspectRatio(contentMode: .fit)
+          .frame(maxWidth: 640, maxHeight: 520).padding(8)
+      }
+    }
+    .accessibilityLabel(L("附带的图片", "Attached image"))
   }
 }
 

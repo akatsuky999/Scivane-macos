@@ -5,10 +5,12 @@
     │   ├── project.json     metadata
     │   ├── session.jsonl    append-only lifecycle log
     │   ├── conversations/   one .jsonl per conversation
+    │   ├── attachments/     images attached to chat messages, by content hash
     │   ├── annotations.json highlights and underlines on the source PDF
     │   └── policy.json      sandbox and tool policy
     ├── pdf/             source document, read-only
-    ├── md/              OCR text and images
+    ├── md/              the paper text (OCR or transcription) and its images
+    ├── files/           material the user added, Markdown with its images
     ├── code/            the paper's code
     ├── workbench/       the agent's scripts and outputs
     └── notes/           the user's notes and conclusions
@@ -20,6 +22,7 @@ survives the original file being moved or deleted.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -42,6 +45,7 @@ from .model import (
 )
 from . import title as title_tools
 from .annotations import AnnotationBook, path_in as annotations_path
+from .attachments import ATTACHMENTS_DIR, AttachmentStore, ImageRecord
 from .conversations import (
     CONVERSATION_EVENTS,
     CONVERSATIONS_DIR,
@@ -396,13 +400,40 @@ class ProjectStore:
         )
 
     def delete_conversation(self, project_id: str, conversation_id: str) -> bool:
-        """Delete one conversation's file; nothing else is touched."""
+        """Delete one conversation's file, then the images no other conversation refers to."""
         path = self.conversation_path(project_id, conversation_id)
         if not path.is_file():
             return False
         path.unlink()
         self._next_seq.pop(str(path), None)
+        self.attachments(project_id).collect(self._referenced_images(project_id))
         return True
+
+    def attachments(self, project_id: str) -> AttachmentStore:
+        return AttachmentStore(self.control_dir(project_id) / ATTACHMENTS_DIR)
+
+    def image_records(self, events: list[dict[str, Any]]) -> list[ImageRecord]:
+        """Images attached to the user messages among `events`, in order, without repeats."""
+        seen: dict[str, ImageRecord] = {}
+        for event in events:
+            if not isinstance(event, dict) or event.get("type") != ProjectEvent.USER_MESSAGE:
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            for raw in data.get("images") or []:
+                record = ImageRecord.from_dict(raw)
+                if record is not None:
+                    seen.setdefault(record.sha256, record)
+        return list(seen.values())
+
+    def _referenced_images(self, project_id: str) -> set[str]:
+        directory = self.conversations_dir(project_id)
+        if not directory.is_dir():
+            return set()
+        return {
+            record.sha256
+            for entry in directory.glob("*.jsonl") if is_valid_id(entry.stem)
+            for record in self.image_records(list(self.events(project_id, conversation=entry.stem)))
+        }
 
     def latest_conversation(self, project_id: str) -> str | None:
         """The most recently active conversation, or None."""
@@ -435,7 +466,17 @@ class ProjectStore:
             raise ProjectError(ui(f"没有这条对话：{conversation_id}",
                                   f"No such conversation: {conversation_id}"), "NO_CONVERSATION")
         events = list(self.events(project_id, conversation=conversation_id))
-        return {
+        store = self.attachments(project_id)
+        # the log names images by hash; the export carries their bytes so it stands on its own
+        attachments = {}
+        for record in self.image_records(events):
+            data = store.load(record)
+            if data is not None:
+                attachments[record.sha256] = {
+                    "media_type": record.media_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                }
+        exported: dict[str, Any] = {
             "schema": "lumen.conversation/1",
             "exported_at": now(),
             "project": {
@@ -446,6 +487,9 @@ class ProjectStore:
             "conversation": summarise(conversation_id, events),
             "events": events,
         }
+        if attachments:
+            exported["attachments"] = attachments
+        return exported
 
     # Layout upgrades go one adjacent version at a time, each step backed up and reversible.
 
@@ -747,7 +791,11 @@ class ProjectStore:
         return self.dir_for(project_id) / FILES_DIR
 
     def add_file(self, project_id: str, source: Path) -> dict[str, Any]:
-        """Copy a dropped file into files/. Name clashes get -2, -3 suffixes instead of overwriting."""
+        """Copy a dropped file into files/. Name clashes get -2, -3 suffixes instead of overwriting.
+
+        A Markdown file brings the local images it links to, into files/<name>_files/, so it still
+        renders (and can later become the paper text) once its original folder is gone.
+        """
         self.get(project_id)                 # raises when the project doesn't exist
         source = Path(source).expanduser()
         if not source.is_file():
@@ -767,10 +815,13 @@ class ProjectStore:
         target = target_dir / _safe_name(source.name)
         stem, suffix = target.stem, target.suffix
         serial = 2
-        while target.exists():
+        while target.exists() or (_is_markdown(target) and _companion(target).exists()):
             target = target_dir / f"{stem}-{serial}{suffix}"
             serial += 1
-        shutil.copy2(source, target)
+        if _is_markdown(target):
+            self._add_markdown(source, target)
+        else:
+            shutil.copy2(source, target)
 
         self.append_event(project_id, ProjectEvent.FILE_ADDED, {
             "name": target.name, "bytes": size, "origin": source.name,
@@ -780,6 +831,22 @@ class ProjectStore:
             "path": f"{FILES_DIR}/{target.name}",
             "bytes": size,
         }
+
+    def _add_markdown(self, source: Path, target: Path) -> None:
+        """Copy a Markdown file and the local images it links to; links are rewritten to the copies."""
+        markdown = source.read_text(encoding="utf-8", errors="replace")
+        companion = _companion(target)
+        staging = companion.with_name(companion.name + ".staging")
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            rewritten = self._absorb_assets(
+                markdown, staging, jobs_root=None, source_dir=source.parent,
+                link_prefix=companion.name)
+            if staging.is_dir():
+                staging.replace(companion)
+            target.write_text(rewritten, encoding="utf-8")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def list_files(self, project_id: str) -> list[dict[str, Any]]:
         """Contents of files/, most recent first."""
@@ -810,6 +877,8 @@ class ProjectStore:
         if not target.is_file():
             return False
         target.unlink()
+        if _is_markdown(target):
+            shutil.rmtree(_companion(target), ignore_errors=True)
         return True
 
     def delete(self, project_id: str) -> bool:
@@ -866,10 +935,12 @@ class ProjectStore:
         job_id: str | None = None,
         jobs_root: Path | None = None,
         source_dir: Path | None = None,
+        model: str | None = None,
     ) -> Project:
-        """Replace the static context. Re-running OCR and uploading a file share this entry; `origin`
-        decides whether confirmation is needed. Images are absorbed into the project and rewritten
-        to relative paths so the project is self-contained.
+        """Replace the paper text. Its three ways in (local OCR, a model's transcription, a Markdown
+        file the user picked) all end here and are all the user's own act, so the text is usable at
+        once. Images are absorbed into the project and rewritten to relative paths so the project
+        is self-contained.
         """
         project = self.get(project_id)
         directory = self.dir_for(project_id)
@@ -896,40 +967,25 @@ class ProjectStore:
             chars=len(absorbed),
             tokens=rough_tokens(absorbed),
             updated_at=now(),
-            # OCR output comes from this paper's own source; uploads need a person to confirm
-            confirmed=origin == "ocr",
+            confirmed=True,
             job_id=job_id,
+            model=model if origin == "model" else None,
         )
         self._write_meta(project)
-        self.append_event(project_id, ProjectEvent.CONTEXT_REPLACED, {
+        replaced: dict[str, Any] = {
             "origin": origin,
             "sha256": project.context.sha256,
             "chars": project.context.chars,
             "tokens": project.context.tokens,
-            "confirmed": project.context.confirmed,
             "job_id": job_id,
-        })
+        }
+        if project.context.model:
+            replaced["model"] = project.context.model
+        self.append_event(project_id, ProjectEvent.CONTEXT_REPLACED, replaced)
 
-        if origin == "ocr":
+        # read from this paper's own source, so its first heading may name the paper better
+        if origin in ("ocr", "model"):
             project = self.maybe_improve_title(project_id, absorbed)
-        return project
-
-    def confirm_context(self, project_id: str, accepted: bool) -> Project:
-        """Confirm or reject uploaded Markdown as this paper's text."""
-        project = self.get(project_id)
-        if project.context is None:
-            raise ProjectError(ui("这个项目还没有上下文", "This project has no text yet"), "NO_CONTEXT")
-        if accepted:
-            project.context.confirmed = True
-            self._write_meta(project)
-            self.append_event(project_id, ProjectEvent.CONTEXT_CONFIRMED, {})
-            return project
-        # rejecting removes it; no unconfirmed text stays in the project
-        self.context_path(project_id).unlink(missing_ok=True)
-        shutil.rmtree(self.dir_for(project_id) / "assets", ignore_errors=True)
-        project.context = None
-        self._write_meta(project)
-        self.append_event(project_id, ProjectEvent.CONTEXT_REJECTED, {})
         return project
 
     def read_context(self, project_id: str) -> str:
@@ -945,8 +1001,11 @@ class ProjectStore:
         *,
         jobs_root: Path | None,
         source_dir: Path | None,
+        link_prefix: str = "assets",
     ) -> str:
-        """Copy local images referenced by the text into the project, rewriting them to relative paths."""
+        """Copy local images referenced by the text into `assets_dir`, rewriting the links to
+        `link_prefix/<name>` (relative to the Markdown file).
+        """
         replacements: dict[str, str] = {}
 
         def absorb(origin_path: Path, relative_name: str) -> str | None:
@@ -958,7 +1017,7 @@ class ProjectStore:
             target = assets_dir / relative_name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-            return f"assets/{relative_name}"
+            return f"{link_prefix}/{relative_name}"
 
         # OCR references: /assets/<job>/...
         if jobs_root is not None:
@@ -997,6 +1056,15 @@ class ProjectStore:
         for old in sorted(replacements, key=len, reverse=True):
             rewritten = rewritten.replace(old, replacements[old])
         return rewritten
+
+
+def _is_markdown(path: Path) -> bool:
+    return path.suffix.lower() in (".md", ".markdown")
+
+
+def _companion(markdown: Path) -> Path:
+    """Where a Markdown file's images live in files/: <name>_files/, like a saved web page."""
+    return markdown.with_name(f"{markdown.stem}_files")
 
 
 def _safe_name(name: str) -> str:

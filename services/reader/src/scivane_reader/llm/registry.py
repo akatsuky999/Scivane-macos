@@ -9,26 +9,32 @@ propagates CancelledError and yields no Finish.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import httpx
 
 from ..i18n import ui
-from . import timing
+from . import timing, vision as vision_probe
 from .adapters import PROTOCOLS, ProtocolAdapter
 from .adapters.base import aiter_sse
 from .cache import prefix_fingerprint
 from .credentials import CredentialStore, credentials as default_credentials
 from .types import REASONING_DEFAULT
 from .errors import (
+    INVALID_ARGS,
     NO_ADAPTER,
+    NO_VISION,
     TIMEOUT,
     TRANSPORT,
+    UNKNOWN,
     LlmError,
     LlmFailure,
+    looks_like_no_vision,
 )
 from .retry import (
     DEFAULT_POLICY,
@@ -58,6 +64,9 @@ WINDOW_TTL = 6 * 3600.0
 WINDOW_RETRY = 600.0
 #: OpenRouter's model list is several hundred KB
 WINDOW_PROBE_TIMEOUT = 8.0
+#: Vision verdicts outlive backend restarts (the backend stops when idle), but '-latest' aliases
+#: can switch models, so they still expire.
+VISION_TTL = 7 * 24 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -111,6 +120,9 @@ class LlmRegistry:
     keepalive: float = 300.0
     #: test seam: pass httpx.MockTransport to run fully offline
     transport: httpx.AsyncBaseTransport | None = None
+    #: Where vision verdicts persist; None keeps them in memory only. A cache: deleting it costs
+    #: one small request per card.
+    vision_store: Path | None = None
 
     _providers: dict[str, ProviderConfig] = field(default_factory=dict, init=False)
     _gate: asyncio.Semaphore | None = field(default=None, init=False)
@@ -119,6 +131,9 @@ class LlmRegistry:
     #: Detected windows keyed by (protocol, base URL, model), so editing a card never reuses a
     #: stale value.
     _windows: dict[tuple[str, str, str], tuple[int | None, float]] = field(default_factory=dict, init=False)
+    #: Vision verdicts, same key; loaded from vision_store on first use. Wall-clock times, since
+    #: they are persisted.
+    _vision: dict[tuple[str, str, str], tuple[bool, float]] | None = field(default=None, init=False)
 
     def register(self, config: ProviderConfig) -> None:
         self._providers[config.id] = config
@@ -149,6 +164,8 @@ class LlmRegistry:
                 "context_window": config.context_window,
                 # cached value only: listing providers never triggers a request
                 "detected_window": self._cached_window(config),
+                # cached verdict only (None = never checked); checking costs a request
+                "vision": self.cached_vision(config.id),
                 "reasoning": config.reasoning or REASONING_DEFAULT,
                 "credential_ref": config.credential_ref,
                 "capabilities": PROTOCOLS[config.protocol].describe(),
@@ -200,6 +217,73 @@ class LlmRegistry:
             # provider id and exception type only: URLs and messages may echo secrets
             logger.info("问上下文窗口没成 provider=%s：%s", config.id, exc.__class__.__name__)
             return None
+
+    def cached_vision(self, provider_id: str) -> bool | None:
+        """The last vision verdict for this card's model, or None when never checked or expired."""
+        try:
+            config = self.get(provider_id)
+        except LlmError:
+            return None
+        found = self._vision_table().get(self._model_key(config))
+        if found is None or time.time() - found[1] > VISION_TTL:
+            return None
+        return found[0]
+
+    async def vision(self, provider_id: str, *, refresh: bool = False) -> vision_probe.VisionCheck:
+        """Whether the card's model reads images: the cached verdict, else one probe request.
+        Only definite answers are cached; a probe that couldn't run (no key, quota) is asked again.
+        """
+        if not refresh:
+            cached = self.cached_vision(provider_id)
+            if cached is not None:
+                return vision_probe.VisionCheck(
+                    cached, None if cached else NO_VISION,
+                    "" if cached else ui("这个模型看不到图片", "This model can't see images"))
+        config = self.get(provider_id)
+        check = await vision_probe.probe(
+            lambda request: self.stream(provider_id, request), config.model)
+        if check.supported is not None:
+            self._vision_table()[self._model_key(config)] = (check.supported, time.time())
+            self._save_vision()
+        logger.info("看图检测 provider=%s 结果=%s code=%s", provider_id, check.supported, check.code)
+        return check
+
+    @staticmethod
+    def _model_key(config: ProviderConfig) -> tuple[str, str, str]:
+        return (config.protocol, config.effective_base_url, config.model)
+
+    def _vision_table(self) -> dict[tuple[str, str, str], tuple[bool, float]]:
+        if self._vision is None:
+            self._vision = {}
+            if self.vision_store is not None:
+                try:
+                    raw = json.loads(self.vision_store.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    raw = []
+                for entry in raw if isinstance(raw, list) else []:
+                    try:
+                        key = (str(entry["protocol"]), str(entry["base_url"]), str(entry["model"]))
+                        if isinstance(entry["vision"], bool):
+                            self._vision[key] = (entry["vision"], float(entry["at"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+        return self._vision
+
+    def _save_vision(self) -> None:
+        if self.vision_store is None:
+            return
+        entries = [
+            {"protocol": key[0], "base_url": key[1], "model": key[2], "vision": verdict, "at": at}
+            for key, (verdict, at) in self._vision_table().items()
+        ]
+        try:
+            self.vision_store.parent.mkdir(parents=True, exist_ok=True)
+            staging = self.vision_store.with_suffix(self.vision_store.suffix + ".writing")
+            staging.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+            staging.replace(self.vision_store)
+        except OSError as exc:
+            # a cache: failing to write it only costs another probe later
+            logger.info("看图检测结果没存下：%s", exc.__class__.__name__)
 
     def _semaphore(self) -> asyncio.Semaphore:
         # created lazily: a Semaphore binds to the event loop it was created on
@@ -311,10 +395,16 @@ class LlmRegistry:
                         body = self.credentials.redact(
                             raw.decode("utf-8", errors="replace")
                         )
+                        detail = adapter.error_detail(body)
+                        code = adapter.classify(response.status_code, body)
+                        # Only with images aboard: elsewhere the same words mean something else.
+                        if (request.has_images and code in (INVALID_ARGS, UNKNOWN)
+                                and looks_like_no_vision(detail)):
+                            code = NO_VISION
                         failure = LlmFailure(
-                            message=adapter.error_detail(body)[:500]
+                            message=detail[:500]
                             or ui("上游返回错误", "The provider returned an error"),
-                            code=adapter.classify(response.status_code, body),
+                            code=code,
                             status=response.status_code,
                             retry_after=parse_retry_after(
                                 response.headers.get("retry-after")

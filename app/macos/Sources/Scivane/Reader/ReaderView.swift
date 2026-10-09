@@ -8,16 +8,14 @@ struct ReaderView: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      // stays until someone answers
-      if let project = model.activeProject, project.awaitsConfirmation {
-        ContextConfirmBar(model: model, project: project)
-      }
       if model.isSearching { searchBar }
       // draws nothing when idle
       OCRInstallCard(installer: model.ocrInstaller)
-      if let source = model.readingSource, source.status != .ready && !source.status.isFinished {
+      if let source = model.readingSource,
+        (source.status != .ready && !source.status.isFinished) || !source.failedPages.isEmpty
+      {
         ScanProgressBar(job: source, onCancel: { model.cancelCurrent() }, onRetry: { model.retry(source) },
-                        firstRun: model.ocrInstaller.freshlyInstalled)
+                        firstRun: model.ocrInstaller.freshlyInstalled && source.engine == .local)
       }
       if model.dualPane {
         HSplitView {
@@ -82,12 +80,26 @@ struct ReaderView: View {
 
   @ViewBuilder
   private var documentLayer: some View {
-    if model.readingDocument != nil {
-      MarkdownWebView(model: model, language: Localization.shared.language)
-    } else {
-      emptyPane(.text)
+    Group {
+      if model.readingDocument != nil {
+        MarkdownWebView(model: model, language: Localization.shared.language)
+      } else {
+        emptyPane(.text)
+      }
+    }
+    .overlay(alignment: .topTrailing) {
+      if let project = model.activeProject {
+        TextDocumentMenu(model: model, project: project)
+          .padding(.top, 10)
+          .padding(.trailing, Self.scrollerClearance)
+      }
     }
   }
+
+  /// Clear of the text's vertical scroller: overlay scrollers appear under the same edge while
+  /// scrolling, and legacy ones are always there.
+  private static let scrollerClearance =
+    NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) + 8
 
   // MARK: - Empty panes
 
@@ -104,21 +116,17 @@ struct ReaderView: View {
         .font(.system(size: 19, weight: .regular, design: .serif)).foregroundStyle(Palette.ink)
       Text(sourcelessProject != nil && kind == .source
         ? L("这个项目还没有原稿。导入之后它会用论文标题给项目命名。", "This project has no original yet. Once imported, the project takes the paper's title.")
-        : (kind == .source ? L("PDF 或图片，导入后先预览。", "A PDF or image; it's previewed after import.") : L("导入 Markdown，或先识别左侧原稿。", "Import Markdown, or run OCR on the original on the left first.")))
+        : (kind == .source ? L("PDF 或图片，导入后先预览。", "A PDF or image; it's previewed after import.") : L("识别左侧的原稿，或打开一份 Markdown。", "Recognize the original on the left, or open a Markdown file.")))
         .font(.uiCaption).foregroundStyle(Palette.inkFaint).multilineTextAlignment(.center)
-      Button(kind == .source ? L("导入 PDF", "Import PDF") : L("导入 Markdown", "Import Markdown")) {
-        // In a project without a source, importing a PDF attaches it to the project rather than opening
-        // a loose document.
-        if kind == .source, let project = sourcelessProject {
-          model.chooseSourceForProject(project)
-        } else {
-          model.openPanel(markdown: kind == .text)
-        }
-      }
-      .buttonStyle(StudioButtonStyle(primary: kind == .source)).padding(.top, 4)
       if kind == .text, let source = model.readingSource, source.canStartOCR {
-        Button(L("从原稿开始 OCR", "Start OCR from the Original")) { model.startOCR(source) }.buttonStyle(.borderless)
-          .font(.uiCaption).foregroundStyle(Palette.accent)
+        // a source to recognise: that is the main way in; a Markdown file is the other
+        Button(L("识别原稿…", "Recognize Original…")) { model.requestRecognition(source) }
+          .buttonStyle(StudioButtonStyle(primary: true)).padding(.top, 4)
+        Button(L("打开 Markdown", "Open Markdown")) { open(kind) }
+          .buttonStyle(.borderless).font(.uiCaption).foregroundStyle(Palette.accent)
+      } else {
+        Button(kind == .source ? L("导入 PDF", "Import PDF") : L("打开 Markdown", "Open Markdown")) { open(kind) }
+          .buttonStyle(StudioButtonStyle(primary: kind == .source)).padding(.top, 4)
       }
     }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
       .contentShape(Rectangle())
@@ -130,6 +138,18 @@ struct ReaderView: View {
         model.add(urls: accepted, to: kind)
         return true
       }
+  }
+
+  /// In a project without a source, importing a PDF attaches it to the project rather than opening
+  /// a loose document; Markdown opened in a project is kept in its files/ and only shown.
+  private func open(_ kind: AppModel.ReadingPane) {
+    if kind == .source, let project = sourcelessProject {
+      model.chooseSourceForProject(project)
+    } else if kind == .text, model.activeProject != nil {
+      model.chooseMarkdownToView()
+    } else {
+      model.openPanel(markdown: kind == .text)
+    }
   }
 
   private var searchBar: some View {

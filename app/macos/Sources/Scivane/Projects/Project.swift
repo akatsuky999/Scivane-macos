@@ -22,12 +22,6 @@ struct Project: Codable, Identifiable, Equatable, Hashable {
   var contextURL: URL? { contextPath.map { URL(fileURLWithPath: $0) } }
   var directoryURL: URL { URL(fileURLWithPath: dir) }
 
-  /// has text that nobody has confirmed belongs to this paper; shows the confirmation bar
-  var awaitsConfirmation: Bool {
-    guard let context else { return false }
-    return !context.confirmed
-  }
-
   var titleIsProvisional: Bool {
     titleSource == "filename" || titleSource == "pdf-metadata" || titleSource == "pdf-heading"
   }
@@ -51,15 +45,26 @@ struct Project: Codable, Identifiable, Equatable, Hashable {
 }
 
 struct ProjectContext: Codable, Equatable, Hashable {
-  var origin: String  // "ocr" | "upload"
+  /// "ocr" (local OCR), "model" (a model card transcribed the source) or "upload" (a Markdown file)
+  var origin: String
   var sha256: String
   var chars: Int
   var tokens: Int
   var updatedAt: String
+  /// false only for text an older version imported and nobody confirmed; it stays out of answers
   var confirmed: Bool
   var jobId: String?
+  /// the transcribing model, for origin "model"
+  var model: String?
 
-  var fromOCR: Bool { origin == "ocr" }
+  /// How the text came to be, in a few words.
+  var originLabel: String {
+    switch origin {
+    case "ocr": return L("本地 OCR", "Local OCR")
+    case "model": return model ?? L("云端模型", "Cloud model")
+    default: return L("Markdown 文件", "Markdown file")
+    }
+  }
 
   var sizeLabel: String {
     guard tokens >= 1000 else { return L("约 \(tokens) token", "~\(tokens) tokens") }
@@ -184,22 +189,17 @@ struct ProjectClient {
     _ = try await URLSession.shared.data(for: request)
   }
 
-  /// Replaces the context; re-running OCR and uploading share this entry point.
+  /// Replaces the paper text: a recognition run (origin "ocr" or "model") or Replace with a file.
   func setContext(
     _ id: String, markdown: String, origin: String,
-    jobID: String? = nil, sourceDirectory: URL? = nil
+    jobID: String? = nil, sourceDirectory: URL? = nil, model: String? = nil
   ) async throws -> Project {
     var body: [String: Any] = ["markdown": markdown, "origin": origin]
     if let jobID { body["job_id"] = jobID }
     if let sourceDirectory { body["source_dir"] = sourceDirectory.path }
+    if let model { body["model"] = model }
     return try await send(
       "projects/\(id)/context", method: "PUT", body: body,
-      as: Project.self, key: "project")
-  }
-
-  func confirmContext(_ id: String, accepted: Bool) async throws -> Project {
-    try await send(
-      "projects/\(id)/context/confirm", method: "POST", body: ["accepted": accepted],
       as: Project.self, key: "project")
   }
 

@@ -65,7 +65,27 @@ struct ScanProgressBar: View {
         case .ready, .imported: return false
         case .running:          return true
         case .failed, .queued, .cancelled: return true
-        case .finished:         return showFinished
+        // pages that still failed stay visible until a retry
+        case .finished:         return showFinished || !job.failedPages.isEmpty
+        }
+    }
+
+    private var isModel: Bool { job.engine.provider != nil }
+
+    /// what is reading this run, when it isn't local OCR
+    @ViewBuilder private var engineTag: some View {
+        if isModel, !job.engineModel.isEmpty {
+            Text(job.engineModel).font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(Palette.inkFaint).lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: 180, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private var tokens: some View {
+        if let usage = job.usage, !usage.isEmpty {
+            Text("↓\(UsageMeter.compact(usage.input + usage.cacheRead)) ↑\(UsageMeter.compact(usage.output))")
+                .foregroundStyle(Palette.inkFaint)
+                .help(L("这次识别用掉的 token", "Tokens used by this run"))
         }
     }
 
@@ -75,8 +95,9 @@ struct ScanProgressBar: View {
             switch job.status {
             case .running(let done, let total):
                 // the page in progress, not pages done: a page takes over ten seconds
-                Text(job.activePage == 0 ? (firstRun ? L("第一次加载新装的识别引擎，大约一分钟…", "Loading the newly installed engine for the first time — about a minute…") : L("正在分析版面…", "Analyzing the layout…")) : L("识别中", "Recognizing"))
+                Text(job.activePage == 0 ? waitingText : L("识别中", "Recognizing"))
                     .foregroundStyle(Palette.inkSoft)
+                engineTag
                 if job.activePage > 0 {
                     pill(L("第 \(job.activePage)/\(max(total, job.activePage)) 页", "Page \(job.activePage)/\(max(total, job.activePage))"))
                 }
@@ -87,6 +108,7 @@ struct ScanProgressBar: View {
 
                 Spacer()
 
+                tokens
                 if job.elapsed > 0 {
                     Text(L("已用 ", "Elapsed ") + Self.duration(job.elapsed))
                         .foregroundStyle(Palette.inkFaint)
@@ -103,16 +125,23 @@ struct ScanProgressBar: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Palette.inkFaint)
-                .help(L("停止识别", "Stop OCR"))
+                .help(L("停止识别", "Stop Recognizing"))
 
             case .finished(let seconds):
-                Image(systemName: "checkmark")
+                Image(systemName: job.failedPages.isEmpty ? "checkmark" : "exclamationmark.triangle.fill")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Palette.accent)
+                    .foregroundStyle(job.failedPages.isEmpty ? Palette.accent : Palette.danger)
                 Text(L("完成", "Done"))
                     .foregroundStyle(Palette.inkSoft)
                 pill(L("\(job.pages.count) 页", plural(job.pages.count, "page", "pages")))
+                if !job.failedPages.isEmpty {
+                    let pages = job.failedPages.map(String.init).joined(separator: L("、", ", "))
+                    Text(L("第 \(pages) 页没识别出来", "Pages \(pages) couldn't be recognized"))
+                        .foregroundStyle(Palette.danger).lineLimit(1)
+                }
+                engineTag
                 Spacer()
+                tokens
                 Text(Self.duration(seconds))
                     .foregroundStyle(Palette.inkFaint)
                 if job.pages.count > 0 {
@@ -121,17 +150,23 @@ struct ScanProgressBar: View {
                     Text(L("\(perPage) 秒/页", "\(perPage)s/page"))
                         .foregroundStyle(Palette.inkFaint)
                 }
+                if !job.failedPages.isEmpty, let onRetry {
+                    Button(L("重试", "Retry"), action: onRetry).buttonStyle(.borderless)
+                }
 
             case .ready, .imported: EmptyView()
             case .queued:
-                Text(L("等待识别", "Waiting for OCR")).foregroundStyle(Palette.inkSoft)
+                Text(L("等待识别", "Queued")).foregroundStyle(Palette.inkSoft)
+                engineTag
                 Spacer()
-                Text(firstRun ? L("正在启动新装的引擎，第一次要久一些", "Starting the newly installed engine; the first run takes longer") : L("引擎就绪后自动开始", "Starts once the engine is ready")).foregroundStyle(Palette.inkFaint)
+                if !isModel {
+                    Text(firstRun ? L("正在启动新装的引擎，第一次要久一些", "Starting the newly installed engine; the first run takes longer") : L("引擎就绪后自动开始", "Starts once the engine is ready")).foregroundStyle(Palette.inkFaint)
+                }
 
             case .cancelled:
-                Text(L("已停止识别", "OCR stopped")).foregroundStyle(Palette.inkSoft)
+                Text(L("已停止识别", "Recognition stopped")).foregroundStyle(Palette.inkSoft)
                 Spacer()
-                if let onRetry { Button(L("重新识别", "Run OCR Again"), action: onRetry).buttonStyle(.borderless) }
+                if let onRetry { Button(L("重新识别", "Recognize Again"), action: onRetry).buttonStyle(.borderless) }
 
             case .failed(let message):
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -156,7 +191,17 @@ struct ScanProgressBar: View {
 
     private var statusBackground: Color {
         if case .failed = job.status { return Palette.danger.opacity(0.07) }
+        if case .finished = job.status, !job.failedPages.isEmpty { return Palette.danger.opacity(0.07) }
         return Palette.sunk
+    }
+
+    /// Before the first page: local OCR analyses the layout; a model card is first checked for
+    /// image input, then pages go out.
+    private var waitingText: String {
+        if isModel { return L("正在准备…", "Preparing…") }
+        return firstRun
+            ? L("第一次加载新装的识别引擎，大约一分钟…", "Loading the newly installed engine for the first time — about a minute…")
+            : L("正在分析版面…", "Analyzing the layout…")
     }
 
     private func pill(_ text: String) -> some View {

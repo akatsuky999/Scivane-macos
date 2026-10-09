@@ -1,18 +1,21 @@
 import Foundation
 
-/// SSE client for the OCR stream. URLSessionDataDelegate rather than bytes(for:).lines, which goes
-/// silent after the 200 on this path.
+/// SSE client for the recognition streams (local OCR and cloud transcription). URLSessionDataDelegate
+/// rather than bytes(for:).lines, which goes silent after the 200 on this path.
 final class OCRClient: NSObject, @unchecked Sendable {
 
+    /// The same events for local OCR (/ocr) and cloud transcription (/transcribe); transcription
+    /// also reports usage, failed pages and a stable failure code.
     enum Event {
         case meta(jobID: String, pages: Int, filename: String)
         /// dense pages take over ten seconds; get the UI moving first
         case progress(page: Int, total: Int, elapsed: Double)
         /// keep-alive while idle; also drives the timer in the UI
         case heartbeat(page: Int, total: Int, elapsed: Double)
-        case page(index: Int, total: Int, markdown: String, elapsed: Double)
-        case done(markdown: String, text: String, elapsed: Double, cancelled: Bool)
-        case failed(String)
+        case page(index: Int, total: Int, markdown: String, elapsed: Double, usage: AgentUsage?)
+        case done(markdown: String, text: String, elapsed: Double, cancelled: Bool,
+                  failedPages: [Int], usage: AgentUsage?)
+        case failed(String, code: String?)
     }
 
     private let base: URL
@@ -37,15 +40,24 @@ final class OCRClient: NSObject, @unchecked Sendable {
     deinit { session?.invalidateAndCancel() }
 
     func recognise(path: String) -> AsyncThrowingStream<Event, Error> {
+        stream("ocr", body: ["path": path])
+    }
+
+    /// Cloud transcription with a model card; same events, so the run queue treats both alike.
+    func transcribe(path: String, provider: String) -> AsyncThrowingStream<Event, Error> {
+        stream("transcribe", body: ["path": path, "provider": provider])
+    }
+
+    private func stream(_ path: String, body: [String: String]) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             self.continuation = continuation
 
-            var request = URLRequest(backend: base.appendingPathComponent("ocr"))
+            var request = URLRequest(backend: base.appendingPathComponent(path))
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             do {
-                request.httpBody = try JSONEncoder().encode(["path": path])
+                request.httpBody = try JSONEncoder().encode(body)
             } catch {
                 continuation.finish(throwing: error)
                 return
@@ -115,14 +127,18 @@ final class OCRClient: NSObject, @unchecked Sendable {
             return .page(index: d["index"] as? Int ?? 0,
                          total: d["total"] as? Int ?? 0,
                          markdown: d["markdown"] as? String ?? "",
-                         elapsed: d["elapsed"] as? Double ?? 0)
+                         elapsed: d["elapsed"] as? Double ?? 0,
+                         usage: (d["usage"] as? [String: Any]).map(AgentUsage.init))
         case "done":
             return .done(markdown: d["markdown"] as? String ?? "",
                          text: d["text"] as? String ?? "",
                          elapsed: d["elapsed"] as? Double ?? 0,
-                         cancelled: d["cancelled"] as? Bool ?? false)
+                         cancelled: d["cancelled"] as? Bool ?? false,
+                         failedPages: d["failed_pages"] as? [Int] ?? [],
+                         usage: (d["usage"] as? [String: Any]).map(AgentUsage.init))
         case "error":
-            return .failed(d["message"] as? String ?? L("未知错误", "Unknown error"))
+            return .failed(d["message"] as? String ?? L("未知错误", "Unknown error"),
+                           code: d["code"] as? String)
         default:
             return nil
         }

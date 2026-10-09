@@ -17,6 +17,9 @@ struct SettingsView: View {
     @State private var secretDraft = ""
     @State private var testing = false
     @State private var testResult: (ok: Bool, message: String)?
+    @State private var checkingVision = false
+    /// why a check couldn't decide (no key, no quota...)
+    @State private var visionFailure: UIText?
     @State private var saveResult: (ok: Bool, message: String)?
 
     /// Not model.providers: that is the backend's state, and editing it directly would make the list
@@ -64,6 +67,7 @@ struct SettingsView: View {
         secretDraft = ""
         testResult = nil
         saveResult = nil
+        visionFailure = nil
     }
 
     private func startNew(_ preset: (id: String, label: String, model: String,
@@ -182,6 +186,9 @@ struct SettingsView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11.5, design: .monospaced))
             }
+            if !creatingNew {
+                labelled(L("看图", "Images")) { visionRow }
+            }
             keyEditor()
 
             HStack(spacing: 10) {
@@ -227,6 +234,41 @@ struct SettingsView: View {
         .padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Palette.sunk.opacity(0.35))
+    }
+
+    /// Whether the card's model reads images: recognising an original with it, and attaching images
+    /// in a chat, both need it. Asked by showing the model one, never guessed from its name.
+    @ViewBuilder
+    private var visionRow: some View {
+        HStack(spacing: 8) {
+            if checkingVision {
+                ProgressView().controlSize(.mini)
+            } else if let failure = visionFailure {
+                Text(failure.text).font(.uiCaption).foregroundStyle(Palette.danger).lineLimit(1)
+            } else {
+                switch model.providers.first(where: { $0.id == draft.id })?.vision {
+                case true?:
+                    Label(L("能看图", "Sees images"), systemImage: "eye").font(.uiCaption)
+                        .foregroundStyle(Palette.accent)
+                case false?:
+                    Label(L("看不到图", "Can't see images"), systemImage: "eye.slash").font(.uiCaption)
+                        .foregroundStyle(Palette.inkSoft)
+                case nil:
+                    Text(L("未检测", "Not checked")).font(.uiCaption).foregroundStyle(Palette.inkFaint)
+                }
+            }
+            Button(L("检测", "Check")) {
+                let target = draft.id
+                checkingVision = true
+                visionFailure = nil
+                Task {
+                    let result = await model.checkVision(target)
+                    checkingVision = false
+                    visionFailure = result.supported == nil ? result.failure : nil
+                }
+            }
+            .disabled(checkingVision)
+        }
     }
 
     /// Shared key, or one stored on this card.

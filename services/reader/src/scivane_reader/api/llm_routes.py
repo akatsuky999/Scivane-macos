@@ -154,6 +154,19 @@ async def test_provider(provider_id: str):
         return {"ok": False, "code": exc.code, "message": exc.failure.message}
 
 
+@router.post("/providers/{provider_id}/vision")
+async def check_vision(provider_id: str, refresh: bool = False):
+    """Whether the card's model reads images. Costs one small request unless a verdict is cached.
+
+    vision is true, false, or null when the check couldn't run (then code says why).
+    """
+    try:
+        check = await registry.vision(provider_id, refresh=refresh)
+    except LlmError as exc:
+        return {"vision": None, "code": exc.code, "message": exc.failure.message}
+    return {"vision": check.supported, "code": check.code, "message": check.message}
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest):
     try:

@@ -22,6 +22,9 @@ struct AgentPanel: View {
   /// must be @ObservedObject; see AgentPane
   @ObservedObject var session: AgentSession
   @State private var draft = ""
+  /// images going with the next question
+  @State private var images: [ComposerImage] = []
+  @State private var pasteMonitor = ImagePasteMonitor()
   @FocusState private var composing: Bool
   @State private var dropping = false
 
@@ -40,18 +43,16 @@ struct AgentPanel: View {
 
   private var isDesk: Bool { model.activeProject == nil }
 
-  /// Must agree with the backend: context.assemble() refuses unconfirmed text, so it is never shown
-  /// as loaded.
+  /// Must agree with the backend: context.assemble() refuses text an older version left
+  /// unconfirmed, so that counts as no text here too.
   private enum ContextState {
     case ready(Project)
-    case awaitingConfirm(Project)  // has text, not yet confirmed
-    case empty(Project)            // no text yet
+    case empty(Project)            // no usable text yet
     case desk
   }
 
   private var contextState: ContextState {
     guard let project = model.activeProject else { return .desk }
-    if project.awaitsConfirmation { return .awaitingConfirm(project) }
     return project.hasUsableContext ? .ready(project) : .empty(project)
   }
 
@@ -60,8 +61,12 @@ struct AgentPanel: View {
     guard !model.agentProvider.isEmpty else { return false }
     switch contextState {
     case .ready, .desk: return true
-    case .awaitingConfirm, .empty: return false
+    case .empty: return false
     }
+  }
+
+  private var hasSomethingToSend: Bool {
+    !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty
   }
 
   var body: some View {
@@ -106,6 +111,9 @@ struct AgentPanel: View {
     .task(id: contextKey) {
       await model.refreshAgentContext()
     }
+    .onAppear { pasteMonitor.start { attach($0) } }
+    .onDisappear { pasteMonitor.stop() }
+    .onChange(of: composing) { _, focused in pasteMonitor.active = focused && !isDesk }
     .onChange(of: session.running) { _, running in
       // Refresh the list after each turn: the backend names a conversation after its first question.
       guard !running, let projectID = model.activeProjectID else { return }
@@ -163,7 +171,6 @@ struct AgentPanel: View {
     if model.agentProvider.isEmpty { return L("还没有配置模型", "No model set up yet") }
     switch contextState {
     case .ready: return L("和这篇论文对话", "Chat with this paper")
-    case .awaitingConfirm: return L("正文还没确认", "The text isn't confirmed yet")
     case .empty: return L("这个项目还没有正文", "This project has no text yet")
     case .desk: return L("书房", "Library")
     }
@@ -178,12 +185,9 @@ struct AgentPanel: View {
     case .ready:
       return L("它能读正文、跑脚本、取论文代码 —— 全部落在这个项目目录里。",
                "It can read the text, run scripts and fetch the paper's code — all inside this project's folder.")
-    case .awaitingConfirm:
-      return L("导入的 Markdown 需要你确认是这篇论文的正文，确认后才会作为上下文。",
-               "Confirm that the imported Markdown is this paper's text; only then is it used as context.")
     case .empty:
-      return L("识别原稿，或导入一份 Markdown 作为正文。",
-               "Run OCR on the original, or import a Markdown file as its text.")
+      return L("识别原稿，或在下面的正文标签里换成一份 Markdown。",
+               "Recognize the original, or use a Markdown file from the text chip below.")
     case .desk:
       return L("这一层只看得到项目清单 —— 标题、时间、状态。\n它读不到任何一篇论文的正文，也不能跑命令。",
                "This level sees only the project list — titles, dates and status.\n"
@@ -197,11 +201,14 @@ struct AgentPanel: View {
               { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) })
     }
     switch contextState {
-    case .ready, .desk, .awaitingConfirm:
+    case .ready, .desk:
       return nil
     case .empty(let project):
-      return (L("开始识别原稿", "Run OCR on the Original"),
-              { Task { await model.enterProject(project); model.reOCRActiveProject() } })
+      if project.hasSource {
+        return (L("识别原稿…", "Recognize Original…"), { model.reOCRActiveProject() })
+      }
+      return (L("导入 PDF 作为原稿…", "Import a PDF as the Original…"),
+              { model.chooseSourceForProject(project) })
     }
   }
 
@@ -213,6 +220,7 @@ struct AgentPanel: View {
   private func composer(_ session: AgentSession) -> some View {
     VStack(alignment: .leading, spacing: 10) {
       contextRow(session)
+      if !images.isEmpty { imageStrip }
       TextField(
         placeholder, text: $draft, axis: .vertical
       )
@@ -236,17 +244,17 @@ struct AgentPanel: View {
           locked: session.running || session.preparing,
           onCompact: { model.compactAgentContext() })
         Spacer(minLength: 0)
-        if canAsk && !draft.isEmpty && !session.running && !session.preparing {
+        if canAsk && hasSomethingToSend && !session.running && !session.preparing {
           Text(L("⏎ 发送", "⏎ Send")).font(.system(size: 10)).foregroundStyle(Palette.inkFaint)
             .transition(.opacity)
         }
         sendButton(session)
       }
     }
-    // Dropped files go straight into the project's files/.
+    // Dropped images go with the next question; anything else goes into the project's files/.
     .dropDestination(for: URL.self) { urls, _ in
       guard !isDesk, !urls.isEmpty else { return false }
-      Task { await model.addProjectFiles(urls) }
+      receive(urls)
       return true
     } isTargeted: { dropping = $0 }
     .padding(14)
@@ -282,9 +290,12 @@ struct AgentPanel: View {
     .frame(maxHeight: 26)
   }
 
+  /// Two kinds of attachment: an image for this question, or material kept in the project.
   private var attachButton: some View {
-    Button {
-      model.chooseProjectFiles()
+    Menu {
+      Button(L("图片…", "Images…")) { pickImages() }
+        .disabled(model.activeVision == false)
+      Button(L("放进项目材料…", "Add to Project Files…")) { model.chooseProjectFiles() }
     } label: {
       Image(systemName: "paperclip")
         .font(.system(size: 12, weight: .medium))
@@ -292,9 +303,65 @@ struct AgentPanel: View {
         .frame(width: 22, height: 22)
         .contentShape(Rectangle())
     }
-    .buttonStyle(.plain)
-    .help(L("把材料放进项目的 files/（也可以直接拖进来）", "Add files to the project's files/ (or just drag them in)"))
-    .accessibilityLabel(L("添加材料", "Add Files"))
+    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+    .help(model.activeVision == false
+          ? L("这张卡看不到图片；材料可以放进 files/", "This card can't see images; files can go into files/")
+          : L("图片随这条消息发送；材料放进项目的 files/（都可以直接拖进来）",
+              "Images go with this message; files go into the project's files/ (or drag them in)"))
+    .accessibilityLabel(L("添加附件", "Attach"))
+  }
+
+  /// Images waiting to be sent; the cross shows on hover.
+  private var imageStrip: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 6) {
+        ForEach(images) { image in
+          PendingImage(image: image) { images.removeAll { $0.id == image.id } }
+        }
+      }
+    }
+    .frame(height: 46)
+  }
+
+  private func attach(_ incoming: [ComposerImage]) {
+    guard !isDesk, !incoming.isEmpty else { return }
+    if model.activeVision == false {
+      model.notifyProject(L("这张卡看不到图片 —— 换一张能看图的卡再附图", "This card can't see images — switch to one that can"))
+      return
+    }
+    let room = ComposerImage.perMessage - images.count
+    images.append(contentsOf: incoming.prefix(max(0, room)))
+    if incoming.count > room {
+      model.notifyProject(L("一条消息最多 \(ComposerImage.perMessage) 张图", "At most \(ComposerImage.perMessage) images per message"))
+    }
+  }
+
+  /// Dropped files: images become attachments (unless the card can't see them), the rest material.
+  private func receive(_ urls: [URL]) {
+    let pictures = urls.filter(ComposerImage.isImage)
+    let others = urls.filter { !ComposerImage.isImage($0) }
+    if !pictures.isEmpty {
+      if model.activeVision == false {
+        Task { await model.addProjectFiles(pictures) }
+      } else {
+        let prepared = pictures.compactMap(ComposerImage.prepare(url:))
+        if prepared.count < pictures.count {
+          model.notifyProject(L("有图片读不出来，没附上", "Some images couldn't be read and weren't attached"))
+        }
+        attach(prepared)
+      }
+    }
+    if !others.isEmpty { Task { await model.addProjectFiles(others) } }
+  }
+
+  private func pickImages() {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.image]
+    panel.allowsMultipleSelection = true
+    panel.message = L("选择随这条消息发送的图片", "Choose images to send with this message")
+    panel.prompt = L("附上", "Attach")
+    guard panel.runModal() == .OK else { return }
+    receive(panel.urls)
   }
 
   private var placeholder: String {
@@ -302,15 +369,17 @@ struct AgentPanel: View {
     switch contextState {
     case .desk: return L("问问书房里都有什么…", "Ask what's in your library…")
     case .ready: return L("让它读、跑、画，或者直接提问…", "Have it read, run, plot — or just ask…")
-    default: return L("先备好正文，再开始提问", "Get the text ready before asking")
+    case .empty: return L("先备好正文，再开始提问", "Get the text ready before asking")
     }
   }
 
   private func send(_ session: AgentSession) {
-    guard canAsk, !session.running else { return }
+    guard canAsk, !session.running, hasSomethingToSend else { return }
     let question = draft
+    let attached = images
     draft = ""
-    model.askAgent(question)
+    images = []
+    model.askAgent(question, images: attached)
   }
 
   /// Nearly invisible until hovered. Double-click restores automatic height.
@@ -332,7 +401,7 @@ struct AgentPanel: View {
 
   /// While running, the same button stops; that is the only meaningful action there.
   private func sendButton(_ session: AgentSession) -> some View {
-    let live = canAsk && !draft.isEmpty && !session.preparing
+    let live = canAsk && hasSomethingToSend && !session.preparing
     return Button {
       if session.running { session.cancel() } else { send(session) }
     } label: {
@@ -361,7 +430,7 @@ struct AgentPanel: View {
     switch contextState {
     case .ready(let project):
       HStack(spacing: 7) {
-        chip(icon: "doc.text", title: project.displayTitle)
+        ContextChip(model: model, project: project, locked: session.running || session.preparing)
         if let context = project.context {
           Text(context.sizeLabel)
             .font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.inkFaint)
@@ -369,10 +438,14 @@ struct AgentPanel: View {
         Spacer(minLength: 0)
         modelChip
       }
-    case .awaitingConfirm(let project):
-      statusRow(project.displayTitle, icon: "doc.text", status: L("待确认", "Unconfirmed"), tint: Palette.accent)
     case .empty(let project):
-      statusRow(project.displayTitle, icon: "doc.text", status: L("尚无正文", "No text yet"), tint: Palette.inkFaint)
+      HStack(spacing: 7) {
+        ContextChip(model: model, project: project, locked: session.running || session.preparing)
+        Text(L("尚无正文", "No text yet")).font(.system(size: 10, weight: .medium))
+          .foregroundStyle(Palette.inkFaint)
+        Spacer(minLength: 0)
+        modelChip
+      }
     case .desk:
       HStack(spacing: 7) {
         chip(icon: "books.vertical", title: L("书房 · 只见清单", "Library · list only"))
@@ -391,15 +464,6 @@ struct AgentPanel: View {
         .foregroundStyle(Palette.inkFaint)
         .lineLimit(1).truncationMode(.head)
         .help(L("当前模型：\(provider.label) · \(provider.model)", "Current model: \(provider.label) · \(provider.model)"))
-    }
-  }
-
-  private func statusRow(_ title: String, icon: String, status: String, tint: Color) -> some View {
-    HStack(spacing: 7) {
-      chip(icon: icon, title: title)
-      Text(status).font(.system(size: 10, weight: .medium)).foregroundStyle(tint)
-      Spacer(minLength: 0)
-      modelChip
     }
   }
 
@@ -441,6 +505,95 @@ private struct SuggestionRow: View {
   }
 }
 
+
+/// The paper text in the composer, and the one place to change it: recognise the original again,
+/// or replace it with a Markdown file (one already in files/, or any other).
+private struct ContextChip: View {
+  @ObservedObject var model: AppModel
+  let project: Project
+  /// while a turn runs: a new text would only reach the next turn
+  let locked: Bool
+
+  private var markdownFiles: [ProjectFile] {
+    model.activeProjectFiles.filter { ["md", "markdown"].contains(($0.name as NSString).pathExtension.lowercased()) }
+  }
+
+  var body: some View {
+    Menu {
+      if project.hasSource {
+        Button(project.hasUsableContext ? L("重新识别…", "Recognize Again…") : L("识别原稿…", "Recognize Original…")) {
+          model.reOCRActiveProject()
+        }
+      }
+      Menu(L("替换为 Markdown", "Replace with Markdown")) {
+        ForEach(markdownFiles) { file in
+          Button(file.name) {
+            let url = project.directoryURL.appendingPathComponent(file.path)
+            Task { await model.replaceProjectContext(with: url) }
+          }
+        }
+        if !markdownFiles.isEmpty { Divider() }
+        Button(L("其他文件…", "Other File…")) { model.chooseMarkdownToReplaceContext() }
+      }
+    } label: {
+      HStack(spacing: 5) {
+        Image(systemName: "doc.text").font(.system(size: 9))
+        Text(project.displayTitle).lineLimit(1).truncationMode(.tail)
+        Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
+      }
+      .font(.system(size: 10)).foregroundStyle(Palette.inkSoft)
+      .padding(.horizontal, 7).padding(.vertical, 3.5)
+      .background(Palette.sunk, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+      .contentShape(Rectangle())
+    }
+    // A plain button-style menu draws the label as written. The native style keeps only the first
+    // image and text, drops the background, and never truncates, so a long title runs over its neighbours.
+    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+    .frame(maxWidth: 240, alignment: .leading)
+    .fixedSize(horizontal: true, vertical: false)
+    .disabled(locked || model.projectBusy)
+    .help(help)
+    .accessibilityIdentifier("context-chip")
+  }
+
+  private var help: String {
+    guard let context = project.context, project.hasUsableContext else { return project.displayTitle }
+    return "\(project.displayTitle)\n" + L("正文来自：\(context.originLabel)", "Text from: \(context.originLabel)")
+  }
+}
+
+/// An image waiting in the composer.
+private struct PendingImage: View {
+  let image: ComposerImage
+  let onRemove: () -> Void
+  @State private var hovering = false
+
+  var body: some View {
+    Group {
+      if let thumbnail = image.thumbnail {
+        Image(nsImage: thumbnail).resizable().aspectRatio(contentMode: .fill)
+      } else {
+        Image(systemName: "photo").foregroundStyle(Palette.inkFaint)
+      }
+    }
+    .frame(width: 56, height: 44)
+    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Palette.ruleSoft))
+    .overlay(alignment: .topTrailing) {
+      if hovering {
+        Button(action: onRemove) {
+          Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(Palette.cream, Palette.ink.opacity(0.7))
+        }
+        .buttonStyle(.plain).padding(2)
+        .accessibilityLabel(L("移除这张图", "Remove this image"))
+      }
+    }
+    .onHover { hovering = $0 }
+    .help("\(image.width)×\(image.height)")
+  }
+}
 
 /// Height handle on the composer's top edge.
 ///

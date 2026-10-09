@@ -28,12 +28,15 @@ extension AppModel {
     let reasoning: String
     /// `own` or `macro:<n>`; a reference, not a secret
     let credentialRef: String
+    /// Whether the model reads images, as last checked by showing it one; nil when never checked.
+    /// Recognition and image attachments need true.
+    let vision: Bool?
 
     /// falls back to the id, never the model id
     var displayName: String { label.isEmpty ? id : label }
 
     private enum CodingKeys: String, CodingKey {
-      case id, label, model, reasoning
+      case id, label, model, reasoning, vision
       case proto = "protocol"
       case credentialRef = "credential_ref"
       case baseUrl = "base_url"
@@ -54,6 +57,7 @@ extension AppModel {
       detectedWindow = try? c.decodeIfPresent(Int.self, forKey: .detectedWindow)
       reasoning = (try? c.decode(String.self, forKey: .reasoning)) ?? ProviderDefaults.reasoning
       credentialRef = (try? c.decode(String.self, forKey: .credentialRef)) ?? "own"
+      vision = try? c.decodeIfPresent(Bool.self, forKey: .vision)
     }
 
     /// for previews and offscreen checks; real data is always decoded from the backend
@@ -61,12 +65,13 @@ extension AppModel {
       id: String, label: String, model: String, baseUrl: String,
       proto: String = ProviderDefaults.proto, hasCredential: Bool = false,
       contextWindow: Int? = nil, detectedWindow: Int? = nil, reasoning: String = ProviderDefaults.reasoning,
-      credentialRef: String = "own"
+      credentialRef: String = "own", vision: Bool? = nil
     ) {
       self.contextWindow = contextWindow
       self.detectedWindow = detectedWindow
       self.reasoning = reasoning
       self.credentialRef = credentialRef
+      self.vision = vision
       self.id = id
       self.label = label
       self.model = model
@@ -290,18 +295,36 @@ extension AppModel {
     }
     // stable backend error codes, phrased for people; no credential is ever echoed
     let failure = root["code"] as? String ?? "UNKNOWN"
-    switch failure {
-    case "MISSING_CREDENTIAL": return (false, L("还没填 API key", "No API key yet"))
-    case "INVALID_CREDENTIAL", "AUTH":
-      return (false, L("key 不对，或者没有这个模型的权限", "Wrong key, or no access to this model"))
-    case "RATE_LIMIT": return (false, L("被限流了，等一会儿再试", "Rate-limited — try again in a moment"))
-    case "QUOTA": return (false, L("配额用完了", "Out of quota"))
-    case "TIMEOUT", "TRANSPORT":
-      return (false, L("连不上厂商，检查网络或 base_url", "Can't reach the provider — check the network or base URL"))
-    case "NO_ADAPTER": return (false, L("这个 provider 没有注册", "This provider isn't registered"))
-    default:
-      return (false, (root["message"] as? String) ?? L("测试失败（\(failure)）", "Test failed (\(failure))"))
+    guard let message = root["message"] as? String else {
+      return (false, L("测试失败（\(failure)）", "Test failed (\(failure))"))
     }
+    return (false, ModelFailure.describe(code: failure, message: message).text)
+  }
+
+  /// Show the card's model an image and see whether it reads it (one small request, unless the
+  /// backend already knows). The verdict comes back with the provider list.
+  func checkVision(_ id: String) async -> (supported: Bool?, failure: UIText?) {
+    guard await awaitBackend() else {
+      return (nil, UIText("本地服务没起来", "The local service isn't running"))
+    }
+    await injectCredentials()
+    // Asked for by the user, so the model is asked again: a cached verdict may be the very thing
+    // in doubt (a misread, or a gateway that routed elsewhere that day).
+    var components = URLComponents(
+      url: backend.apiBase.appendingPathComponent("llm/providers/\(id)/vision"),
+      resolvingAgainstBaseURL: false)
+    components?.queryItems = [URLQueryItem(name: "refresh", value: "true")]
+    guard let url = components?.url else { return (nil, UIText("连不上本地服务", "Can't reach the local service")) }
+    var request = URLRequest(backend: url)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 90
+    guard let (data, _) = try? await URLSession.shared.data(for: request),
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return (nil, UIText("连不上本地服务", "Can't reach the local service")) }
+    await refreshProviders()
+    let supported = root["vision"] as? Bool
+    guard supported == nil else { return (supported, nil) }
+    return (nil, ModelFailure.describe(code: root["code"] as? String, message: root["message"] as? String ?? ""))
   }
 
   /// manual window first, then the reported one; nil if neither
@@ -374,16 +397,23 @@ extension AppModel {
     return project.hasUsableContext
   }
 
-  func askAgent(_ question: String) {
+  /// `images` go with the question; the librarian takes none.
+  func askAgent(_ question: String, images: [ComposerImage] = []) {
     let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty, canAskAgent else { return }
+    let attached = activeProjectID == nil ? [] : images
+    guard !trimmed.isEmpty || !attached.isEmpty, canAskAgent else { return }
     let session = agentSession
     let provider = activeProviderID
     Task {
       guard await awaitBackend() else { return }
       await injectCredentials()
-      session.ask(trimmed, base: backend.apiBase, provider: provider)
+      session.ask(trimmed, base: backend.apiBase, provider: provider, images: attached)
     }
+  }
+
+  /// Whether the current card can take images: nil when never checked (then the provider decides).
+  var activeVision: Bool? {
+    providers.first { $0.id == activeProviderID }?.vision
   }
 
   /// Compact the current conversation by hand. Same preparation as asking (backend, credentials):

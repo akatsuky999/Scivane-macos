@@ -4,8 +4,10 @@ import UniformTypeIdentifiers
 
 /// Project actions; state lives in AppModel, this holds behaviour only.
 /// 1. build a project: copy the source, guess a title, enter it; reuse existing OCR text
-/// 2. OCR finishes inside a project: the result becomes its context and refines the title
-/// 3. Markdown imported into a project: pending until a person confirms it
+/// 2. recognition (local OCR or a model card) finishes inside a project: the result becomes the
+///    paper text and refines the title
+/// 3. the paper text changes only through those runs or Replace on the text chip; other Markdown
+///    goes into files/ and is only shown
 @MainActor
 extension AppModel {
 
@@ -181,18 +183,55 @@ extension AppModel {
       return
     }
     jobProjects[source.id] = project.id
-
-    if let contextURL = project.contextURL, let text = adopt(url: contextURL) {
-      jobProjects[text.id] = project.id
-      // the context may have just been replaced; disk is newer than the job's copy
-      reloadMarkdown(text)
-      pair(source: source, text: text)
-    } else {
-      unpair(source: source)
-    }
+    pairProjectText(project, source: source)
 
     // dualPane is the user's preference and stays untouched
     select(source)
+  }
+
+  /// Put the project's text beside its source: the paper text, or the Markdown from files/ chosen in
+  /// the text pane. Text an older version left unconfirmed isn't shown as the paper text.
+  private func pairProjectText(_ project: Project, source: DocumentJob) {
+    let chosen = projectDocument[project.id].map { project.directoryURL.appendingPathComponent($0) }
+    let url = chosen.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+      ?? (project.hasUsableContext ? project.contextURL : nil)
+    if chosen != nil, url != chosen { projectDocument.removeValue(forKey: project.id) }
+    guard let url, let text = adopt(url: url) else {
+      unpair(source: source)
+      return
+    }
+    jobProjects[text.id] = project.id
+    // the file may have just been replaced; disk is newer than the job's copy
+    reloadMarkdown(text)
+    pair(source: source, text: text)
+  }
+
+  /// What the text pane shows in this project: nil for the paper text, or a Markdown under files/.
+  func showProjectText(_ relativePath: String?) {
+    guard let project = activeProject else { return }
+    if let relativePath {
+      projectDocument[project.id] = relativePath
+    } else {
+      projectDocument.removeValue(forKey: project.id)
+    }
+    guard let source = projectSourceJob(project) else {
+      // a project without a source has no pairing; show the file on its own
+      let url = relativePath.map { project.directoryURL.appendingPathComponent($0) } ?? project.contextURL
+      if let url, let job = adopt(url: url) {
+        jobProjects[job.id] = project.id
+        reloadMarkdown(job)
+      } else {
+        selection = nil
+        replayIntoRenderer()
+      }
+      textMode = .document
+      return
+    }
+    pairProjectText(project, source: source)
+    textMode = .document
+    if !dualPane { singlePane = .text }
+    selection = source.id
+    replayIntoRenderer()
   }
 
   /// Back to no open project: the librarian returns and the reading area is cleared, or it looks as
@@ -222,70 +261,106 @@ extension AppModel {
 
     do {
       let updated = try await projectClient.setContext(
-        project.id, markdown: job.markdown, origin: "ocr", jobID: serverJobID)
+        project.id, markdown: job.markdown, origin: job.engine.provider == nil ? "ocr" : "model",
+        jobID: serverJobID, model: job.engineModel.isEmpty ? nil : job.engineModel)
+      // the fresh text is what the pane should show, not a file the user was reading meanwhile
+      projectDocument.removeValue(forKey: updated.id)
       await refreshProjects()
       if activeProjectID == updated.id {
         await enterProject(updated)
       }
-      notifyProject(L("已写入项目「\(updated.displayTitle)」", "Saved to the project “\(updated.displayTitle)”"))
+      if job.failedPages.isEmpty {
+        notifyProject(L("已写入项目「\(updated.displayTitle)」", "Saved to the project “\(updated.displayTitle)”"))
+      } else {
+        let pages = job.failedPages.map(String.init).joined(separator: L("、", ", "))
+        notifyProject(L("已写入项目；第 \(pages) 页没识别出来", "Saved; pages \(pages) couldn't be recognized"))
+      }
     } catch {
       notifyProject(L("写入项目失败：", "Couldn't save to the project: ") + error.localizedDescription)
     }
   }
 
+  /// Recognise the open project's source again: opens the engine chooser.
   func reOCRActiveProject() {
     guard let project = activeProject, let source = projectSourceJob(project) else { return }
-    retry(source)
+    requestRecognition(source)
   }
 
-  // MARK: - Importing Markdown
+  // MARK: - Markdown in files/
 
-  /// Lands as pending confirmation: the file may not be this paper, and wrong context is worse than
-  /// none.
-  func importMarkdownIntoProject(_ url: URL, project: Project) async {
-    guard !projectBusy else { return }
+  /// Keep a Markdown file in the project's files/ (with its images) and show it in the text pane.
+  /// The paper text is untouched.
+  func viewMarkdownInProject(_ url: URL) async {
+    guard let projectID = activeProjectID else { return }
+    guard await awaitBackend() else { return }
+    do {
+      let added = try await projectClient.addFile(projectID, path: url.path)
+      await refreshProjectFiles(projectID)
+      guard activeProjectID == projectID else { return }
+      showProjectText(added.path)
+    } catch {
+      notifyProject(L("「\(url.lastPathComponent)」没放进去：", "Couldn't add “\(url.lastPathComponent)”: ")
+                    + error.localizedDescription)
+    }
+  }
+
+  func chooseMarkdownToView() {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = Self.markdownTypes
+    panel.allowsMultipleSelection = false
+    panel.message = L("放进项目的 files/ 并在正文栏查看", "Keep it in the project's files/ and show it in the text pane")
+    panel.prompt = L("打开", "Open")
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    Task { await viewMarkdownInProject(url) }
+  }
+
+  // MARK: - Replacing the paper text
+
+  /// Make a Markdown file the paper text. Nothing is versioned, so replacing existing text asks
+  /// first. `askFirst` is off only in checks that can't answer a dialog.
+  func replaceProjectContext(with url: URL, askFirst: Bool = true) async {
+    guard let project = activeProject, !projectBusy else { return }
+    if askFirst, project.hasUsableContext {
+      let alert = NSAlert()
+      alert.messageText = L("用「\(url.lastPathComponent)」替换论文正文？", "Replace the paper text with “\(url.lastPathComponent)”?")
+      alert.informativeText = L("现在的正文会被覆盖，不能撤销。", "The current text will be overwritten. This can't be undone.")
+      alert.alertStyle = .warning
+      alert.addButton(withTitle: L("替换", "Replace"))
+      alert.addButton(withTitle: L("取消", "Cancel"))
+      guard alert.runModal() == .alertFirstButtonReturn else { return }
+    }
     projectBusy = true
     defer { projectBusy = false }
-
     guard await awaitBackend() else { return }
     do {
       let markdown = try String(contentsOf: url, encoding: .utf8)
       let updated = try await projectClient.setContext(
         project.id, markdown: markdown, origin: "upload",
         sourceDirectory: url.deletingLastPathComponent())
+      projectDocument.removeValue(forKey: updated.id)
       await refreshProjects()
       if activeProjectID == updated.id { await enterProject(updated) }
+      notifyProject(L("论文正文已换成「\(url.lastPathComponent)」", "The paper text is now “\(url.lastPathComponent)”"))
     } catch {
-      notifyProject(L("导入失败：", "Import failed: ") + error.localizedDescription)
+      notifyProject(L("替换失败：", "Couldn't replace the text: ") + error.localizedDescription)
     }
   }
 
-  func chooseMarkdownForProject(_ project: Project) {
+  func chooseMarkdownToReplaceContext() {
+    guard let project = activeProject else { return }
     let panel = NSOpenPanel()
-    panel.allowedContentTypes = [
-      UTType(filenameExtension: "md") ?? .plainText,
-      UTType(filenameExtension: "markdown") ?? .plainText,
-    ]
+    panel.allowedContentTypes = Self.markdownTypes
     panel.allowsMultipleSelection = false
     panel.message = L("选择一份 Markdown 作为「\(project.displayTitle)」的正文", "Choose a Markdown file as the text of “\(project.displayTitle)”")
-    panel.prompt = L("使用", "Use")
+    panel.prompt = L("替换", "Replace")
     guard panel.runModal() == .OK, let url = panel.url else { return }
-    Task { await importMarkdownIntoProject(url, project: project) }
+    Task { await replaceProjectContext(with: url) }
   }
 
-  /// Whether a person accepts the text as this paper's.
-  func confirmProjectContext(_ accepted: Bool) async {
-    guard let project = activeProject else { return }
-    guard await awaitBackend() else { return }
-    do {
-      let updated = try await projectClient.confirmContext(project.id, accepted: accepted)
-      await refreshProjects()
-      await enterProject(updated)
-      notifyProject(accepted ? L("已确认为本篇正文", "Confirmed as this paper's text") : L("已撤销这份正文", "This text was withdrawn"))
-    } catch {
-      notifyProject(L("操作失败：", "That didn't work: ") + error.localizedDescription)
-    }
-  }
+  static let markdownTypes: [UTType] = [
+    UTType(filenameExtension: "md") ?? .plainText,
+    UTType(filenameExtension: "markdown") ?? .plainText,
+  ]
 
   // MARK: - Rename and delete
 

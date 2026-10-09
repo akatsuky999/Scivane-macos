@@ -93,15 +93,14 @@ class RenameIn(BaseModel):
 
 class ContextIn(BaseModel):
     markdown: str
-    origin: Literal["ocr", "upload"] = "ocr"
-    #: OCR job whose image crops move into the project
+    #: local OCR, a vision model's transcription, or a Markdown file the user picked
+    origin: Literal["ocr", "model", "upload"] = "ocr"
+    #: OCR or transcription job whose image crops move into the project
     job_id: str | None = None
     #: directory of the uploaded Markdown, for its relative image links
     source_dir: str | None = None
-
-
-class ConfirmIn(BaseModel):
-    accepted: bool
+    #: the model that transcribed it (origin "model")
+    model: str | None = None
 
 
 class AnnotationIn(BaseModel):
@@ -202,7 +201,7 @@ async def get_context(project_id: str):
 
 @router.put("/{project_id}/context")
 async def set_context(project_id: str, body: ContextIn):
-    """Replace the static context. OCR output is trusted; uploaded Markdown lands unconfirmed."""
+    """Replace the paper text. Every way in is the user's own act, so it is usable at once."""
     try:
         project = projects.set_context(
             project_id,
@@ -211,17 +210,8 @@ async def set_context(project_id: str, body: ContextIn):
             job_id=body.job_id,
             jobs_root=config.JOBS_DIR,
             source_dir=Path(body.source_dir).expanduser() if body.source_dir else None,
+            model=body.model,
         )
-    except ProjectError as exc:
-        raise _fail(exc) from exc
-    return {"project": _described(project)}
-
-
-@router.post("/{project_id}/context/confirm")
-async def confirm_context(project_id: str, body: ConfirmIn):
-    """Confirm or reject uploaded Markdown as this paper's text. Rejecting removes it entirely."""
-    try:
-        project = projects.confirm_context(project_id, body.accepted)
     except ProjectError as exc:
         raise _fail(exc) from exc
     return {"project": _described(project)}

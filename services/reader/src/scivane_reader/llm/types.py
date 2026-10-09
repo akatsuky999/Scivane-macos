@@ -195,3 +195,10 @@ class CallRequest:
             raise ValueError(
                 f"cacheable_prefix={self.cacheable_prefix} 超出消息数 {len(self.messages)}"
             )
+
+    @property
+    def has_images(self) -> bool:
+        """Whether an image is anywhere in the request; decides if a rejection can mean NO_VISION."""
+        return any(
+            isinstance(block, ImageBlock) for message in self.messages for block in message.content
+        )

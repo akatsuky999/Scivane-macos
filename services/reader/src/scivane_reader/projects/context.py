@@ -18,8 +18,9 @@ from typing import Sequence
 
 from ..i18n import ui
 from ..llm import CallRequest, Message, Purpose
-from ..llm.types import ToolResultBlock, ToolSchema, ToolUseBlock
+from ..llm.types import ContentBlock, ToolResultBlock, ToolSchema, ToolUseBlock
 from .model import Project
+from .session import user_content
 
 #: Short and stable: it heads the cache prefix, so changing one character invalidates every
 #: project's cache.
@@ -41,20 +42,22 @@ def assemble(
     max_tokens: int | None = None,
     tools: tuple[ToolSchema, ...] = (),
     system: str | None = None,
+    images: Sequence[ContentBlock] = (),
 ) -> CallRequest:
-    """Assemble project, history and question into one call.
+    """Assemble project, history and question into one call; `images` go with the question.
 
     `system` overrides the default prompt; the two agent levels keep separate prompts.
-    Raises ValueError when the context hasn't been confirmed.
+    Raises ValueError for text an older version left unconfirmed.
     """
     if project.context is not None and not project.context.confirmed:
-        # Unconfirmed text may not be this paper at all; answering from it is worse than no context.
-        raise ValueError(ui("这份上下文还没有经过确认，不能用于问答",
-                            "This text hasn't been confirmed yet, so it can't be used for questions"))
+        # It may not be this paper at all; answering from it is worse than no context.
+        raise ValueError(ui("这份正文还没有确认，不能用于问答 —— 重新识别原稿，或换一份 Markdown",
+                            "This text was never confirmed, so it can't be used for questions — "
+                            "recognize the original again, or replace it with a Markdown file"))
 
     messages: list[Message] = [paper_message(project, context_markdown)]
     messages.extend(settle_history(history or []))
-    messages.append(Message.text("user", question))
+    messages.append(Message("user", user_content(question, images)))
 
     return CallRequest(
         model=model,

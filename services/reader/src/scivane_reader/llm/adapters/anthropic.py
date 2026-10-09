@@ -275,11 +275,22 @@ class AnthropicAdapter(ProtocolAdapter):
                 "content": _blocks(message, cached=index == plan.message_breakpoint),
             })
 
+        # Thinking is a token budget and must stay below max_tokens. When the caller set no
+        # ceiling, it goes on top of the default, so a medium budget doesn't eat the whole answer
+        # (or make the request invalid).
+        budget = {"low": 2048, "medium": 8192, "high": 16384}.get(request.reasoning or "")
+        if request.max_tokens:
+            ceiling = request.max_tokens
+            thinking = budget is not None and budget < ceiling
+        else:
+            ceiling = DEFAULT_MAX_TOKENS + (budget or 0)
+            thinking = budget is not None
+
         body: dict[str, object] = {
             "model": request.model,
             "messages": messages,
             "stream": True,
-            "max_tokens": request.max_tokens or DEFAULT_MAX_TOKENS,
+            "max_tokens": ceiling,
         }
         if request.system:
             system_block: dict[str, object] = {"type": "text", "text": request.system}
@@ -297,12 +308,8 @@ class AnthropicAdapter(ProtocolAdapter):
                 }
                 for tool in request.tools
             ]
-        # Thinking is a token budget and must stay below max_tokens, so half is left for the answer.
-        budget = {"low": 2048, "medium": 8192, "high": 16384}.get(request.reasoning or "")
-        if budget is not None:
-            ceiling = request.max_tokens or 0
-            if ceiling <= 0 or budget < ceiling:
-                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        if thinking:
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
         elif request.reasoning == "none":
             body["thinking"] = {"type": "disabled"}
         body.update(request.extra)

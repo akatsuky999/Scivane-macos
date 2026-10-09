@@ -56,9 +56,12 @@ Open Scivane, press <kbd>⌘</kbd> <kbd>,</kbd>, and go to **Models**. The app c
 
 For Claude or Gemini, click **＋ New Card** → **Custom**, choose the Anthropic or Google Gemini protocol, and use `https://api.anthropic.com` or `https://generativelanguage.googleapis.com` as the base URL.
 
-### 4 · Local OCR (Optional)
+### 4 · Turn the PDF into Markdown
 
-You only need it to convert PDFs into Markdown. The first time you click **Start OCR**, follow the prompt to install it (about a 2.2 GB download).
+Before you ask questions, the paper is recognized into Markdown. Click **Recognize Original…** and pick one:
+
+- **Cloud Model**: one of your model cards transcribes the paper page by page. Nothing to install; it's billed to your own key. The model must accept images — text-only models can't do this, and the panel says so.
+- **Local OCR** (optional): runs on your Mac and costs no tokens. The first time you pick it, follow the prompt to install it (about a 2.2 GB download).
 
 ### Updating
 

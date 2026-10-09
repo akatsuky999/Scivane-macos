@@ -33,6 +33,8 @@ INVALID_ARGS: Final = "INVALID_ARGS"
 #: blocked by the provider's safety policy. Unlike EMPTY_RESPONSE this is deterministic:
 #: retrying only burns money.
 REFUSAL: Final = "REFUSAL"
+#: the request carried images and the model can't take them; switch to a vision model
+NO_VISION: Final = "NO_VISION"
 #: anything unclassified
 UNKNOWN: Final = "UNKNOWN"
 
@@ -40,7 +42,7 @@ ALL_CODES: Final = frozenset({
     NO_ADAPTER, MISSING_CREDENTIAL, INVALID_CREDENTIAL, AUTH,
     RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT,
     CONTEXT_WINDOW_EXCEEDED, QUOTA, EMPTY_RESPONSE, INVALID_ARGS,
-    REFUSAL, UNKNOWN,
+    REFUSAL, NO_VISION, UNKNOWN,
 })
 
 
@@ -101,8 +103,27 @@ _QUOTA = re.compile(
 )
 
 
+#: Text-only models rejecting image parts. Only consulted when the request carried images: the
+#: same words in an unrelated error would otherwise send people looking for a vision model.
+_NO_VISION = re.compile(
+    r"image[_\s-]?url"
+    r"|images?[_\s-]?(?:input|content|parts?)?.{0,40}(?:not|un)\s*supported"
+    r"|(?:not|un)\s*supported.{0,40}images?"
+    r"|does(?:n't| not) support (?:image|vision|multi[\s-]?modal)"
+    r"|support(?:s|ing)? image input"
+    r"|not (?:a )?(?:multi[\s-]?modal|vision)"
+    r"|vision (?:is )?not (?:supported|enabled|available)"
+    r"|unknown (?:part|content) type",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def looks_like_context_overflow(text: str) -> bool:
     return bool(_CONTEXT_OVERFLOW.search(text))
+
+
+def looks_like_no_vision(text: str) -> bool:
+    return bool(_NO_VISION.search(text))
 
 
 def looks_like_quota_exhausted(text: str) -> bool:
