@@ -61,7 +61,7 @@ For Claude or Gemini, click **＋ New Card** → **Custom**, choose the Anthropi
 Before you ask questions, the paper is recognized into Markdown. Click **Recognize Original…** and pick one:
 
 - **Cloud Model**: one of your model cards transcribes the paper page by page. Nothing to install; it's billed to your own key. The model must accept images — text-only models can't do this, and the panel says so.
-- **Local OCR** (optional): runs on your Mac and costs no tokens. The first time you pick it, follow the prompt to install it (about a 2.2 GB download).
+- **Local OCR** (optional): uses open-source code and model weights from [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR), runs on your Mac, and costs no tokens. The first time you pick it, follow the prompt to install it (about a 2.2 GB download).
 
 ### Updating
 
