@@ -56,6 +56,10 @@ class LlmFailure:
     status: int | None = None
     #: seconds from Retry-After; honoured within bounds
     retry_after: float | None = None
+    #: Longest stretch, in seconds, without data from the provider during the attempt that failed.
+    #: Tells a stream the gateway gave up on after a long silence (a long tool argument some
+    #: providers don't stream) from one that broke at once. None before a response arrived.
+    quiet: float | None = None
 
     def __post_init__(self) -> None:
         if self.code not in ALL_CODES:

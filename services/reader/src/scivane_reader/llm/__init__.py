@@ -25,6 +25,7 @@ from .types import (
     TextBlock,
     TextDelta,
     ThinkingDelta,
+    ToolInputDelta,
     Usage,
     UsageUpdate,
 )
@@ -34,7 +35,7 @@ logger = logging.getLogger("scivane.llm")
 
 __all__ = [
     "CallRequest", "Message", "TextBlock", "ImageBlock", "ContentBlock",
-    "StreamChunk", "TextDelta", "ThinkingDelta", "UsageUpdate", "Finish",
+    "StreamChunk", "TextDelta", "ThinkingDelta", "ToolInputDelta", "UsageUpdate", "Finish",
     "Usage", "Purpose", "VisionCheck",
     "LlmError", "LlmFailure", "ALL_CODES",
     "CacheCapability", "CachePlan", "plan_cache", "prefix_fingerprint",

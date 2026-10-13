@@ -405,16 +405,51 @@ extension AppModel {
   }
 
   /// `images` go with the question; the librarian takes none.
+  ///
+  /// A project question is sent with its conversation already settled. Sessions are keyed by
+  /// conversation; when the backend picked one mid-turn, the next list refresh moved the panel to a
+  /// new session, which restored the running turn as tools that never ran and accepted a second
+  /// question the backend then refused as busy.
   func askAgent(_ question: String, images: [ComposerImage] = []) {
     let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
     let attached = activeProjectID == nil ? [] : images
     guard !trimmed.isEmpty || !attached.isEmpty, canAskAgent else { return }
-    let session = agentSession
+    let projectID = activeProjectID
+    let conversation = activeConversationID
     let provider = activeProviderID
+    if let projectID, conversation == nil {
+      guard !conversationsStarting.contains(projectID) else { return }
+      conversationsStarting.insert(projectID)
+    }
     Task {
+      defer { if let projectID { conversationsStarting.remove(projectID) } }
       guard await awaitBackend() else { return }
+      var target = conversation
+      if let projectID, target == nil {
+        guard let created = await startConversation(projectID) else { return }
+        target = created
+      }
+      let session = session(for: projectID, conversation: target)
+      if conversation == nil, target != nil { session.startFresh() }
       await injectCredentials()
       session.ask(trimmed, base: backend.apiBase, provider: provider, images: attached)
+    }
+  }
+
+  /// The conversation a question with none selected goes to: the most recent one, as the backend
+  /// would pick, or a new one. It becomes the current one unless the user picked another meanwhile.
+  private func startConversation(_ projectID: String) async -> String? {
+    // the list may not have loaded yet
+    await refreshConversations(projectID)
+    if let latest = activeConversation[projectID] { return latest }
+    do {
+      let created = try await projectClient.createConversation(projectID)
+      if activeConversation[projectID] == nil { activeConversation[projectID] = created.id }
+      await refreshConversations(projectID)
+      return created.id
+    } catch {
+      notifyProject(L("新建对话失败：", "Couldn't create a chat: ") + error.localizedDescription)
+      return nil
     }
   }
 

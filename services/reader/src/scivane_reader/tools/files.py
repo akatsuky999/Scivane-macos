@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from ..projects import workspace
+from ..projects.attachments import dimensions, sniff
 from .definition import (
     UNLIMITED_RESULT,
     ToolContext,
@@ -21,13 +22,18 @@ from .definition import (
     ToolOutcome,
 )
 
-__all__ = ["file_tools", "READ_MAX_LINES", "GREP_MAX_HITS", "DIFF_MAX_LINES"]
+__all__ = ["file_tools", "READ_MAX_LINES", "GREP_MAX_HITS", "DIFF_MAX_LINES", "SECTION_CHARS"]
 
 #: read limits itself, so its results never spill (see results.py)
 READ_MAX_LINES = 2_000
 GREP_MAX_HITS = 200
 #: a paper's text is a few hundred KB; anything much larger is usually binary or a log
 READ_MAX_BYTES = 2_000_000
+
+#: Most a single write should carry. A tool call's arguments are generated before anything is
+#: sent; some gateways cut a stream that stays silent for about two minutes, and at the slowest
+#: rate measured on one (about 60 characters a second) this much takes under a minute.
+SECTION_CHARS = 3000
 
 
 def _root(context: ToolContext) -> Path:
@@ -49,10 +55,52 @@ def _resolve(context: ToolContext, raw: object, *, write: bool = False) -> Path:
         raise ToolError(str(exc), exc.code) from exc
 
 
+#: Bytes sniffed to tell binary from text: a NUL in here means binary, as git and ripgrep decide.
+SNIFF_BYTES = 8192
+
+
+def _head(path: Path) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(SNIFF_BYTES)
+    except OSError:
+        return b""
+
+
+def _binary(head: bytes) -> bool:
+    return sniff(head) is not None or b"\0" in head
+
+
+def _describe_binary(target: Path, head: bytes, relative: str) -> ToolOutcome:
+    """What `read` says about a binary file instead of decoding it.
+
+    Decoded as text, a 235 KB plot came back as 70,000 tokens of mojibake: paid for on every
+    later request of the turn, and no use to the model.
+    """
+    size = target.stat().st_size
+    media = sniff(head)
+    if media is not None:
+        shape = dimensions(head, media)
+        pixels = f"，{shape[0]}×{shape[1]} 像素" if shape else ""
+        return ToolOutcome(
+            f"{relative} 是一张 {media.split('/')[1].upper()} 图片（{size} 字节{pixels}）。"
+            "read 只读文本，看不到图里画了什么；要核对一张图，用 python 读它的尺寸、像素或数据，"
+            "或者请用户在 Finder 里打开它看。",
+            detail={"binary": media, "bytes": size},
+        )
+    raise ToolError(
+        f"{relative} 是二进制文件（{size} 字节），read 只读文本 —— 用 python 或 bash 里合适的工具处理它",
+        "BINARY_FILE",
+    )
+
+
 async def _read(arguments: dict[str, object], context: ToolContext) -> ToolOutcome:
     target = _resolve(context, arguments.get("path"))
     if not target.is_file():
         raise ToolError(f"不是文件或不存在：{arguments.get('path')}", "NOT_FOUND")
+    head = _head(target)
+    if _binary(head):
+        return _describe_binary(target, head, str(target.relative_to(_root(context))))
     if target.stat().st_size > READ_MAX_BYTES:
         raise ToolError(
             f"文件有 {target.stat().st_size} 字节，超过 {READ_MAX_BYTES} 上限 —— "
@@ -151,6 +199,9 @@ async def _write(arguments: dict[str, object], context: ToolContext) -> ToolOutc
     content = arguments.get("content")
     if not isinstance(content, str):
         raise ToolError("content 必须是字符串", "INVALID_ARGS")
+    # Appending lets a long document go in sections, each call small enough to be generated and
+    # sent before a gateway gives up on a silent stream (SECTION_CHARS).
+    appending = arguments.get("append") is True
     existed = target.is_file()
     # read the old content first so the UI can show what changed; a failed read never fails the write
     before = ""
@@ -159,17 +210,27 @@ async def _write(arguments: dict[str, object], context: ToolContext) -> ToolOutc
             before = target.read_text(encoding="utf-8", errors="replace")
         except OSError:
             before = ""
+    after = before + content if appending else content
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        if appending:
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(content)
+        else:
+            target.write_text(content, encoding="utf-8")
     except OSError as exc:
         raise ToolError(f"写不了：{exc.strerror}", "IO_ERROR") from exc
-    verb = "覆盖" if existed else "新建"
     relative = target.relative_to(_root(context))
-    change = _diff(before, content, str(relative))
+    change = _diff(before, after, str(relative))
+    if appending and existed:
+        summary = f"已追加到 {relative}（这次 {len(content)} 字，文件现在 {len(after)} 字，+{change['added']}）"
+    else:
+        verb = "覆盖" if existed else "新建"
+        summary = f"已{verb} {relative}（{len(content)} 字，+{change['added']} −{change['removed']}）"
     return ToolOutcome(
-        f"已{verb} {relative}（{len(content)} 字，+{change['added']} −{change['removed']}）",
-        detail={"path": str(relative), "overwrote": existed, "diff": change},
+        summary,
+        detail={"path": str(relative), "overwrote": existed and not appending,
+                "appended": appending and existed, "diff": change},
     )
 
 
@@ -291,6 +352,9 @@ def _grep_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
             workspace.resolve(root, path.relative_to(root))
         except (workspace.WorkspaceError, ValueError):
             continue
+        # a regex over decoded image bytes matches noise and returns it as hits
+        if _binary(_head(path)):
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -346,10 +410,24 @@ def file_tools() -> tuple[ToolDef, ...]:
         ),
         ToolDef(
             name="write",
-            description="把内容整体写进项目内一个文件（覆盖）。pdf/ 与 .lumen/ 不可写。",
+            description=(
+                "把内容写进项目内一个文件：默认整体覆盖，`append=true` 时接在文件末尾（文件不存在就新建）。"
+                "pdf/ 与 .lumen/ 不可写。\n\n"
+                f"**一次调用的 content 不要超过约 {SECTION_CHARS} 字。** 长文档（整篇译文、长笔记）分节写："
+                "第一节用 write 新建，之后每一节用 `append=true` 接上去；追加不会自动换行，"
+                "节与节之间的空行写在 content 开头。原因：一次调用的参数要整段生成完才会发出来，"
+                "有的网关在这段时间里收不到任何输出，等两分钟左右就会切断，已经生成的全部作废。"
+            ),
             parameters={
                 "type": "object",
-                "properties": {"path": _string("相对项目根的路径"), "content": _string("完整内容")},
+                "properties": {
+                    "path": _string("相对项目根的路径"),
+                    "content": _string(f"要写的内容；不超过约 {SECTION_CHARS} 字，更长的分节追加"),
+                    "append": {
+                        "type": "boolean",
+                        "description": "接在文件末尾而不是覆盖（默认 false）",
+                    },
+                },
                 "required": ["path", "content"],
             },
             run=_write,

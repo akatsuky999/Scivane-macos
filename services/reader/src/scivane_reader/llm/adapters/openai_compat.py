@@ -30,10 +30,12 @@ from ..types import (
     TextDelta,
     ThinkingDelta,
     ToolCall,
+    ToolInputDelta,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
     UsageUpdate,
+    argument_chars,
 )
 from .base import ProtocolAdapter, SseEvent, StreamTranslator
 
@@ -182,18 +184,16 @@ class OpenAiTranslator(StreamTranslator):
         if isinstance(calls, list):
             for raw in calls:
                 if isinstance(raw, dict):
-                    self._absorb(raw)
+                    yield from self._absorb(raw)
 
         # finish_reason means every call of this step has arrived
         if self._finish_reason and not self._flushed:
             yield from self._flush()
 
-    def _absorb(self, raw: dict[str, object]) -> None:
+    def _absorb(self, raw: dict[str, object]) -> Iterable[StreamChunk]:
         index = raw.get("index")
-        slot = self._pending.setdefault(
-            index if isinstance(index, int) else len(self._pending),
-            {"id": "", "name": "", "arguments": ""},
-        )
+        position = index if isinstance(index, int) else len(self._pending)
+        slot = self._pending.setdefault(position, {"id": "", "name": "", "arguments": ""})
         call_id = raw.get("id")
         if isinstance(call_id, str) and call_id:
             slot["id"] = call_id
@@ -205,6 +205,8 @@ class OpenAiTranslator(StreamTranslator):
             args = function.get("arguments")
             if isinstance(args, str):
                 slot["arguments"] += args
+        if slot["name"]:
+            yield ToolInputDelta(position, slot["name"], argument_chars(slot["arguments"]))
 
     def _flush(self) -> Iterable[StreamChunk]:
         self._flushed = True

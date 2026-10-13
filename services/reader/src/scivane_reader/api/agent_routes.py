@@ -22,11 +22,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from .. import config
 from ..i18n import ui
-from ..jobs import jobs
+from ..jobs import INTERRUPTED, interruptible, jobs
 from ..llm import LlmError, timing
 from ..llm.registry import registry as llm_registry
 from ..llm.estimate import estimate_request
-from ..llm.types import CallRequest, Finish, TextDelta, ThinkingDelta, UsageUpdate
+from ..llm.types import CallRequest, Finish, TextDelta, ThinkingDelta, ToolInputDelta, UsageUpdate
 from ..projects import ProjectError, assemble, projects
 from ..projects.attachments import AttachmentError, ImageRecord
 from ..projects.compaction import Compactor, CompactionError, auto_threshold, occupy
@@ -36,7 +36,7 @@ from ..projects.meter import calibration, measure
 from ..projects.session import derive_messages, derive_transcript, summarise_call
 from ..tools import AgentLoop, StoreJournal, librarian, reader
 from ..tools.approval import APPROVAL_TIMEOUT, approvals
-from .sse import HEARTBEAT_SECONDS, AgentEvent, encode
+from .sse import ERROR_CODE_HEADER, HEARTBEAT_SECONDS, AgentEvent, encode
 
 logger = logging.getLogger("scivane.api.agent")
 
@@ -77,6 +77,14 @@ class ApproveIn(BaseModel):
     approved: bool
     reason: str = ""
 
+
+
+#: why a turn was resumed -> the notice code the app words
+_NOTICE_CODES = {"silent_cut": "SILENT_CUT"}
+
+#: Progress on a tool call being written is sent at most this often per call; enough for a
+#: counter to look alive without a frame per argument fragment.
+TOOL_INPUT_INTERVAL = 0.25
 
 
 class Emitter:
@@ -147,10 +155,19 @@ class StreamingJournal:
         if self._store:
             self._store.tool_decision(call_id, name, approved, reason)
 
-    def assistant_message(self, text: str, *, stop: str) -> None:
+    def assistant_message(self, text: str, *, stop: str, failure: dict | None = None) -> None:
         if self._store:
             record = self._meter.step_record() if self._meter is not None else {}
-            self._store.assistant_message(text, stop=stop, **record)
+            self._store.assistant_message(text, stop=stop, failure=failure, **record)
+
+    def turn_resumed(self, text: str, *, reason: str, failure: dict) -> None:
+        if self._store:
+            self._store.turn_resumed(text, reason=reason, failure=failure)
+        # the note is for the model; the user gets a code and numbers, worded by the app
+        self._emitter.emit(AgentEvent.NOTICE, {
+            "code": _NOTICE_CODES.get(reason, reason.upper()),
+            "cause": failure.get("code", ""), "quiet": failure.get("quiet"),
+        })
 
     def user_message(self, text: str, images: list[dict] | None = None) -> None:
         if self._store:
@@ -158,18 +175,25 @@ class StreamingJournal:
 
 
 async def _pump(
-    emitter: Emitter, task: asyncio.Task, clock: timing.Recorder | None = None
+    emitter: Emitter, task: asyncio.Task, clock: timing.Recorder | None = None,
+    quiet=None,
 ) -> AsyncIterator[str]:
     """Drain the queue with periodic heartbeats (one bash call can be silent for a minute).
 
-    With `clock` set, records when each frame reaches the HTTP layer (llm/timing.py).
+    With `clock` set, records when each frame reaches the HTTP layer (llm/timing.py). `quiet()` is
+    how long the open model stream has been silent, or None; heartbeats carry it so the UI can
+    say the model has gone quiet instead of only counting time.
     """
     try:
         while True:
             try:
                 item = await asyncio.wait_for(emitter.queue.get(), timeout=HEARTBEAT_SECONDS)
             except asyncio.TimeoutError:
-                frame = encode(AgentEvent.HEARTBEAT, {"at": time.time()})
+                beat: dict[str, object] = {"at": time.time()}
+                silent = quiet() if quiet is not None else None
+                if silent is not None:
+                    beat["quiet"] = round(silent)
+                frame = encode(AgentEvent.HEARTBEAT, beat)
                 if clock is not None:
                     clock.frame(AgentEvent.HEARTBEAT, len(frame))
                 yield frame
@@ -222,7 +246,7 @@ def _store_images(body: ChatIn, attachments) -> list[ImageRecord]:
     if not body.images:
         return []
     if llm_registry.cached_vision(body.provider) is False:
-        raise HTTPException(status_code=409, detail=ui(
+        raise _refused("NO_VISION", ui(
             "这张模型卡看不到图片 —— 换一张能看图的卡，或者去掉图片再发。",
             "This model card can't see images — switch to one that can, or send without the images."))
     records = []
@@ -264,9 +288,21 @@ def _paper_text(project_id: str) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
 
 
-def _busy() -> str:
-    return ui("这条对话还有一轮没结束（或者正在压缩）—— 等它结束再发。",
-              "This conversation is still busy with a previous turn or a compaction — wait for it to finish.")
+def _refused(code: str, detail: str) -> HTTPException:
+    """A 409 the app can tell apart: the code in a header, the sentence in the detail."""
+    return HTTPException(status_code=409, detail=detail, headers={ERROR_CODE_HEADER: code})
+
+
+def _no_text() -> HTTPException:
+    return _refused("NO_CONTEXT", ui(
+        "这个项目还没有正文 —— 先识别原稿，或换成一份 Markdown。",
+        "This project has no text yet — recognize the original, or use a Markdown file."))
+
+
+def _busy() -> HTTPException:
+    return _refused("CONVERSATION_BUSY", ui(
+        "这条对话还有一轮没结束（或者正在压缩）—— 等它结束再发。",
+        "This conversation is still busy with a previous turn or a compaction — wait for it to finish."))
 
 
 def _network_watcher(emitter: Emitter):
@@ -342,31 +378,68 @@ async def _run(
         emitter.close()
 
 
-def _instrumented(provider_id: str, emitter: Emitter, state: dict, meter: Compactor | None = None):
+class _StreamWatch:
+    """The open model stream as the UI cares about it: the step number, when the provider last
+    sent anything, and how often tool-call progress went out."""
+
+    def __init__(self) -> None:
+        self.step = 0
+        self.open = False
+        self.heard = 0.0
+        #: tool call index -> when its progress was last sent
+        self._sent: dict[int, float] = {}
+
+    def begin(self) -> None:
+        self.open, self.heard, self._sent = True, time.monotonic(), {}
+
+    def quiet(self) -> float | None:
+        """Seconds since the open stream last sent data; None between streams (tools running)."""
+        return time.monotonic() - self.heard if self.open else None
+
+    def due(self, chunk: ToolInputDelta) -> bool:
+        """Whether this progress goes out: the first for a call does, then a few per second."""
+        last = self._sent.get(chunk.index)
+        if last is not None and self.heard - last < TOOL_INPUT_INTERVAL:
+            return False
+        self._sent[chunk.index] = self.heard
+        return True
+
+
+def _instrumented(provider_id: str, emitter: Emitter, watch: _StreamWatch, meter: Compactor | None = None):
     """Pass the model stream through to the loop while pushing deltas to the UI.
     Kept out of loop.py: the loop shouldn't know anyone is watching.
     """
 
     async def stream(request):
-        state["step"] += 1
+        watch.step += 1
         clock = timing.current()
         if clock is not None:
             clock.begin_step()
         emitter.emit(AgentEvent.MESSAGE_START, {
-            "step": state["step"], "provider": provider_id, "model": request.model,
+            "step": watch.step, "provider": provider_id, "model": request.model,
         })
         latest = None
-        async for chunk in llm_registry.stream(provider_id, request):
-            if isinstance(chunk, TextDelta):
-                emitter.emit(AgentEvent.TEXT, {"text": chunk.text})
-            elif isinstance(chunk, ThinkingDelta):
-                emitter.emit(AgentEvent.THINKING, {"text": chunk.text})
-            elif isinstance(chunk, UsageUpdate):
-                latest = chunk.usage
-                emitter.emit(AgentEvent.USAGE, chunk.usage.as_dict())
-            elif isinstance(chunk, Finish) and meter is not None:
-                meter.observe(chunk.usage or latest)
-            yield chunk
+        watch.begin()
+        try:
+            async for chunk in llm_registry.stream(provider_id, request):
+                watch.heard = time.monotonic()
+                if isinstance(chunk, TextDelta):
+                    emitter.emit(AgentEvent.TEXT, {"text": chunk.text})
+                elif isinstance(chunk, ThinkingDelta):
+                    emitter.emit(AgentEvent.THINKING, {"text": chunk.text})
+                elif isinstance(chunk, ToolInputDelta):
+                    if watch.due(chunk):
+                        emitter.emit(AgentEvent.TOOL_INPUT, {
+                            "index": chunk.index, "name": chunk.name, "chars": chunk.chars,
+                        })
+                elif isinstance(chunk, UsageUpdate):
+                    latest = chunk.usage
+                    emitter.emit(AgentEvent.USAGE, chunk.usage.as_dict())
+                elif isinstance(chunk, Finish) and meter is not None:
+                    meter.observe(chunk.usage or latest)
+                yield chunk
+        finally:
+            watch.open = False
 
     return stream
 
@@ -403,11 +476,7 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
         if context_path.is_file() else ""
     )
     if not markdown.strip():
-        raise HTTPException(
-            status_code=409,
-            detail=ui("这个项目还没有正文 —— 先识别原稿，或换成一份 Markdown。",
-                      "This project has no text yet — recognize the original, or use a Markdown file."),
-        )
+        raise _no_text()
 
     model = _provider_model(body.provider, body.model)
     attachments = projects.attachments(project_id)
@@ -437,12 +506,12 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
         )
     except ValueError as exc:
         # Unconfirmed context must never reach the model; say what to do instead of a 500.
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _refused("CONTEXT_UNCONFIRMED", str(exc)) from exc
 
     window = await _window(body.provider)
     # One writer per conversation: a concurrent turn or compaction would interleave the log.
     if not occupy(project_id, conversation):
-        raise HTTPException(status_code=409, detail=_busy())
+        raise _busy()
     try:
         prefix = f"{job_id}:"
         emitter = Emitter()
@@ -469,8 +538,9 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
         network = getattr(http.app.state, "network", None)
         audit = getattr(http.app.state, "audit", None)
 
+        watch = _StreamWatch()
         agent_loop = AgentLoop(
-            stream=_instrumented(body.provider, emitter, {"step": 0}, meter=compactor),
+            stream=_instrumented(body.provider, emitter, watch, meter=compactor),
             registry=agent.registry,
             context=agent.context,
             journal=journal,
@@ -479,6 +549,8 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
             job_id=job_id,
             prepare=compactor.prepare,
             recover=compactor.recover,
+            # a stop lands even while the provider is silent or a tool is still running
+            interrupted=lambda: jobs.until_cancelled(job_id),
             **({"max_steps": body.max_steps} if body.max_steps else {}),
         )
 
@@ -505,7 +577,7 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
         if clock is not None:
             clock.frame(AgentEvent.MESSAGE_START, len(first))
         yield first
-        async for frame in _pump(emitter, task, clock):
+        async for frame in _pump(emitter, task, clock, quiet=watch.quiet):
             yield frame
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers=_NO_BUFFER)
@@ -593,17 +665,15 @@ async def project_compact(project_id: str, body: CompactIn):
     except ProjectError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if target is None:
-        raise HTTPException(status_code=409, detail=ui("这个项目还没有对话，没有可以压缩的内容。",
-                                                       "This project has no conversation to compact yet."))
+        raise _refused("NO_CONVERSATION", ui("这个项目还没有对话，没有可以压缩的内容。",
+                                             "This project has no conversation to compact yet."))
     markdown = _paper_text(project_id)
     if not markdown.strip():
-        raise HTTPException(status_code=409, detail=ui(
-            "这个项目还没有正文 —— 先识别原稿，或换成一份 Markdown。",
-            "This project has no text yet — recognize the original, or use a Markdown file."))
+        raise _no_text()
     model = _provider_model(body.provider, body.model)
     window = await _window(body.provider)
     if not occupy(project_id, target):
-        raise HTTPException(status_code=409, detail=_busy())
+        raise _busy()
 
     try:
         job_id = jobs.new_id()
@@ -624,7 +694,10 @@ async def project_compact(project_id: str, body: CompactIn):
 
         async def work() -> None:
             try:
-                done = await compactor.compact_now()
+                # the summary request can go silent like any other; a stop must not wait for it
+                done = await interruptible(compactor.compact_now(), lambda: jobs.until_cancelled(job_id))
+                if done is INTERRUPTED:
+                    raise CompactionError("CANCELLED", ui("已取消", "Canceled"))
                 emitter.emit(AgentEvent.CONTEXT, compactor.idle_report().as_dict())
                 emitter.emit(AgentEvent.DONE, {
                     "stop": "compacted", "steps": 0, "exhausted": False, "text": "",
@@ -706,12 +779,14 @@ async def desk_chat(body: DeskChatIn):
     emitter = Emitter()
     journal = StreamingJournal(None, emitter)
 
+    watch = _StreamWatch()
     agent_loop = AgentLoop(
-        stream=_instrumented(body.provider, emitter, {"step": 0}),
+        stream=_instrumented(body.provider, emitter, watch),
         registry=agent.registry,
         context=type(agent.context)(cancelled=lambda: jobs.is_cancelled(job_id)),
         journal=journal,
         approve=_approver(emitter, prefix),
+        interrupted=lambda: jobs.until_cancelled(job_id),
         **({"max_steps": body.max_steps} if body.max_steps else {}),
     )
     task = asyncio.create_task(_run(agent_loop, request, emitter, job_id, prefix))
@@ -719,7 +794,7 @@ async def desk_chat(body: DeskChatIn):
     async def stream() -> AsyncIterator[str]:
         yield encode(AgentEvent.MESSAGE_START, {"job_id": job_id, "step": 0,
                                                 "provider": body.provider, "model": model})
-        async for frame in _pump(emitter, task):
+        async for frame in _pump(emitter, task, quiet=watch.quiet):
             yield frame
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers=_NO_BUFFER)

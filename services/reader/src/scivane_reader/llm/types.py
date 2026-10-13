@@ -6,6 +6,7 @@ need try/except to tell the two apart.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -132,6 +133,21 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ToolInputDelta:
+    """Progress on a tool call still being written: which call, and how long its arguments are
+    so far. Display only; the call itself still arrives whole as a ToolCall.
+
+    A whole document passed to one call can take minutes to generate, and without this the screen
+    shows nothing but a ticking counter.
+    """
+
+    index: int
+    name: str
+    #: argument characters so far, counting a \\uXXXX escape as one
+    chars: int
+
+
+@dataclass(frozen=True)
 class UsageUpdate:
     usage: Usage
 
@@ -153,7 +169,28 @@ class Finish:
             raise ValueError(f"{self.kind} 终态必须携带 failure")
 
 
-StreamChunk: TypeAlias = TextDelta | ThinkingDelta | ToolCall | UsageUpdate | Finish
+StreamChunk: TypeAlias = TextDelta | ThinkingDelta | ToolCall | ToolInputDelta | UsageUpdate | Finish
+
+
+def argument_chars(raw: str) -> int:
+    """Characters in partial argument JSON, a \\uXXXX escape counted once: some providers escape
+    every CJK character, which would otherwise count six times.
+    """
+    return len(raw) - 5 * raw.count("\\u")
+
+
+def append_user_text(messages: Sequence["Message"], text: str) -> list["Message"]:
+    """Add text the model should read next. It joins the last message when that is the user's
+    (a question or tool results), since some protocols reject two user turns in a row; otherwise
+    it becomes a user message of its own. The loop and the log projection both build history this
+    way, so a replay is byte-for-byte what was sent.
+    """
+    out = list(messages)
+    if out and out[-1].role == "user":
+        out[-1] = Message("user", (*out[-1].content, TextBlock(text)))
+    else:
+        out.append(Message.text("user", text))
+    return out
 
 
 #: medium rather than low: checking that formulas and code agree needs real reasoning.

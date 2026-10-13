@@ -7,7 +7,7 @@ struct FailureCard: View {
   let code: String
   let message: String
 
-  private var copy: (title: String, hint: String) {
+  var copy: (title: String, hint: String) {
     switch code {
     case "SANDBOX_UNAVAILABLE":
       return (L("沙箱起不来，这一步没有执行", "The sandbox couldn't start, so this step didn't run"),
@@ -30,8 +30,23 @@ struct FailureCard: View {
       return (L("配额用完了", "Out of quota"),
               L("重试不会有用 —— 去厂商后台充值或换一个 provider。",
                 "Retrying won't help — top up with the provider or switch to another one."))
-    case "HTTP_409":
+    case "CONVERSATION_BUSY":
+      // worded here, so the hint follows the UI language like the title does
+      return (L("上一轮还没收尾", "The previous turn is still finishing"),
+              L("这条对话还有一轮没结束，或者正在压缩。等它结束再发。",
+                "This chat still has a turn or a compaction running. Send again once it ends."))
+    case "NO_CONTEXT", "CONTEXT_UNCONFIRMED", "HTTP_409":
+      // HTTP_409: a backend from before the refusal codes
       return (L("这篇论文的正文还不能用于问答", "This paper's text can't be used for questions yet"), message)
+    case "NO_VISION":
+      return (L("这张模型卡看不到图片", "This model card can't see images"), message)
+    case "TIMEOUT":
+      return (L("模型那边超时了", "The model timed out"),
+              message.isEmpty
+                ? L("上游长时间没有输出，连接断了。长文档让它分节写；一直这样就换一张卡。",
+                    "The provider sent nothing for too long. Ask for long documents in sections; "
+                      + "if it keeps happening, switch cards.")
+                : message)
     case "HTTP_404":
       return (L("找不到这个 provider", "Can't find this provider"),
               L("去设置里确认已经配好模型，再回来重试。", "Check that a model is set up in Settings, then try again."))
@@ -44,7 +59,9 @@ struct FailureCard: View {
               L("工具结果已经保留，但模型没有给出最终结论。可以直接重试这一轮。",
                 "Tool results are kept, but the model gave no final conclusion. You can retry this turn."))
     default:
-      return (L("这一轮没能走完", "This turn didn't finish"), message)
+      // a failure restored from the log has its code but not the provider's words
+      return (L("这一轮没能走完", "This turn didn't finish"),
+              message.isEmpty ? L("可以直接重试这一轮。", "You can retry this turn.") : message)
     }
   }
 

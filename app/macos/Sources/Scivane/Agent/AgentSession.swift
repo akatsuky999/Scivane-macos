@@ -42,6 +42,8 @@ final class AgentSession: ObservableObject {
   /// The streaming message's visible length. Per-frame growth lives only here; only the streaming
   /// row observes it, so the transcript and panel don't redraw per chunk.
   let pacer = StreamPacer()
+  /// A tool call being written, or a model gone quiet; only the status line observes it.
+  let pulse = TurnPulse()
   private var stopWatchdog: Task<Void, Never>?
   private var client: AgentClient?
   private var task: Task<Void, Never>?
@@ -114,9 +116,14 @@ final class AgentSession: ObservableObject {
     restored = true
     let raw = await AgentClient(base: base)
       .transcript(projectID: projectID, conversation: conversationID)
-    guard !raw.isEmpty else { return }
+    // A question sent while this was in flight owns the transcript now; the projection of a turn
+    // still running would show its tools as never run.
+    guard !raw.isEmpty, !running, items.isEmpty else { return }
     items = raw.compactMap(TranscriptItem.init(restored:))
   }
+
+  /// A conversation created just now has nothing to restore.
+  func startFresh() { restored = true }
 
   /// Not while running: events carry the live numbers, and the idle forecast would overwrite them.
   func refreshContext(base: URL, provider: String?) async {
@@ -328,7 +335,7 @@ final class AgentSession: ObservableObject {
     // the tool call that follows it. Tool results and enforcement only edit existing rows and don't
     // interrupt the text being paced out.
     switch event {
-    case .text, .thinking, .heartbeat, .usage, .context, .toolResult, .enforcement:
+    case .text, .thinking, .heartbeat, .usage, .context, .toolResult, .enforcement, .toolInput:
       break
     default:
       flushStream()
@@ -338,14 +345,21 @@ final class AgentSession: ObservableObject {
       if let id { jobID = id }
       // new step: the previous assistant message is final
       streamingIndex = nil
+      pulse.settled()
 
     case .text(let chunk):
+      pulse.heard()
       stream(chunk, thinking: false)
 
     case .thinking(let chunk):
+      pulse.heard()
       stream(chunk, thinking: true)
 
+    case .toolInput(_, let name, let chars):
+      pulse.drafting(name, chars: chars)
+
     case .toolCall(let call):
+      pulse.settled()
       streamingIndex = nil
       items.append(.tool(call))
 
@@ -390,6 +404,9 @@ final class AgentSession: ObservableObject {
     case .compaction(let event):
       applyCompaction(event)
 
+    case .notice(let code, _, let quiet):
+      items.append(.notice(Self.notice(code: code, quiet: quiet)))
+
     case .done(let stop, let steps, let exhausted, _, let total):
       terminalEventSeen = true
       if !total.isEmpty { usage = total }
@@ -430,8 +447,21 @@ final class AgentSession: ObservableObject {
         items.append(.failure(code: code, message: .verbatim(message)))
       }
 
-    case .heartbeat:
-      break
+    case .heartbeat(let quiet):
+      pulse.quiet(quiet)
+    }
+  }
+
+  /// Wording for a notice code; the backend sends only the code and numbers.
+  nonisolated static func notice(code: String, quiet: Double?) -> UIText {
+    switch code {
+    case "SILENT_CUT":
+      let seconds = Int((quiet ?? 0).rounded())
+      return UIText("模型 \(seconds) 秒没有输出，被网关断开，这一步作废。已让它分节写，接着做。",
+                    "The model sent nothing for \(seconds)s and the gateway cut it off; that step was lost. "
+                      + "It was asked to write in sections and is carrying on.")
+    default:
+      return UIText("这一轮中途出了状况（\(code)），已接着做。", "Something happened mid-turn (\(code)); it carried on.")
     }
   }
 
@@ -497,6 +527,7 @@ final class AgentSession: ObservableObject {
       pacer.timing = nil
     }
     pacer.reset()
+    pulse.reset()
     stopWatchdog?.cancel()
     stopWatchdog = nil
     preparing = false
@@ -692,6 +723,19 @@ struct TranscriptItem: Identifiable {
     case "assistant": self.init(kind: .assistant)
     case "tool": self.init(kind: .tool)
     case "compaction": self.init(kind: .compaction)
+    case "resumed":
+      // fields of session.derive_transcript(); worded here like the live notice
+      self.init(kind: .notice)
+      let quiet = (raw["quiet"] as? NSNumber)?.doubleValue
+      let wording = AgentSession.notice(code: (raw["reason"] as? String) == "silent_cut" ? "SILENT_CUT" : "", quiet: quiet)
+      localized = wording
+      text = wording.zh
+      return
+    case "failure":
+      // a failed step's code survives in the log; the provider's words don't
+      self.init(kind: .failure)
+      code = raw["code"] as? String ?? ""
+      return
     default: return nil
     }
     if kind == .compaction {

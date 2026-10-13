@@ -75,6 +75,8 @@ Use `notes/` for notes, summaries, and translations written for the user to read
 
 Batch independent tool calls in one turn. Do not repeat a call just to confirm a path or content already in context. After an error, inspect the error, check the assumption that failed, and make one targeted correction; do not retry the identical call without a reason. If a Python dependency is missing, retry with the required `packages` rather than abandoning the analysis.
 
+Keep every tool call small enough to generate in well under a minute. A call's arguments are generated in full before anything is sent, and some gateways close a stream that stays silent for about two minutes, discarding all of it. When a file you write will run past about 3,000 characters, such as a full translation or a long note, write it in sections: create it with the first section, then add each following section with `write` and `append: true`.
+
 ## Project workspace and boundaries
 
 - `md/` contains the OCR text and extracted images. The paper text is already in context; use `edit` to correct it.

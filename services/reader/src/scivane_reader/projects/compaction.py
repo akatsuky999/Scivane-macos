@@ -18,6 +18,7 @@ MAX_FAILURES failures in a row.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -476,6 +477,11 @@ class Compactor:
         except CompactionError as exc:
             self._emit_compaction({"phase": "failed", "trigger": trigger,
                                    "code": exc.code, "message": str(exc)})
+            raise
+        except asyncio.CancelledError:
+            # A stop interrupted the summary request; the card it opened must not stay "running".
+            self._emit_compaction({"phase": "failed", "trigger": trigger,
+                                   "code": "CANCELLED", "message": ui("已取消", "Canceled")})
             raise
         except Exception as exc:  # noqa: BLE001 - a failing log write must not become a 500 for the whole turn
             logger.exception("压缩出错 project=%s conversation=%s", self.project_id, self.conversation)

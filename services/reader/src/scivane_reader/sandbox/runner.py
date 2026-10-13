@@ -9,10 +9,13 @@ misses something.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,7 +29,30 @@ from .policy import (
 )
 from .seatbelt import SeatbeltProvider
 
-__all__ = ["ExecResult", "Runner", "MINIMAL_PATH", "build_env"]
+__all__ = ["ExecResult", "Runner", "MINIMAL_PATH", "build_env", "cancelled_by"]
+
+#: How a running command learns that its turn was stopped. A context variable, because every
+#: execution path (bash, python, pip installs, git clone) reaches the runner through a worker
+#: thread, and asyncio.to_thread carries the context along; threading a parameter through each
+#: helper would let a new path forget it. Unset means nobody can stop it but its own timeout.
+_CANCEL: ContextVar[Callable[[], bool] | None] = ContextVar("scivane_sandbox_cancel", default=None)
+
+#: How often a waiting command checks for a stop. Short enough that a stop feels immediate,
+#: long enough to cost nothing.
+_CANCEL_POLL = 0.2
+
+
+@contextlib.contextmanager
+def cancelled_by(check: Callable[[], bool] | None) -> Iterator[None]:
+    """Commands started inside the block are killed, with their process group, once `check()`
+    turns true. Without it a stopped turn left a pip install or a long script running for its
+    whole timeout, still writing into the project.
+    """
+    token = _CANCEL.set(check)
+    try:
+        yield
+    finally:
+        _CANCEL.reset(token)
 
 #: Not the user's PATH, which can contain anything in any order. Callers add extras (a venv's bin)
 #: explicitly.
@@ -56,6 +82,8 @@ class ExecResult:
     #: the matching line, to explain what was refused; stderr is not rewritten
     denial_hint: str = ""
     timed_out: bool = False
+    #: killed because its turn was stopped; nobody reads the output, it only says what happened
+    cancelled: bool = False
 
     @property
     def ok(self) -> bool:
@@ -217,7 +245,6 @@ class Runner:
         stdin: str | None,
     ) -> ExecResult:
         started = time.monotonic()
-        timed_out = False
         try:
             proc = subprocess.Popen(
                 confined.argv,
@@ -235,12 +262,7 @@ class Runner:
         except OSError as exc:
             raise SandboxRunnerFailed(f"沙箱后端启动失败：{exc}") from exc
 
-        try:
-            stdout, stderr = proc.communicate(input=stdin, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            self._terminate(proc)
-            stdout, stderr = proc.communicate()
+        stdout, stderr, timed_out, cancelled = self._communicate(proc, stdin, timeout, _CANCEL.get())
         duration = time.monotonic() - started
         exit_code = proc.returncode if proc.returncode is not None else -1
 
@@ -265,7 +287,40 @@ class Runner:
             denied=bool(hint),
             denial_hint=hint.strip(),
             timed_out=timed_out,
+            cancelled=cancelled,
         )
+
+    def _communicate(
+        self,
+        proc: subprocess.Popen[str],
+        stdin: str | None,
+        timeout: float,
+        stop: Callable[[], bool] | None,
+    ) -> tuple[str, str, bool, bool]:
+        """Wait for the process; returns stdout, stderr, timed_out, cancelled.
+
+        With a stop check, wait in short slices and kill the process group as soon as it turns
+        true. A retried communicate() loses no output and keeps feeding the input it saved on the
+        first call; passing the input again is an error, so later slices pass None.
+        """
+        deadline = time.monotonic() + timeout
+        pending = stdin
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._terminate(proc)
+                stdout, stderr = proc.communicate()
+                return stdout, stderr, True, False
+            try:
+                stdout, stderr = proc.communicate(
+                    input=pending, timeout=remaining if stop is None else min(_CANCEL_POLL, remaining))
+                return stdout, stderr, False, False
+            except subprocess.TimeoutExpired:
+                pending = None
+                if stop is not None and stop():
+                    self._terminate(proc)
+                    stdout, stderr = proc.communicate()
+                    return stdout, stderr, False, True
 
     @staticmethod
     def _first_denial(stderr: str, confined: ConfinedCommand) -> str:

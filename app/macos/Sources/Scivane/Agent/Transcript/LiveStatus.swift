@@ -11,6 +11,8 @@ struct LiveStatus: View {
   var stopping = false
   /// when the question was sent; for the elapsed time
   var since: Date?
+  /// a tool call being written, or a model gone quiet; the session's, a still one for samples
+  @ObservedObject var pulse: TurnPulse = TurnPulse()
 
   private var thoughts: [TranscriptItem] { run.filter { $0.kind == .assistant } }
   private var currentTool: TranscriptItem? {
@@ -32,6 +34,11 @@ struct LiveStatus: View {
     if let currentTool {
       return currentTool.summary.isEmpty
         ? L("正在跑 \(currentTool.toolName)", "Running \(currentTool.toolName)") : currentTool.summary
+    }
+    // the arguments of a call still being written, e.g. a long document for write
+    if let draft = pulse.draft {
+      let size = draft.chars.formatted()
+      return L("正在写 \(draft.tool) 的内容 · \(size) 字", "Writing the \(draft.tool) call · \(size) chars")
     }
     // text may just be narration before a tool call; only claim "answering" with no tool pending
     if thoughts.last?.text.isEmpty == false, tools.allSatisfy({ !$0.awaitingResult }) {
@@ -61,6 +68,16 @@ struct LiveStatus: View {
             : "\(seconds)s")
             .font(.system(size: 10, design: .monospaced))
             .foregroundStyle(Palette.inkFaint.opacity(0.7))
+            .contentTransition(.identity)
+        }
+      }
+      // A counter alone can't tell writing from stalled: say when the model has sent nothing for a while.
+      if let quiet = pulse.quietSince, !stopping {
+        TimelineView(.periodic(from: quiet, by: 1)) { timeline in
+          let seconds = Int(timeline.date.timeIntervalSince(quiet))
+          Text(L("· 模型 \(seconds) 秒没有输出", "· no output for \(seconds)s"))
+            .font(.system(size: 10))
+            .foregroundStyle(Palette.inkFaint.opacity(0.85))
             .contentTransition(.identity)
         }
       }

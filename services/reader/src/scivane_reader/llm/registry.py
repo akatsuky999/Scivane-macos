@@ -437,6 +437,10 @@ class LlmRegistry:
             attempt += 1
             emitted = False
             failure: LlmFailure | None = None
+            # When data last arrived and the longest gap so far. SSE comments (gateway keep-alives)
+            # never reach here, so a gateway waiting on a silent upstream still counts as silence.
+            heard: float | None = None
+            longest = 0.0
 
             try:
                 extensions = {}
@@ -467,12 +471,15 @@ class LlmRegistry:
                         )
                     else:
                         translator = adapter.translator()
-                        deadline = time.monotonic() + self.timeouts.total
+                        heard = time.monotonic()
+                        deadline = heard + self.timeouts.total
                         raw = response.aiter_bytes()
                         if clock is not None:
                             raw = _counted(raw, clock)
                         async for event in aiter_sse(raw):
-                            if time.monotonic() > deadline:
+                            now = time.monotonic()
+                            longest, heard = max(longest, now - heard), now
+                            if now > deadline:
                                 raise httpx.ReadTimeout(
                                     f"流超过 {self.timeouts.total} 秒上限"
                                 )
@@ -502,6 +509,11 @@ class LlmRegistry:
                 failure = LlmFailure(self._safe(exc), TIMEOUT)
             except httpx.HTTPError as exc:
                 failure = LlmFailure(self._safe(exc), TRANSPORT)
+
+            if heard is not None:
+                # the silence still running when it broke counts too (a read timeout is nothing else)
+                longest = max(longest, time.monotonic() - heard)
+                failure = replace(failure, quiet=round(longest, 1))
 
             if is_retryable(
                 failure,

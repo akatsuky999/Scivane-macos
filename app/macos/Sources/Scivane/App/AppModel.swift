@@ -147,6 +147,8 @@ final class AppModel: ObservableObject {
   /// write would mutate state during a view update. Views observe the session objects directly
   /// (AgentPane).
   private var agentSessions: [String: AgentSession] = [:]
+  /// Projects whose first question is waiting for its conversation; a second send would make two.
+  var conversationsStarting: Set<String> = []
   /// metadata only, never credentials
   @Published var providers: [ProviderSummary] = []
   /// Set to true only by ScivaneApp. Side effects such as writing providers.json or starting the

@@ -109,7 +109,7 @@ struct AgentTranscript: View {
           // The only progress indicator while running, always in the same place for the whole turn.
           if session.running && session.pending == nil {
             LiveStatus(run: liveRun, fallback: session.activity,
-                       stopping: session.cancelRequested, since: session.askedAt)
+                       stopping: session.cancelRequested, since: session.askedAt, pulse: session.pulse)
               .padding(.top, 8)
               .transition(.opacity)
           }

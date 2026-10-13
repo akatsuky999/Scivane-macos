@@ -19,8 +19,9 @@ from dataclasses import dataclass, field, replace
 
 from .. import i18n
 from ..llm.types import ToolCall, ToolResultBlock
+from ..sandbox.runner import cancelled_by
 from .definition import ToolContext, ToolError, ToolOutcome
-from .journal import ABORTED_BEFORE_DISPATCH, Journal
+from .journal import ABORTED_BEFORE_DISPATCH, ABORTED_WHILE_RUNNING, Journal
 from .registry import ToolRegistry
 from .results import apply_limit
 
@@ -141,6 +142,9 @@ class Dispatcher:
     network: object = None
     #: this turn's job id; the audit log attributes by (job_id, call_id)
     job_id: str = ""
+    #: calls whose tool/call is already in the log; a call cancelled while running must not be
+    #: logged a second time, or the replayed history holds one tool_use id twice and is rejected
+    _logged: set[str] = field(default_factory=set, init=False, repr=False)
 
     def start(self, call: ToolCall) -> asyncio.Task | None:
         """Start this call right away, without waiting for the stream to finish.
@@ -189,6 +193,7 @@ class Dispatcher:
 
     async def _one(self, call: ToolCall) -> ToolResultBlock:
         self.journal.tool_call(call.id, call.name, call.arguments)
+        self._logged.add(call.id)
         try:
             tool = self.registry.find(call.name)
         except ToolError as exc:
@@ -209,7 +214,10 @@ class Dispatcher:
             #
             # The UI language is pinned to Chinese inside tools: results are model input and must not change
             # with a UI setting. Summaries and approval cards are computed outside and follow the UI language.
-            with self._grant(call.id) as leased, i18n.speaking("zh"):
+            #
+            # Commands started here die with the turn: a stop kills their process group rather than
+            # leaving them to their own timeout (sandbox/runner.py).
+            with self._grant(call.id) as leased, i18n.speaking("zh"), cancelled_by(self.context.cancelled):
                 context = replace(self.context, network=leased) if leased else self.context
                 outcome = await tool.run(call.arguments, context)
         except ToolError as exc:
@@ -255,11 +263,16 @@ class Dispatcher:
         return ToolResultBlock(call.id, text, is_error=True)
 
     def _synthesise(self, call: ToolCall) -> ToolResultBlock:
-        """A synthetic call and error result for a call cancelled before dispatch."""
-        text = "错误（取消）：这次调用在派发之前就被取消了"
-        self.journal.tool_call(call.id, call.name, call.arguments)
+        """A synthetic error result for a cancelled call, and its tool/call when it never ran."""
+        if call.id in self._logged:
+            text = "错误（取消）：这次调用跑到一半被停下了，没有完整结果"
+            code = ABORTED_WHILE_RUNNING
+        else:
+            text = "错误（取消）：这次调用在派发之前就被取消了"
+            code = ABORTED_BEFORE_DISPATCH
+            self.journal.tool_call(call.id, call.name, call.arguments)
+            self._logged.add(call.id)
         self.journal.tool_result(
-            call.id, call.name, text, is_error=True,
-            detail={"code": ABORTED_BEFORE_DISPATCH}, synthetic=True,
+            call.id, call.name, text, is_error=True, detail={"code": code}, synthetic=True,
         )
         return ToolResultBlock(call.id, text, is_error=True)

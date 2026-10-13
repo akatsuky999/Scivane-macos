@@ -16,6 +16,9 @@ final class AgentClient: NSObject, @unchecked Sendable {
     case text(String)
     case thinking(String)
     case toolCall(ToolCallEvent)
+    /// A tool call still being written: how many argument characters so far. Progress only; the
+    /// call itself arrives as toolCall.
+    case toolInput(index: Int, name: String, chars: Int)
     case toolResult(ToolResultEvent)
     case approvalRequest(ApprovalEvent)
     /// Partial sandbox enforcement; always shown to the user.
@@ -28,9 +31,13 @@ final class AgentClient: NSObject, @unchecked Sendable {
     case context(ContextReport)
     /// start / done / failed
     case compaction(CompactionEvent)
+    /// Something the turn went through without ending, as a stable code (SILENT_CUT) and numbers;
+    /// the UI words it.
+    case notice(code: String, cause: String, quiet: Double?)
     case done(stop: String, steps: Int, exhausted: Bool, text: String, usage: AgentUsage)
     case failed(code: String, message: String)
-    case heartbeat
+    /// `quiet`: seconds the open model stream has sent nothing; nil while no stream is open
+    case heartbeat(quiet: Int?)
 
     /// Wire name (AgentEvent in sse.py); timing records on both sides are aligned by it.
     var name: String {
@@ -39,6 +46,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
       case .text: return "text"
       case .thinking: return "thinking"
       case .toolCall: return "tool_call"
+      case .toolInput: return "tool_input"
       case .toolResult: return "tool_result"
       case .approvalRequest: return "approval_request"
       case .enforcement: return "enforcement"
@@ -46,6 +54,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
       case .usage: return "usage"
       case .context: return "context"
       case .compaction: return "compaction"
+      case .notice: return "notice"
       case .done: return "done"
       case .failed: return "error"
       case .heartbeat: return "heartbeat"
@@ -142,6 +151,11 @@ final class AgentClient: NSObject, @unchecked Sendable {
   /// A non-200 body is a JSON error, not SSE; collected here and turned into an error event at the end.
   private var httpStatus = 200
   private var errorBody = Data()
+  /// Why a request was refused before its stream began; the detail in the body is the sentence.
+  private var refusalCode: String?
+
+  /// same as ERROR_CODE_HEADER in api/sse.py; a cross-language contract
+  static let refusalHeader = "X-Scivane-Code"
 
   init(base: URL) {
     self.base = base
@@ -331,6 +345,13 @@ final class AgentClient: NSObject, @unchecked Sendable {
       return .toolCall(ToolCallEvent(
         callID: d["call_id"] as? String ?? "", name: d["name"] as? String ?? "?",
         summary: d["summary"] as? String ?? "", arguments: d["arguments"] as? [String: Any] ?? [:]))
+    case "tool_input":
+      return .toolInput(
+        index: d["index"] as? Int ?? 0, name: d["name"] as? String ?? "?", chars: d["chars"] as? Int ?? 0)
+    case "notice":
+      return .notice(
+        code: d["code"] as? String ?? "", cause: d["cause"] as? String ?? "",
+        quiet: (d["quiet"] as? NSNumber)?.doubleValue)
     case "tool_result":
       let detail = d["detail"] as? [String: Any] ?? [:]
       let level = detail["enforcement"] as? String
@@ -370,7 +391,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
       return .failed(code: d["code"] as? String ?? "INTERNAL",
                      message: d["message"] as? String ?? L("未知错误", "Unknown error"))
     case "heartbeat":
-      return .heartbeat
+      return .heartbeat(quiet: (d["quiet"] as? NSNumber)?.intValue)
     default:
       return nil
     }
@@ -408,7 +429,9 @@ extension AgentClient: URLSessionDataDelegate {
   func urlSession(
     _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse
   ) async -> URLSession.ResponseDisposition {
-    httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 0
+    let http = response as? HTTPURLResponse
+    httpStatus = http?.statusCode ?? 0
+    refusalCode = http?.value(forHTTPHeaderField: Self.refusalHeader)
     timing?.mark("response")
     return .allow
   }
@@ -424,11 +447,11 @@ extension AgentClient: URLSessionDataDelegate {
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     if httpStatus != 200 {
-      // Mostly 409 (text not confirmed, or none yet) and 404 (unknown provider). Show the detail, or the
-      // user has no idea what to fix.
+      // Mostly 409 (busy, no text, unconfirmed text) and 404 (unknown provider). The header names which
+      // 409 it is; the detail says what to do.
       let detail =
         (try? JSONSerialization.jsonObject(with: errorBody) as? [String: Any])?["detail"] as? String
-      continuation?.yield(.failed(code: "HTTP_\(httpStatus)",
+      continuation?.yield(.failed(code: refusalCode ?? "HTTP_\(httpStatus)",
                                   message: detail ?? L("服务端返回 \(httpStatus)", "The service returned \(httpStatus)")))
       continuation?.finish()
     } else if let error, (error as NSError).code != NSURLErrorCancelled {
@@ -440,5 +463,6 @@ extension AgentClient: URLSessionDataDelegate {
     buffer.removeAll()
     errorBody.removeAll()
     httpStatus = 200
+    refusalCode = nil
   }
 }

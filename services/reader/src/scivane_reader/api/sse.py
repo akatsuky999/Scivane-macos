@@ -48,6 +48,9 @@ class AgentEvent:
     THINKING: Final = "thinking"
     #: call_id, name, arguments, human-readable summary
     TOOL_CALL: Final = "tool_call"
+    #: a tool call still being written: index, name, chars of argument so far; a few per second at
+    #: most. Only shows progress; the call itself still arrives as TOOL_CALL.
+    TOOL_INPUT: Final = "tool_input"
     #: call_id, preview, error flag, synthetic flag (filled in after a cancel)
     TOOL_RESULT: Final = "tool_result"
     #: call_id, tool, summary, seconds until it expires
@@ -66,11 +69,15 @@ class AgentEvent:
     #: phase start/done/failed, trigger auto/overflow/manual; done carries summary, turns,
     #: kept, before, after; failed carries code and message
     COMPACTION: Final = "compaction"
+    #: something the user should know that doesn't end the turn: code (SILENT_CUT: the provider was
+    #: cut after `quiet` seconds of silence and the turn went on with a note to the model), the
+    #: failure code that caused it as `cause`, and numbers; the app words it in its own language
+    NOTICE: Final = "notice"
     #: turn finished: stop, steps, exhausted, full answer text
     DONE: Final = "done"
     #: turn failed: stable code and a readable reason, never credentials
     ERROR: Final = "error"
-    #: every 5 s
+    #: every 5 s; `quiet` is how long an open model stream has sent nothing, absent otherwise
     HEARTBEAT: Final = "heartbeat"
 
 
@@ -100,6 +107,11 @@ class RuntimeEvent:
 
 # internal: tells the stream to close; never sent to the client
 EOF_SENTINEL: Final = "__eof__"
+
+# Response header naming why an agent request was refused before its stream began (409: the
+# conversation is busy, no text, unconfirmed text). The body's detail stays the readable sentence.
+# A contract with AgentClient.swift, like the event names.
+ERROR_CODE_HEADER: Final = "X-Scivane-Code"
 
 # Dense pages can take over ten seconds. Heartbeats keep idle timeouts from killing the
 # connection and keep the elapsed timer moving.

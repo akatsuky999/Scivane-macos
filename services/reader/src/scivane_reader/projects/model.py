@@ -156,3 +156,8 @@ class ProjectEvent:
     TOOL_RESULT = "tool/result"
     #: The user's verdict on a call that needed approval. Refusals are history too.
     TOOL_DECISION = "tool/decision"
+    #: A step was lost (the provider cut a silent stream) and the turn went on with a note to the
+    #: model. Data: text (the note, verbatim as sent), reason, code, quiet. The note joins the
+    #: preceding user message in the replayed history (llm.types.append_user_text), so it stays
+    #: inside its turn and the replay matches what was sent.
+    TURN_RESUMED = "turn/resumed"

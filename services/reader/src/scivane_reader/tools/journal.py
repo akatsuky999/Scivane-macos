@@ -17,6 +17,8 @@ __all__ = ["Journal", "NullJournal", "StoreJournal", "ABORTED_BEFORE_DISPATCH"]
 
 #: stable code for synthetic results added after a cancel
 ABORTED_BEFORE_DISPATCH = "TOOL_ABORTED_BEFORE_DISPATCH"
+#: the call had started when the turn was stopped; whatever it did before that stays done
+ABORTED_WHILE_RUNNING = "TOOL_ABORTED_WHILE_RUNNING"
 
 
 class EventSink(Protocol):
@@ -33,7 +35,8 @@ class Journal(Protocol):
     def tool_result(self, call_id: str, name: str, content: str, *, is_error: bool,
                     detail: dict | None = None, synthetic: bool = False) -> None: ...
     def tool_decision(self, call_id: str, name: str, approved: bool, reason: str = "") -> None: ...
-    def assistant_message(self, text: str, *, stop: str) -> None: ...
+    def assistant_message(self, text: str, *, stop: str, failure: dict | None = None) -> None: ...
+    def turn_resumed(self, text: str, *, reason: str, failure: dict) -> None: ...
     def user_message(self, text: str, images: list[dict] | None = None) -> None: ...
 
 
@@ -44,7 +47,8 @@ class NullJournal:
     def tool_result(self, call_id: str, name: str, content: str, *, is_error: bool,
                     detail: dict | None = None, synthetic: bool = False) -> None: ...
     def tool_decision(self, call_id: str, name: str, approved: bool, reason: str = "") -> None: ...
-    def assistant_message(self, text: str, *, stop: str) -> None: ...
+    def assistant_message(self, text: str, *, stop: str, failure: dict | None = None) -> None: ...
+    def turn_resumed(self, text: str, *, reason: str, failure: dict) -> None: ...
     def user_message(self, text: str, images: list[dict] | None = None) -> None: ...
 
 
@@ -88,17 +92,24 @@ class StoreJournal:
 
     def assistant_message(
         self, text: str, *, stop: str,
-        usage: dict | None = None, estimate: int | None = None,
+        usage: dict | None = None, estimate: int | None = None, failure: dict | None = None,
     ) -> None:
         """`usage` and `estimate` are this step's reported usage and estimate
         (Compactor.step_record); numbers only, used to calibrate the context next time.
+        `failure` says why a step failed: a stable code and the silence before it, never the
+        provider's message (it can echo the request).
         """
         data: dict[str, object] = {"text": text, "stop": stop}
         if usage:
             data["usage"] = usage
         if estimate:
             data["estimate"] = estimate
+        if failure:
+            data["failure"] = failure
         self._append(ProjectEvent.ASSISTANT_MESSAGE, data)
+
+    def turn_resumed(self, text: str, *, reason: str, failure: dict) -> None:
+        self._append(ProjectEvent.TURN_RESUMED, {"text": text, "reason": reason, **failure})
 
     def user_message(self, text: str, images: list[dict] | None = None) -> None:
         """`images` are attachment records (hash, type, size), never the bytes."""

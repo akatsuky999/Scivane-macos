@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ..i18n import ui
-from ..llm.types import ContentBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock
+from ..llm.types import (
+    ContentBlock, Message, TextBlock, ToolResultBlock, ToolUseBlock, append_user_text,
+)
 from .annotations import COLOR_NAMES, KIND_NAMES
 from .attachments import ImageRecord
 from .model import ProjectEvent
@@ -59,20 +61,88 @@ def checkpoint_text(summary: str, covered: int) -> str:
     )
 
 
-class _Turn:
-    """One assistant step: its text, the calls it made, and the results filled in."""
+class _Step:
+    """One assistant step: its text and the calls it made. Results are looked up by call id."""
 
-    __slots__ = ("text", "uses", "results")
+    __slots__ = ("text", "uses", "claims_after")
 
-    def __init__(self) -> None:
-        self.text: str = ""
-        self.uses: list[ToolUseBlock] = []
-        #: call_id -> result; concurrent tools finish in any order
-        self.results: dict[str, ToolResultBlock] = {}
+    def __init__(self, text: str = "", uses: list[ToolUseBlock] | None = None) -> None:
+        self.text = text
+        self.uses: list[ToolUseBlock] = uses if uses is not None else []
+        #: Logs written before tools ran mid-stream put a step's calls after its message. Such a
+        #: message (tool_use, nothing logged before it) claims the calls that follow it.
+        self.claims_after = False
 
     @property
     def empty(self) -> bool:
         return not self.text and not self.uses
+
+
+class _Steps:
+    """Groups one turn's log events into steps.
+
+    Tools start while the model is still streaming, so a step's tool/call events are logged
+    before the assistant/message that closes it, and its results come before or after that
+    message, in whatever order the tools finish. Calls therefore belong to the message that
+    follows them, results are matched by call id, and nothing is turned into messages until the
+    turn is complete. Pairing calls with the message before them (the order of older logs) once
+    replayed every result as missing.
+    """
+
+    def __init__(self) -> None:
+        #: steps and resume notes, in log order
+        self.entries: list[_Step | str] = []
+        #: calls not yet claimed by a message
+        self.pending: list[ToolUseBlock] = []
+        self.results: dict[str, ToolResultBlock] = {}
+
+    def call(self, use: ToolUseBlock) -> None:
+        last = self.entries[-1] if self.entries else None
+        if isinstance(last, _Step) and last.claims_after:
+            last.uses.append(use)
+        else:
+            self.pending.append(use)
+
+    def message(self, text: str, stop: object) -> None:
+        step = _Step(text, self.pending)
+        step.claims_after = stop == "tool_use" and not self.pending
+        self.pending = []
+        self.entries.append(step)
+
+    def note(self, text: str) -> None:
+        self._close_pending()
+        self.entries.append(text)
+
+    def result(self, block: ToolResultBlock) -> None:
+        self.results[block.call_id] = block
+
+    def _close_pending(self) -> None:
+        # calls no message claimed: the stream died after they started (crash, kill)
+        if self.pending:
+            self.entries.append(_Step("", self.pending))
+            self.pending = []
+
+    def into(self, messages: list[Message]) -> list[Message]:
+        """Append the turn's steps to `messages` (which hold its question). The only place
+        synthetic results are added."""
+        self._close_pending()
+        out = messages
+        for entry in self.entries:
+            if isinstance(entry, str):
+                out = append_user_text(out, entry)
+                continue
+            if entry.empty:
+                continue
+            blocks: list[Any] = [TextBlock(entry.text)] if entry.text else []
+            blocks.extend(entry.uses)
+            out.append(Message("assistant", tuple(blocks)))
+            if entry.uses:
+                # results follow the call order, not arrival order, with missing ones filled in
+                out.append(Message("user", tuple(
+                    self.results.get(use.id, ToolResultBlock(use.id, MISSING_RESULT_TEXT, is_error=True))
+                    for use in entry.uses
+                )))
+        return out
 
 
 @dataclass(frozen=True)
@@ -134,35 +204,15 @@ def derive_history(
     needs).
     """
     turns: list[list[Message]] = [[]]
-    turn = _Turn()
+    steps = _Steps()
     summary = ""
     covered = 0
     compactions = 0
 
     def flush() -> None:
-        """Turn the collected step into messages. The only place synthetic results are added."""
-        nonlocal turn
-        if turn.empty:
-            turn = _Turn()
-            return
-
-        blocks: list[Any] = []
-        if turn.text:
-            blocks.append(TextBlock(turn.text))
-        blocks.extend(turn.uses)
-        turns[-1].append(Message("assistant", tuple(blocks)))
-
-        if turn.uses:
-            # results follow the call order, not arrival order, with missing ones filled in
-            results = tuple(
-                turn.results.get(
-                    use.id,
-                    ToolResultBlock(use.id, MISSING_RESULT_TEXT, is_error=True),
-                )
-                for use in turn.uses
-            )
-            turns[-1].append(Message("user", results))
-        turn = _Turn()
+        nonlocal steps
+        turns[-1] = steps.into(turns[-1])
+        steps = _Steps()
 
     for event in events:
         if not isinstance(event, dict):
@@ -184,10 +234,8 @@ def derive_history(
                 turns.append([Message("user", blocks)])
 
         elif kind == ProjectEvent.ASSISTANT_MESSAGE:
-            # a new assistant message ends the previous step and its results
-            flush()
             text = data.get("text")
-            turn.text = text if isinstance(text, str) else ""
+            steps.message(text if isinstance(text, str) else "", data.get("stop"))
 
         elif kind == ProjectEvent.TOOL_CALL:
             call_id = data.get("call_id")
@@ -195,20 +243,23 @@ def derive_history(
             if not isinstance(call_id, str) or not isinstance(name, str):
                 continue
             arguments = data.get("arguments")
-            turn.uses.append(
-                ToolUseBlock(call_id, name, arguments if isinstance(arguments, dict) else {})
-            )
+            steps.call(ToolUseBlock(call_id, name, arguments if isinstance(arguments, dict) else {}))
 
         elif kind == ProjectEvent.TOOL_RESULT:
             call_id = data.get("call_id")
             if not isinstance(call_id, str):
                 continue
             content = data.get("content")
-            turn.results[call_id] = ToolResultBlock(
+            steps.result(ToolResultBlock(
                 call_id,
                 content if isinstance(content, str) else "",
                 is_error=bool(data.get("is_error")),
-            )
+            ))
+
+        elif kind == ProjectEvent.TURN_RESUMED:
+            text = data.get("text")
+            if isinstance(text, str) and text.strip():
+                steps.note(text)
 
         elif kind == ProjectEvent.CONVERSATION_COMPACTED:
             # Compaction events belong to no turn and can land mid-turn (compacting earlier turns);
@@ -302,10 +353,15 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Same pairing rules as derive_messages, so the UI never shows a different history than the
     model saw. Differences: tool/decision is included, results are previews, the synthetic flag
-    is kept, and compaction hides no turns (it appears as a record where it happened).
+    is kept, and compaction hides no turns (it appears as a record where it happened). A step's
+    words go before its tool cards, as they streamed, although the log holds the calls first.
+    A step's failure code and a resumed turn come back as their own items.
     """
     items: list[dict[str, Any]] = []
-    pending: dict[str, int] = {}      # call_id -> index in items
+    pending: dict[str, dict[str, Any]] = {}  # call_id -> its tool item, until the result arrives
+    #: tool items logged since the last message: the next message is theirs (see _Steps)
+    unclaimed: list[dict[str, Any]] = []
+    claims_after = False
     decisions: dict[str, dict[str, Any]] = {}
 
     for event in events:
@@ -316,6 +372,7 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         at = event.get("at", "")
 
         if kind == ProjectEvent.USER_MESSAGE:
+            unclaimed, claims_after = [], False
             text = data.get("text")
             text = text if isinstance(text, str) else ""
             records = [r for r in map(ImageRecord.from_dict, data.get("images") or []) if r is not None]
@@ -328,16 +385,25 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         elif kind == ProjectEvent.ASSISTANT_MESSAGE:
             text = data.get("text")
             if isinstance(text, str) and text.strip():
-                items.append({"kind": "assistant", "text": text, "at": at})
+                said = {"kind": "assistant", "text": text, "at": at}
+                if unclaimed:
+                    first = next(i for i, existing in enumerate(items) if existing is unclaimed[0])
+                    items.insert(first, said)
+                else:
+                    items.append(said)
+            failure = data.get("failure")
+            if isinstance(failure, dict) and isinstance(failure.get("code"), str):
+                items.append({"kind": "failure", "code": failure["code"], "at": at})
+            claims_after = data.get("stop") == "tool_use" and not unclaimed
+            unclaimed = []
 
         elif kind == ProjectEvent.TOOL_CALL:
             call_id = data.get("call_id")
             if not isinstance(call_id, str):
                 continue
-            pending[call_id] = len(items)
             name = data.get("name", "?")
             arguments = data.get("arguments") or {}
-            items.append({
+            tool = {
                 "kind": "tool", "call_id": call_id,
                 "name": name,
                 "arguments": arguments,
@@ -347,16 +413,29 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 # placed as missing until its result arrives
                 "state": "missing", "preview": MISSING_RESULT_TEXT,
                 "is_error": True, "synthetic": True,
+            }
+            items.append(tool)
+            pending[call_id] = tool
+            if not claims_after:
+                unclaimed.append(tool)
+
+        elif kind == ProjectEvent.TURN_RESUMED:
+            unclaimed, claims_after = [], False
+            quiet = data.get("quiet")
+            items.append({
+                "kind": "resumed", "reason": data.get("reason", ""), "code": data.get("code", ""),
+                "quiet": quiet if isinstance(quiet, (int, float)) and not isinstance(quiet, bool) else None,
+                "at": at,
             })
 
         elif kind == ProjectEvent.TOOL_RESULT:
             call_id = data.get("call_id")
-            index = pending.pop(call_id, None) if isinstance(call_id, str) else None
-            if index is None:
+            target = pending.pop(call_id, None) if isinstance(call_id, str) else None
+            if target is None:
                 continue
             content = data.get("content")
             detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
-            items[index].update({
+            target.update({
                 "state": "done",
                 "preview": (content if isinstance(content, str) else "")[:_PREVIEW],
                 "is_error": bool(data.get("is_error")),

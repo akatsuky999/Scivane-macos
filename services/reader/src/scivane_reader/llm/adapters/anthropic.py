@@ -31,10 +31,12 @@ from ..types import (
     TextDelta,
     ThinkingDelta,
     ToolCall,
+    ToolInputDelta,
     ToolResultBlock,
     ToolUseBlock,
     Usage,
     UsageUpdate,
+    argument_chars,
 )
 from .base import ProtocolAdapter, SseEvent, StreamTranslator
 
@@ -131,11 +133,14 @@ class AnthropicTranslator(StreamTranslator):
             block = payload.get("content_block")
             index = payload.get("index")
             if isinstance(block, dict) and block.get("type") == "tool_use":
-                self._tools[index if isinstance(index, int) else len(self._tools)] = {
+                position = index if isinstance(index, int) else len(self._tools)
+                slot = self._tools[position] = {
                     "id": str(block.get("id", "")),
                     "name": str(block.get("name", "")),
                     "arguments": "",
                 }
+                if slot["name"]:
+                    yield ToolInputDelta(position, slot["name"], 0)
             return
 
         if kind == "content_block_stop":
@@ -171,6 +176,8 @@ class AnthropicTranslator(StreamTranslator):
                     slot = self._tools.get(index)
                     if slot is not None:
                         slot["arguments"] += fragment
+                        if slot["name"]:
+                            yield ToolInputDelta(index, slot["name"], argument_chars(slot["arguments"]))
             return
 
         if kind == "message_delta":
