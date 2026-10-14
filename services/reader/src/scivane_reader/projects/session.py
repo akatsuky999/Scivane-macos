@@ -27,8 +27,8 @@ ImageLoader = Callable[[ImageRecord], ContentBlock]
 __all__ = [
     "History", "ImageLoader", "derive_history", "derive_messages", "derive_transcript",
     "summarise_call", "user_content",
-    "MISSING_RESULT_TEXT", "MISSING_RESULT_CODE", "CHECKPOINT_PREAMBLE", "checkpoint_text",
-    "compaction_item",
+    "MISSING_RESULT_TEXT", "MISSING_RESULT_CODE", "CHECKPOINT_PREAMBLE", "INTERRUPTED_NOTE",
+    "checkpoint_text", "compaction_item",
 ]
 
 #: Distinct from the scheduler's cancellation code: "cancelled" and "no result in the log" are
@@ -53,6 +53,16 @@ CHECKPOINT_PREAMBLE = (
 )
 
 
+#: Opens the question after a turn the user stopped. Without it a cut-off answer replays as a
+#: finished one and cancelled calls as plain errors, and models either treat the half answer as
+#: complete or pick the old task back up. English and fixed, logged verbatim (TURN_INTERRUPTED).
+INTERRUPTED_NOTE = (
+    "[Scivane] The user stopped the previous turn. Nothing after that point happened: calls marked "
+    "as cancelled did not finish, and the last answer may end mid-sentence. Do not resume that "
+    "work unless the user asks for it; answer the message below."
+)
+
+
 def checkpoint_text(summary: str, covered: int) -> str:
     """The summary as it enters the history; the turn range tells the model which turns it replaces."""
     return (
@@ -70,12 +80,19 @@ class _Step:
         self.text = text
         self.uses: list[ToolUseBlock] = uses if uses is not None else []
         #: Logs written before tools ran mid-stream put a step's calls after its message. Such a
-        #: message (tool_use, nothing logged before it) claims the calls that follow it.
+        #: message (a step that can carry calls, nothing logged before it) claims the calls that
+        #: follow it.
         self.claims_after = False
 
     @property
     def empty(self) -> bool:
         return not self.text and not self.uses
+
+
+#: Stops whose step can hold tool calls: a normal tool step, and one the output limit cut after some
+#: complete calls (the loop runs those and continues). The loop logs the step's message as soon as
+#: the stream ends, so a call a tool picks up later is logged after it and must still be claimed.
+_CARRIES_CALLS = frozenset({"tool_use", "length"})
 
 
 class _Steps:
@@ -105,7 +122,7 @@ class _Steps:
 
     def message(self, text: str, stop: object) -> None:
         step = _Step(text, self.pending)
-        step.claims_after = stop == "tool_use" and not self.pending
+        step.claims_after = stop in _CARRIES_CALLS and not self.pending
         self.pending = []
         self.entries.append(step)
 
@@ -160,6 +177,9 @@ class History:
     covered: int = 0
     #: how many compactions happened; accuracy drops after several
     compactions: int = 0
+    #: An app note waiting for the next question (the last turn was stopped). The route hands it to
+    #: assemble(note=...) and the projection puts it in the same place once the question is logged.
+    pending_note: str = ""
 
     @property
     def count(self) -> int:
@@ -183,9 +203,14 @@ class History:
         return tuple(messages)
 
 
-def user_content(text: str, images: Iterable[ContentBlock]) -> tuple[ContentBlock, ...]:
-    """A question as the model sees it: images first, as providers recommend, then the words."""
+def user_content(
+    text: str, images: Iterable[ContentBlock], *, note: str = ""
+) -> tuple[ContentBlock, ...]:
+    """A question as the model sees it: images first, as providers recommend, then an app note
+    if there is one (INTERRUPTED_NOTE), then the user's words."""
     blocks = list(images)
+    if note:
+        blocks.append(TextBlock(note))
     if text:
         blocks.append(TextBlock(text))
     return tuple(blocks)
@@ -196,7 +221,8 @@ def derive_history(
 ) -> History:
     """Project log events into a history grouped by turn.
 
-    Only message, tool and compaction events count. Lifecycle events and tool/decision are skipped:
+    Only message, tool, resume, interruption and compaction events count. Lifecycle events and
+    tool/decision are skipped:
     approvals are host-side facts and would make the model comment on its own permissions.
     Malformed events are skipped; a compaction claiming more turns than existed when it was
     written is clamped. Images in user messages are named by hash; `images` turns them back into
@@ -208,6 +234,8 @@ def derive_history(
     summary = ""
     covered = 0
     compactions = 0
+    #: the note of a stopped turn, waiting for the question it opens
+    pending = ""
 
     def flush() -> None:
         nonlocal steps
@@ -229,9 +257,17 @@ def derive_history(
             records = [r for r in map(ImageRecord.from_dict, data.get("images") or []) if r is not None]
             blocks = user_content(text, (
                 images(record) if images is not None else TextBlock(f"[image {record.sha256[:12]}]")
-                for record in records))
+                for record in records), note=pending)
+            pending = ""
             if blocks:
                 turns.append([Message("user", blocks)])
+
+        elif kind == ProjectEvent.TURN_INTERRUPTED:
+            # Not a message of the stopped turn: appended there it would leave two user messages
+            # in a row (stopped turns often end on a question or on tool results).
+            text = data.get("text")
+            if isinstance(text, str) and text.strip():
+                pending = text
 
         elif kind == ProjectEvent.ASSISTANT_MESSAGE:
             text = data.get("text")
@@ -256,7 +292,7 @@ def derive_history(
                 is_error=bool(data.get("is_error")),
             ))
 
-        elif kind == ProjectEvent.TURN_RESUMED:
+        elif kind in (ProjectEvent.TURN_RESUMED, ProjectEvent.TURN_CONTINUED):
             text = data.get("text")
             if isinstance(text, str) and text.strip():
                 steps.note(text)
@@ -280,6 +316,7 @@ def derive_history(
         summary=summary if covered >= 1 else "",
         covered=covered if summary else 0,
         compactions=compactions,
+        pending_note=pending,
     )
 
 
@@ -305,6 +342,14 @@ def summarise_call(name: str, arguments: dict) -> str:
         path = arguments.get("path", "?")
         doing = {"read": "Reading", "write": "Writing", "edit": "Editing"}[name]
         return ui(f"{name} {path}", f"{doing} {path}")
+    if name in ("bash", "python"):
+        # the call's own one-line label says what it does, in the user's words; better than the raw
+        # command or "Python (N chars)"
+        label = arguments.get("description")
+        if isinstance(label, str) and label.strip():
+            return " ".join(label.split())[:80]
+    if name == "plan":
+        return _summarise_plan(arguments)
     if name == "grep":
         return ui(f"搜索 {arguments.get('pattern', '?')}", f"Searching {arguments.get('pattern', '?')}")
     if name == "glob":
@@ -328,6 +373,17 @@ def summarise_call(name: str, arguments: dict) -> str:
         return ui(f"删除项目 {project}（连同原稿与历史）",
                   f"Deleting project {project} (with its original and history)")
     return name
+
+
+def _summarise_plan(arguments: dict) -> str:
+    """Progress as the card shows it: "计划 2/5：翻第 3 节" (the step is the model's own words)."""
+    items = arguments.get("items")
+    steps = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    done = sum(1 for item in steps if item.get("status") == "done")
+    doing = next((str(item.get("step", "")).strip() for item in steps if item.get("status") == "doing"), "")
+    doing = doing[:60]
+    return ui(f"计划 {done}/{len(steps)}" + (f"：{doing}" if doing else ""),
+              f"Plan {done}/{len(steps)}" + (f": {doing}" if doing else ""))
 
 
 def _summarise_marks(arguments: dict) -> str:
@@ -394,7 +450,7 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             failure = data.get("failure")
             if isinstance(failure, dict) and isinstance(failure.get("code"), str):
                 items.append({"kind": "failure", "code": failure["code"], "at": at})
-            claims_after = data.get("stop") == "tool_use" and not unclaimed
+            claims_after = data.get("stop") in _CARRIES_CALLS and not unclaimed
             unclaimed = []
 
         elif kind == ProjectEvent.TOOL_CALL:

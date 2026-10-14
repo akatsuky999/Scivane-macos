@@ -6,6 +6,8 @@ need try/except to tell the two apart.
 
 from __future__ import annotations
 
+import json
+
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
@@ -163,6 +165,9 @@ class Finish:
     kind: Literal["stop", "tool_use", "length", "error", "aborted"]
     failure: LlmFailure | None = None
     usage: Usage | None = None
+    #: With kind "length": the tool whose call the output limit cut short. Such a call is never
+    #: handed over (its arguments are a fragment); the loop asks the model to make it again, smaller.
+    cut: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind in ("error", "aborted") and self.failure is None:
@@ -177,6 +182,17 @@ def argument_chars(raw: str) -> int:
     every CJK character, which would otherwise count six times.
     """
     return len(raw) - 5 * raw.count("\\u")
+
+
+def arguments_cut_short(raw: str) -> bool:
+    """Whether accumulated argument JSON fails to parse as an object. At a length stop that means the
+    output limit cut the call; at any other stop it is just malformed (the tool rejects it)."""
+    if not raw.strip():
+        return False
+    try:
+        return not isinstance(json.loads(raw), dict)
+    except ValueError:
+        return True
 
 
 def append_user_text(messages: Sequence["Message"], text: str) -> list["Message"]:

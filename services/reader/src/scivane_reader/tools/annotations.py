@@ -266,6 +266,11 @@ def _render(every: list[_Mark], matched: list[_Mark], shown: list[_Mark], query:
     return "\n".join(lines)
 
 
+#: Said wherever a listing shows the PDF's words instead of the paper text: a selection on the PDF
+#: can start or end mid-word, which is not a recognition error.
+_PDF_WORDS = "（下面是原稿上的字，选区可能从半个词开始或结束）"
+
+
 def _where(anchor: Anchor | None) -> str:
     if anchor is None:
         return ""
@@ -274,13 +279,13 @@ def _where(anchor: Anchor | None) -> str:
     if anchor.status == "exact":
         return f"{heading} · md/context.md {span}"
     if anchor.status == "approximate":
-        return f"{heading} · 约在 md/context.md {span}，与原稿用字有出入（下面是原稿上的字）"
+        return f"{heading} · 约在 md/context.md {span}，与原稿用字有出入{_PDF_WORDS}"
     if anchor.status == "ambiguous" and anchor.count > 1:
         many = f"{anchor.count} 处以上" if anchor.count >= MAX_HITS else f"{anchor.count} 处"
-        return f" · 正文里有 {many}同样的字，定不下是哪一处（下面是原稿上的字）"
+        return f" · 正文里有 {many}同样的字，定不下是哪一处{_PDF_WORDS}"
     if anchor.status == "ambiguous":
-        return " · 正文里有几处都像它，定不下是哪一处（下面是原稿上的字）"
-    return " · 正文里没找到（下面是原稿上的字）"
+        return f" · 正文里有几处都像它，定不下是哪一处{_PDF_WORDS}"
+    return f" · 正文里没找到{_PDF_WORDS}"
 
 
 def _passage(mark: _Mark, index: PaperIndex | None) -> str:
@@ -363,8 +368,10 @@ def annotation_tools() -> tuple[ToolDef, ...]:
             description=(
                 "列出用户在原稿 PDF 上做的标注（高亮或下划线，每条一种颜色），每一条都对回正文："
                 "页码、所在小节、在 md/context.md 里的行号，以及正文里对应的那段原文。\n\n"
-                "标注由应用保存，不在项目文件里 —— glob、grep、read 都找不到，只能用这个工具看。\n\n"
-                "按用户问的收窄范围（颜色、样式、页码）；问「刚标的那句」用 order=recent 加 limit。"
+                "- 标注由应用保存，不在项目文件里 —— glob、grep、read 都找不到，只能用这个工具看。\n"
+                "- 用户一提到自己标的、划的、高亮的，先调它，按用户说的收窄（颜色、样式、页码）；"
+                "问「刚标的那句」用 order=recent 加 limit。\n"
+                "- 颜色是什么意思由用户说，不要自己定（同一个黄色，有人标结论，有人标存疑）。"
             ),
             parameters={
                 "type": "object",

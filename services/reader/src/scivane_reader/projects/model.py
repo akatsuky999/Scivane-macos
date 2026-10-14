@@ -161,3 +161,10 @@ class ProjectEvent:
     #: preceding user message in the replayed history (llm.types.append_user_text), so it stays
     #: inside its turn and the replay matches what was sent.
     TURN_RESUMED = "turn/resumed"
+    #: The user stopped the turn. Data: text (the note for the model, verbatim). The note opens the
+    #: next question in the replayed history, so the model knows the turn above was cut short on
+    #: purpose and no two user messages end up in a row.
+    TURN_INTERRUPTED = "turn/interrupted"
+    #: The output limit cut a step and the turn went on with a note (data: text, verbatim; reason).
+    #: Replayed like turn/resumed; nothing for the UI to show, the answer simply continues.
+    TURN_CONTINUED = "turn/continued"

@@ -36,6 +36,7 @@ from ..types import (
     Usage,
     UsageUpdate,
     argument_chars,
+    arguments_cut_short,
 )
 from .base import ProtocolAdapter, SseEvent, StreamTranslator
 
@@ -118,6 +119,8 @@ class OpenAiTranslator(StreamTranslator):
         self._flushed = False
         self._classify = classify
         self._failure: LlmFailure | None = None
+        #: a call the output limit cut short (finish_reason "length"), withheld rather than run
+        self._cut: str | None = None
 
     def feed(self, event: SseEvent) -> Iterable[StreamChunk]:
         if event.data.strip() == DONE_SENTINEL:
@@ -215,6 +218,10 @@ class OpenAiTranslator(StreamTranslator):
             if not slot["name"]:
                 continue
             self._emitted = True
+            if self._finish_reason == "length" and arguments_cut_short(slot["arguments"]):
+                # a fragment of arguments: running it would fail or, worse, write half a file
+                self._cut = self._cut or slot["name"]
+                continue
             yield ToolCall(
                 id=slot["id"] or f"call_{index}",
                 name=slot["name"],
@@ -249,7 +256,7 @@ class OpenAiTranslator(StreamTranslator):
         if self._finish_reason == "tool_calls":
             kind = "tool_use"
         elif self._finish_reason == "length":
-            kind = "length"
+            return Finish(kind="length", usage=self._usage, cut=self._cut)
         else:
             kind = "stop"
         return Finish(kind=kind, usage=self._usage)

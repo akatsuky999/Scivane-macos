@@ -57,6 +57,10 @@ class ToolContext:
     #: This call's network credential (port and token); None means no network. Per call, never
     #: stored on the agent, and revoked by the dispatcher in `finally`.
     network: "CallNetwork | None" = None
+    #: Files whose current content the agent has seen this turn (read, written or edited): resolved
+    #: path -> mtime_ns at that moment. One dict per turn, shared by every call's copy of the
+    #: context; `write` refuses to overwrite an existing file that isn't in it, or changed since.
+    seen: dict[str, int] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

@@ -22,11 +22,23 @@ from .definition import (
     ToolOutcome,
 )
 
-__all__ = ["file_tools", "READ_MAX_LINES", "GREP_MAX_HITS", "DIFF_MAX_LINES", "SECTION_CHARS"]
+__all__ = [
+    "file_tools", "READ_MAX_LINES", "READ_LINE_CHARS", "GREP_MAX_HITS", "GLOB_MAX_PATHS",
+    "DIFF_MAX_LINES", "SECTION_CHARS", "OVERSIZE_CHARS",
+]
 
 #: read limits itself, so its results never spill (see results.py)
 READ_MAX_LINES = 2_000
+#: Longer lines are cut. read never spills, so one minified bundle or one-line JSON would otherwise
+#: land whole in the context and stay there for the rest of the turn.
+READ_LINE_CHARS = 2_000
 GREP_MAX_HITS = 200
+#: grep's `limit` can raise the cap this far, no further
+GREP_HIT_CEILING = 1_000
+#: context lines grep may add around each hit
+GREP_MAX_CONTEXT = 5
+#: paths glob lists; past this the pattern is too wide to read anyway
+GLOB_MAX_PATHS = 200
 #: a paper's text is a few hundred KB; anything much larger is usually binary or a log
 READ_MAX_BYTES = 2_000_000
 
@@ -34,6 +46,11 @@ READ_MAX_BYTES = 2_000_000
 #: sent; some gateways cut a stream that stays silent for about two minutes, and at the slowest
 #: rate measured on one (about 60 characters a second) this much takes under a minute.
 SECTION_CHARS = 3000
+
+#: A write this far over SECTION_CHARS gets a reminder in its result. Models read "write it in
+#: sections" as sections of the paper and send 4,000 to 14,000 characters at once; the result is
+#: what they read right before writing the next part. Not a refusal: the text is already generated.
+OVERSIZE_CHARS = SECTION_CHARS * 4 // 3
 
 
 def _root(context: ToolContext) -> Path:
@@ -57,6 +74,34 @@ def _resolve(context: ToolContext, raw: object, *, write: bool = False) -> Path:
 
 #: Bytes sniffed to tell binary from text: a NUL in here means binary, as git and ripgrep decide.
 SNIFF_BYTES = 8192
+
+
+def _remember(context: ToolContext, target: Path) -> None:
+    """Note that the agent now knows this file's content, as of its current modification time."""
+    try:
+        context.seen[str(target)] = target.stat().st_mtime_ns
+    except OSError:
+        pass
+
+
+def _check_overwrite(context: ToolContext, target: Path, relative: str) -> None:
+    """Refuse to overwrite an existing file the agent hasn't seen this turn, or that changed since.
+
+    notes/ holds the user's own Markdown too, and a whole-file write replaces it without a trace
+    of what was there. Reading first costs one call; not reading can cost the user's work.
+    """
+    seen = context.seen.get(str(target))
+    if seen is None:
+        raise ToolError(
+            f"{relative} 已经存在，这一轮还没读过它 —— 先 read 看清楚再整体覆盖；只改几处用 edit，"
+            "接在末尾用 append=true。",
+            "NOT_READ",
+        )
+    if target.stat().st_mtime_ns != seen:
+        raise ToolError(
+            f"{relative} 在你读过之后被改过（可能是用户在编辑）—— 先重新 read，再决定怎么改。",
+            "CHANGED_SINCE_READ",
+        )
 
 
 def _head(path: Path) -> bytes:
@@ -84,8 +129,8 @@ def _describe_binary(target: Path, head: bytes, relative: str) -> ToolOutcome:
         pixels = f"，{shape[0]}×{shape[1]} 像素" if shape else ""
         return ToolOutcome(
             f"{relative} 是一张 {media.split('/')[1].upper()} 图片（{size} 字节{pixels}）。"
-            "read 只读文本，看不到图里画了什么；要核对一张图，用 python 读它的尺寸、像素或数据，"
-            "或者请用户在 Finder 里打开它看。",
+            "read 只读文本，看不到图里画了什么。要让用户看到它，在 notes/ 的笔记里按相对笔记的路径"
+            "链接它（如 `../workbench/outputs/fig.png`），正文栏会显示；要核对它的数据，用 python 读。",
             detail={"binary": media, "bytes": size},
         )
     raise ToolError(
@@ -100,7 +145,9 @@ async def _read(arguments: dict[str, object], context: ToolContext) -> ToolOutco
         raise ToolError(f"不是文件或不存在：{arguments.get('path')}", "NOT_FOUND")
     head = _head(target)
     if _binary(head):
-        return _describe_binary(target, head, str(target.relative_to(_root(context))))
+        outcome = _describe_binary(target, head, str(target.relative_to(_root(context))))
+        _remember(context, target)
+        return outcome
     if target.stat().st_size > READ_MAX_BYTES:
         raise ToolError(
             f"文件有 {target.stat().st_size} 字节，超过 {READ_MAX_BYTES} 上限 —— "
@@ -117,11 +164,18 @@ async def _read(arguments: dict[str, object], context: ToolContext) -> ToolOutco
     limit = _as_int(arguments.get("limit"), READ_MAX_LINES)
     window = lines[offset : offset + min(limit, READ_MAX_LINES)]
     # line numbers: edit locates text by them and citations need positions
-    body = "\n".join(f"{offset + i + 1:>6}\t{line}" for i, line in enumerate(window))
+    body = "\n".join(f"{offset + i + 1:>6}\t{_clip_line(line)}" for i, line in enumerate(window))
     more = len(lines) - (offset + len(window))
     if more > 0:
         body += f"\n\n[还有 {more} 行未显示，用 offset={offset + len(window)} 继续]"
+    _remember(context, target)
     return ToolOutcome(body or "[空文件]", detail={"lines": len(lines)})
+
+
+def _clip_line(line: str) -> str:
+    if len(line) <= READ_LINE_CHARS:
+        return line
+    return f"{line[:READ_LINE_CHARS]}…［这一行还有 {len(line) - READ_LINE_CHARS} 字没显示，要全文用 python 处理］"
 
 
 #: Cap on diff lines returned per change. Protects the UI: overwriting a 20,000-line text would
@@ -203,6 +257,9 @@ async def _write(arguments: dict[str, object], context: ToolContext) -> ToolOutc
     # sent before a gateway gives up on a silent stream (SECTION_CHARS).
     appending = arguments.get("append") is True
     existed = target.is_file()
+    relative = target.relative_to(_root(context))
+    if existed and not appending:
+        _check_overwrite(context, target, str(relative))
     # read the old content first so the UI can show what changed; a failed read never fails the write
     before = ""
     if existed:
@@ -220,13 +277,18 @@ async def _write(arguments: dict[str, object], context: ToolContext) -> ToolOutc
             target.write_text(content, encoding="utf-8")
     except OSError as exc:
         raise ToolError(f"写不了：{exc.strerror}", "IO_ERROR") from exc
-    relative = target.relative_to(_root(context))
+    _remember(context, target)
     change = _diff(before, after, str(relative))
     if appending and existed:
         summary = f"已追加到 {relative}（这次 {len(content)} 字，文件现在 {len(after)} 字，+{change['added']}）"
     else:
         verb = "覆盖" if existed else "新建"
         summary = f"已{verb} {relative}（{len(content)} 字，+{change['added']} −{change['removed']}）"
+    if len(content) > OVERSIZE_CHARS:
+        summary += (
+            f"\n这一次 {len(content)} 字，超过约 {SECTION_CHARS} 字的单次上限 —— 已经写好，不用重写；"
+            "下一部分短一些：一次调用的参数要整段生成完才发出去，太长会被网关切断、整段作废。"
+        )
     return ToolOutcome(
         summary,
         detail={"path": str(relative), "overwrote": existed and not appending,
@@ -260,6 +322,7 @@ async def _edit(arguments: dict[str, object], context: ToolContext) -> ToolOutco
         )
     after = text.replace(old, new) if every else text.replace(old, new, 1)
     target.write_text(after, encoding="utf-8")
+    _remember(context, target)
     relative = target.relative_to(_root(context))
     change = _diff(text, after, str(relative))
     changed = hits if every else 1
@@ -316,12 +379,19 @@ def _glob_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
                 f" —— 目录本身不算文件，要看里面加 `/**/*`。"
             )
         return ToolOutcome(f"没有匹配 {pattern} 的文件，这个位置确实是空的")
-    return ToolOutcome("\n".join(hits), detail={"count": len(hits)})
+    listed = "\n".join(hits[:GLOB_MAX_PATHS])
+    if len(hits) > GLOB_MAX_PATHS:
+        listed += f"\n[共 {len(hits)} 个文件，只列了前 {GLOB_MAX_PATHS} 个 —— 把 pattern 收窄些]"
+    return ToolOutcome(listed, detail={"count": len(hits)})
 
 
 async def _grep(arguments: dict[str, object], context: ToolContext) -> ToolOutcome:
     # walking a whole repository can take hundreds of ms; keep it off the event loop
     return await asyncio.to_thread(_grep_sync, arguments, context)
+
+
+#: what grep can return: matching lines (default), the files that match and how often, or totals
+GREP_OUTPUTS = ("lines", "files", "count")
 
 
 def _grep_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcome:
@@ -330,9 +400,12 @@ def _grep_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
     if not isinstance(pattern, str) or not pattern:
         raise ToolError("pattern 必须是非空字符串", "INVALID_ARGS")
     try:
-        regex = re.compile(pattern)
+        regex = re.compile(pattern, re.IGNORECASE if arguments.get("ignore_case") is True else 0)
     except re.error as exc:
         raise ToolError(f"正则写错了：{exc}", "INVALID_ARGS") from exc
+    output = arguments.get("output") if arguments.get("output") in GREP_OUTPUTS else "lines"
+    around = min(_as_int(arguments.get("context"), 0), GREP_MAX_CONTEXT)
+    limit = min(max(_as_int(arguments.get("limit"), GREP_MAX_HITS), 1), GREP_HIT_CEILING)
 
     where = arguments.get("path")
     base = _resolve(context, where) if isinstance(where, str) and where else root
@@ -344,7 +417,11 @@ def _grep_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
         else base.rglob("*")
     )
 
-    lines: list[str] = []
+    shown: list[str] = []
+    per_file: list[tuple[str, int]] = []
+    total = 0
+    #: matching lines shown so far (output=lines)
+    hits = 0
     for path in sorted(candidates):
         if not path.is_file():
             continue
@@ -359,16 +436,50 @@ def _grep_sync(arguments: dict[str, object], context: ToolContext) -> ToolOutcom
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        relative = path.relative_to(root)
-        for number, line in enumerate(text.splitlines(), 1):
-            if regex.search(line):
-                lines.append(f"{relative}:{number}: {line.strip()[:200]}")
-                if len(lines) >= GREP_MAX_HITS:
-                    lines.append(f"[命中超过 {GREP_MAX_HITS} 条，已停止 —— 把 pattern 收窄些]")
-                    return ToolOutcome("\n".join(lines), detail={"truncated": True})
-    if not lines:
+        lines = text.splitlines()
+        matched = [index for index, line in enumerate(lines) if regex.search(line)]
+        if not matched:
+            continue
+        relative = str(path.relative_to(root))
+        total += len(matched)
+        per_file.append((relative, len(matched)))
+        if output == "lines":
+            taken = _show(shown, relative, lines, matched, around, limit - hits)
+            hits += taken
+            if taken < len(matched):
+                shown.append(
+                    f"[命中超过 {limit} 条，已停止 —— 收窄 pattern、path 或 glob，或先用 output=files 看分布]")
+                return ToolOutcome("\n".join(shown), detail={"truncated": True})
+
+    if not per_file:
         return ToolOutcome(f"没有命中 {pattern}")
-    return ToolOutcome("\n".join(lines), detail={"count": len(lines)})
+    if output == "count":
+        return ToolOutcome(f"共 {total} 处，分布在 {len(per_file)} 个文件", detail={"count": total})
+    if output == "files":
+        listed = [f"{name}（{count} 处）" for name, count in per_file[:limit]]
+        if len(per_file) > limit:
+            listed.append(f"[共 {len(per_file)} 个文件，只列了前 {limit} 个]")
+        return ToolOutcome("\n".join(listed), detail={"count": total, "files": len(per_file)})
+    return ToolOutcome("\n".join(shown), detail={"count": total})
+
+
+def _show(shown: list[str], relative: str, lines: list[str], matched: list[int], around: int,
+          budget: int) -> int:
+    """Append up to `budget` of one file's hits in the `文件:行号: 内容` form (context lines as
+    `文件-行号- 内容`, groups split by `--`, as ripgrep prints them). Returns how many were shown."""
+    hit_set = set(matched)
+    printed = -1
+    taken = 0
+    for index in matched[:budget]:
+        first, last = max(index - around, printed + 1), min(index + around, len(lines) - 1)
+        if around and shown and first > printed + 1:
+            shown.append("--")
+        for number in range(first, last + 1):
+            mark = ":" if number in hit_set else "-"
+            shown.append(f"{relative}{mark}{number + 1}{mark} {lines[number].strip()[:200]}")
+        printed = max(printed, last)
+        taken += 1
+    return taken
 
 
 def _as_int(value: object, fallback: int) -> int:
@@ -388,17 +499,20 @@ def file_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="read",
             description=(
-                "读项目内一个文件，返回带行号的内容。路径相对项目根。\n\n**论文正文不用读*"
-                "* —— `md/context.md` 已经完整地在你的上下文里了，再读一遍只是把同样的内容付两遍钱。"
-                "这个工具是用来看**上下文里没有的**东西：`code/` 里的源码、`"
-                "workbench/` 里你自己的产物、`notes/`。\n\n要读多个文件就在同一轮里一起发出来，不要读一个等一个。"
+                "读项目里的一个文本文件，返回带行号的内容（`行号<TAB>内容`）。路径相对项目根。\n\n"
+                "- **论文正文不用读**：`md/context.md` 已经整篇在你的上下文里，再读一遍只是把同样的内容付两遍钱。"
+                "这个工具看的是上下文里没有的东西：`code/` 的源码、`files/` 的材料、`notes/` 的笔记、`workbench/` 里你自己的产物。\n"
+                f"- 默认从头读最多 {READ_MAX_LINES} 行。大文件先用 grep 定位，再用 offset / limit 只读需要的那一段；"
+                f"超过 {READ_LINE_CHARS} 字的长行会被截断。\n"
+                "- 要读几个文件就在同一轮里一起发出来，不要读一个等一个。\n"
+                "- 图片与其他二进制文件读不出内容：图片只报格式与尺寸，你看不到画面。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": _string("相对项目根的路径，如 md/context.md"),
-                    "offset": {"type": "integer", "description": "从第几行开始（0 基）"},
-                    "limit": {"type": "integer", "description": f"最多读多少行，上限 {READ_MAX_LINES}"},
+                    "path": _string("相对项目根的路径，如 code/repo/train.py"),
+                    "offset": {"type": "integer", "description": "从第几行开始（0 起）"},
+                    "limit": {"type": "integer", "description": f"最多读几行，上限 {READ_MAX_LINES}"},
                 },
                 "required": ["path"],
             },
@@ -411,18 +525,22 @@ def file_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="write",
             description=(
-                "把内容写进项目内一个文件：默认整体覆盖，`append=true` 时接在文件末尾（文件不存在就新建）。"
-                "pdf/ 与 .lumen/ 不可写。\n\n"
-                f"**一次调用的 content 不要超过约 {SECTION_CHARS} 字。** 长文档（整篇译文、长笔记）分节写："
-                "第一节用 write 新建，之后每一节用 `append=true` 接上去；追加不会自动换行，"
-                "节与节之间的空行写在 content 开头。原因：一次调用的参数要整段生成完才会发出来，"
-                "有的网关在这段时间里收不到任何输出，等两分钟左右就会切断，已经生成的全部作废。"
+                "把内容写进项目里的一个文件：新建，或整体覆盖；`append=true` 时接在末尾（文件不存在就新建）。\n\n"
+                "- **覆盖一个已有的文件之前，这一轮里要先 read 过它**（这一轮由你写过、改过的也算），而且之后没被别人改过 —— "
+                "否则会被拒：notes/ 里也有用户自己的笔记，整体覆盖不留痕迹。只改几处用 edit。\n"
+                f"- **一次调用的 content 不要超过约 {SECTION_CHARS} 字（按字符算）。** 长文档（整篇译文、长笔记）分几次写："
+                "第一次用 write 新建，之后每次用 `append=true` 接上去 —— **按长度切，不按论文的章节切**，一节很长就拆成几次。"
+                "追加不会自动换行，段与段之间的空行写在 content 开头。原因：一次调用的参数要整段生成完才会发出来，"
+                "有的网关在这段时间里收不到任何输出，等两分钟左右就会切断，已经生成的全部作废。\n"
+                "- 给用户看的笔记、摘要、译文写进 `notes/`（正文栏会列出来）；脚本、草稿与中间产物写进 `workbench/`。\n"
+                "- `md/context.md` 是论文正文：不要用 write 覆盖或追加它，局部纠错用 edit；译文、改写写进 notes/。"
+                "pdf/ 与 .lumen/ 不可写。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": _string("相对项目根的路径"),
-                    "content": _string(f"要写的内容；不超过约 {SECTION_CHARS} 字，更长的分节追加"),
+                    "path": _string("相对项目根的路径，如 notes/第三节译文.md"),
+                    "content": _string(f"要写的内容；不超过约 {SECTION_CHARS} 字，更长的分几次追加"),
                     "append": {
                         "type": "boolean",
                         "description": "接在文件末尾而不是覆盖（默认 false）",
@@ -436,17 +554,14 @@ def file_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="edit",
             description=(
-                "精确替换文件里的一段文本。**改文件就用它** —— "
-                "改正文的 OCR 错漏、改代码、改笔记，都是它。\n\n"
-                "- **先 `read` 再改。** `old_text` 要和文件里的原文逐字一致，"
-                "凭印象写的片段基本对不上。`read` 的输出带行号前缀"
-                "（空格 + 行号 + 制表符），**行号前缀不属于文件内容**，"
-                "不要抄进 old_text。\n"
-                "- `old_text` 取**刚好唯一**的最小片段，通常两三行就够，"
-                "不必贴十几行上下文。\n"
-                "- 不唯一会拒绝。那时要么多带几行让它唯一，要么加 "
-                "`replace_all=true` 把每一处都改掉（一个从头错到尾的术语就该这样）。\n"
+                "在文件里做精确替换：把 `old_text` 换成 `new_text`。**改文件就用它** —— 改正文的识别错误、改代码、改笔记。\n\n"
+                "- **先 `read` 再改。** `old_text` 要与文件里的原文逐字一致（含缩进与标点），凭印象写的片段基本对不上。"
+                "read 输出的行号前缀（空格 + 行号 + 制表符）**不属于文件内容**，不要抄进 old_text。\n"
+                "- `old_text` 取**刚好唯一**的最小片段，通常两三行就够。不唯一会被拒：多带几行让它唯一，"
+                "或者加 `replace_all=true` 把每一处都改掉（一个从头错到尾的术语就该这样）。\n"
                 "- 多处要改就在同一轮里发多个 edit，不要一个一个等。\n"
+                "- 改 `md/context.md`（论文正文）只做局部、确定的纠错，并且攒在一起改：正文一变，"
+                "下一问整篇论文都要重新处理、用不上缓存。\n"
                 "- 不要在 bash 里 sed —— 那绕过了边界检查，界面上也看不到改了什么。"
             ),
             parameters={
@@ -467,13 +582,14 @@ def file_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="glob",
             description=(
-                "按通配符列出项目内的文件，如 `code/**/*.py`。\n\n*"
-                "*找文件用这个，不要在 bash 里 ls 或 find** —— "
-                "这个更快、输出更干净，也不会撞上沙箱拒读 `.lumen/` 产生的噪音。"
+                f"按通配符找项目里的文件，返回路径（按路径排序，最多 {GLOB_MAX_PATHS} 个）。\n\n"
+                "- 写法如 `code/**/*.py`、`notes/*.md`；结尾的 `**` 等同于 `**/*`，列出目录下所有文件。\n"
+                "- 只列文件；只匹配到目录时会说出是哪些目录。\n"
+                "- **找文件用它，不要在 bash 里 ls 或 find** —— 更快、输出更干净，也不会撞上沙箱拒读 `.lumen/` 产生的噪音。"
             ),
             parameters={
                 "type": "object",
-                "properties": {"pattern": _string("通配符，相对项目根")},
+                "properties": {"pattern": _string("通配符，相对项目根，如 code/**/*.py")},
                 "required": ["pattern"],
             },
             run=_glob,
@@ -483,8 +599,13 @@ def file_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="grep",
             description=(
-                "在项目内按正则搜索，返回 `文件:行号: 内容`。\n\n**搜内容用这个，不要在 "
-                "bash 里 grep。** 搜论文正文也不必用它 —— 正文已经在你的上下文里，直接看就行。"
+                "在项目里按正则（Python 的 re）搜内容。\n\n"
+                "- `output`：`lines`（默认，`文件:行号: 内容`）、`files`（命中的文件与各几处）、`count`（总数）。"
+                "范围大时先用 files 看分布，再看 lines。\n"
+                "- `path` 只搜一个子目录，`glob` 只搜匹配的文件（如 `**/*.py`），`ignore_case` 忽略大小写，"
+                f"`context` 给每处命中带上前后几行（最多 {GREP_MAX_CONTEXT}）。\n"
+                f"- 最多列 `limit` 条（默认 {GREP_MAX_HITS}）；超了就收窄 pattern 或范围。二进制文件跳过。\n"
+                "- **搜内容用它，不要在 bash 里 grep 或 rg**；搜论文正文也不必用它 —— 正文已经在你的上下文里，直接看就行。"
             ),
             parameters={
                 "type": "object",
@@ -492,6 +613,11 @@ def file_tools() -> tuple[ToolDef, ...]:
                     "pattern": _string("Python 正则"),
                     "path": _string("只搜这个子目录（可选）"),
                     "glob": _string("只搜匹配这个通配符的文件（可选）"),
+                    "output": {"type": "string", "enum": list(GREP_OUTPUTS),
+                               "description": "lines（默认）、files 或 count"},
+                    "ignore_case": {"type": "boolean", "description": "忽略大小写（默认 false）"},
+                    "context": {"type": "integer", "description": f"每处命中前后各带几行（0–{GREP_MAX_CONTEXT}）"},
+                    "limit": {"type": "integer", "description": f"最多列几条（默认 {GREP_MAX_HITS}）"},
                 },
                 "required": ["pattern"],
             },

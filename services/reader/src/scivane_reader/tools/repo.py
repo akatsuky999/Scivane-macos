@@ -169,11 +169,13 @@ def repo_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="fetch_repo",
             description=(
-                "取这篇论文的开源实现，放进 code/<仓库名>（浅克隆：只取最新一版，不带历史）。"
-                f"认得的站点：{'、'.join(sorted(ALLOWED_HOSTS))}；"
-                "别的站点用 bash 的 git clone。\n\n"
-                "在沙箱里经本机审计代理下载，和 bash 联网是同一个口子 —— 不用等用户批准，"
-                "用户会看到访问过哪个主机。clone 下来的 git hook 会被删掉。"
+                "把这篇论文的开源实现浅克隆进 code/<仓库名>（只取最新一版，不带历史）。"
+                f"认得的站点：{'、'.join(sorted(ALLOWED_HOSTS))}；别的站点用 bash 的 git clone。\n\n"
+                "- 不知道仓库在哪：先在论文正文里找代码链接；没有再上网查（如 GitHub 的搜索 API），"
+                "确认是这篇论文的官方实现（作者、标题、README 里的论文链接）再取，非官方的要说明。\n"
+                "- 在沙箱里经本机审计代理下载，和 bash 联网是同一个口子 —— 不用等用户批准，"
+                "用户会看到访问过哪个主机。clone 下来的 git hook 会被删掉；`code/<仓库名>` 已存在会被拒。\n"
+                "- 取下来之后先看 README 与目录结构（glob），再按需 grep 与 read 相关的那几段，不要整库通读。"
             ),
             parameters={
                 "type": "object",

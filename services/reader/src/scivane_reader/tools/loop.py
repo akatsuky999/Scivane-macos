@@ -44,6 +44,7 @@ from .scheduler import Dispatcher
 
 __all__ = [
     "AgentLoop", "LoopResult", "MAX_STEPS", "RESUME_NOTE", "SECTION_CHARS", "SILENT_CUT_SECONDS",
+    "CUT_TEXT_NOTE", "CUT_CALL_NOTE", "MAX_CONTINUATIONS",
 ]
 
 
@@ -78,12 +79,36 @@ SILENT_CUT_SECONDS = 45.0
 RESUME_NOTE = (
     "[Scivane] Your previous response was lost: the provider closed the stream after {quiet} "
     "seconds without sending anything, so none of it reached the user or the project. This "
-    "usually happens while a single tool call carries a very long argument, such as a whole "
-    "document in one `write`: the argument is generated in full before anything is sent, and the "
-    "gateway gives up on the silence. Continue the task, but keep each tool call's arguments "
-    "under about {section} characters: create a long file with its first section, then add each "
-    "following section with `write` and `append: true`."
+    "usually happens while one tool call carries a very long argument, such as a whole document "
+    "in one `write`: the argument is generated in full before anything is sent, and the gateway "
+    "gives up on the silence. Continue the task, keeping each tool call's arguments under about "
+    "{section} characters: write a long file in parts, the first with `write` and each next one "
+    "with `write` and `append: true`. A part is a size, not a section of the paper."
 )
+
+
+#: What the model reads after the output limit cut its answer. Shown below the text so far, so it
+#: restarts the cut line and reopens a fence or table. Logged verbatim (turn/continued), like
+#: RESUME_NOTE.
+CUT_TEXT_NOTE = (
+    "[Scivane] Your previous response was cut off at the output limit. Continue exactly where it "
+    "stopped: begin with the sentence, line, list item, or table row that was cut and write it in "
+    "full; if you were inside a code block or a table, reopen it first (the same fence and "
+    "language, or the table's header row). Do not repeat anything before that point and do not "
+    "mention the interruption."
+)
+
+#: After the output limit cut a tool call. The fragment never ran; a smaller call will.
+CUT_CALL_NOTE = (
+    "[Scivane] Your previous response reached the output limit while writing a `{tool}` call, so "
+    "the call was discarded and nothing ran. Make it again with less in it: keep each call's "
+    "arguments under about {section} characters, and write a long file in parts, the first with "
+    "`write` and each next one with `write` and `append: true`."
+)
+
+#: Continuations after the output limit in a row; a step that runs tools resets the count. A long
+#: answer can need a few; one that keeps hitting the limit is not converging.
+MAX_CONTINUATIONS = 3
 
 
 @dataclass
@@ -115,6 +140,14 @@ class _Step:
     finish: Finish | None = None
     #: the per-chunk check saw the cancel
     aborted: bool = False
+
+
+def _assistant(said: str, calls: list[ToolCall]) -> Message:
+    """A step as the next request carries it: its words and calls in one message, since every
+    protocol wants tool_result right after the message holding the tool_use."""
+    blocks: list[object] = [TextBlock(said)] if said else []
+    blocks.extend(ToolUseBlock(c.id, c.name, c.arguments) for c in calls)
+    return Message("assistant", tuple(blocks))  # type: ignore[arg-type]
 
 
 def _silent_cut(failure: LlmFailure | None) -> bool:
@@ -180,6 +213,7 @@ class AgentLoop:
         #: A resume is allowed once per run of failures: a second cut right after the note means
         #: it didn't help, and repeating it would only spend more.
         may_resume = True
+        continuations = 0
 
         for step in range(1, self.max_steps + 1):
             if self.prepare is not None:
@@ -267,6 +301,29 @@ class AgentLoop:
                 may_resume = False
                 continue
 
+            if stop == "length" and continuations < MAX_CONTINUATIONS:
+                # The output limit cut the step. Keep what it produced (its words, any complete calls
+                # and their results), then tell the model how to go on; the note joins the history the
+                # way the projection replays turn/continued.
+                continuations += 1
+                if calls:
+                    every_call.extend(calls)
+                    messages.append(_assistant(said, calls))
+                    results = await self._settle(dispatcher, calls, current.started)
+                    messages.append(Message("user", tuple(results)))
+                elif said:
+                    messages.append(_assistant(said, []))
+                note = (CUT_CALL_NOTE.format(tool=finish.cut, section=SECTION_CHARS) if finish.cut
+                        else CUT_TEXT_NOTE)
+                self.journal.turn_continued(note, reason="output_limit")
+                messages = append_user_text(messages, note)
+                if self.context.cancelled():
+                    return LoopResult(
+                        text=said or last_text, steps=step, stop="aborted",
+                        usage=usage, calls=tuple(every_call),
+                    )
+                continue
+
             if stop != "tool_use" or not calls:
                 # calls without a tool_use finish shouldn't happen, but if they do the started tools must be collected
                 await _abandon(current.started)
@@ -277,16 +334,9 @@ class AgentLoop:
                 )
 
             may_resume = True
+            continuations = 0
             every_call.extend(calls)
-            # The step's text and calls go in one message: every protocol requires tool_result right after
-            # the assistant message holding the tool_use.
-            assistant_blocks: list[object] = []
-            if said:
-                assistant_blocks.append(TextBlock(said))
-            assistant_blocks.extend(
-                ToolUseBlock(c.id, c.name, c.arguments) for c in calls
-            )
-            messages.append(Message("assistant", tuple(assistant_blocks)))  # type: ignore[arg-type]
+            messages.append(_assistant(said, calls))
 
             # already running since the stream; just collect results in model order
             results = await self._settle(dispatcher, calls, current.started)

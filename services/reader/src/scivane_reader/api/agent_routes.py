@@ -33,7 +33,7 @@ from ..projects.compaction import Compactor, CompactionError, auto_threshold, oc
 from ..projects.compaction import release as release_conversation
 from ..projects.context import paper_message
 from ..projects.meter import calibration, measure
-from ..projects.session import derive_messages, derive_transcript, summarise_call
+from ..projects.session import INTERRUPTED_NOTE, derive_history, derive_transcript, summarise_call
 from ..tools import AgentLoop, StoreJournal, librarian, reader
 from ..tools.approval import APPROVAL_TIMEOUT, approvals
 from .sse import ERROR_CODE_HEADER, HEARTBEAT_SECONDS, AgentEvent, encode
@@ -168,6 +168,15 @@ class StreamingJournal:
             "code": _NOTICE_CODES.get(reason, reason.upper()),
             "cause": failure.get("code", ""), "quiet": failure.get("quiet"),
         })
+
+    def turn_interrupted(self, text: str) -> None:
+        if self._store:
+            self._store.turn_interrupted(text)
+
+    def turn_continued(self, text: str, *, reason: str) -> None:
+        # for the model only: the answer simply goes on, so the UI gets no notice
+        if self._store:
+            self._store.turn_continued(text, reason=reason)
 
     def user_message(self, text: str, images: list[dict] | None = None) -> None:
         if self._store:
@@ -327,10 +336,11 @@ def _network_watcher(emitter: Emitter):
 
 async def _run(
     loop: AgentLoop, request, emitter: Emitter, job_id: str, prefix: str,
-    audit: object = None, epilogue=None, release=None,
+    audit: object = None, epilogue=None, release=None, stopped=None,
 ) -> None:
     """Run the loop and translate its end into done/error, always closing the stream.
 
+    `stopped` runs when the user stopped the turn (it logs the note the next question opens with);
     `epilogue` runs before the terminal event and cannot fail the turn; `release` always runs.
     """
     watching = (
@@ -340,6 +350,11 @@ async def _run(
     try:
         with watching:
             result = await loop.run(request)
+            if stopped is not None and result.stop == "aborted":
+                try:
+                    stopped()
+                except Exception:  # noqa: BLE001
+                    logger.exception("记不下「被停下」的说明 job=%s", job_id)
             if epilogue is not None:
                 try:
                     epilogue()
@@ -488,7 +503,8 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
     # History is projected from the log, the only reason a conversation survives a restart.
     # Never keep a second copy.
     events = list(projects.events(project_id, conversation=conversation))
-    history = list(derive_messages(events, images=attachments.block))
+    past = derive_history(events, images=attachments.block)
+    history = list(past.visible())
 
     # Fix the job id first so the reader's context carries the cancel signal; only reader()
     # builds that context.
@@ -503,6 +519,8 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
             project, markdown, body.question, history,
             model=model, tools=agent.schemas(), system=agent.system,
             images=[attachments.block(record) for record in records],
+            # a stopped turn's note opens this question, as the projection will replay it
+            note=past.pending_note,
         )
     except ValueError as exc:
         # Unconfirmed context must never reach the model; say what to do instead of a 500.
@@ -563,6 +581,7 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
                 agent_loop, request, emitter, job_id, prefix, audit=audit,
                 epilogue=lambda: emitter.emit(AgentEvent.CONTEXT, compactor.idle_report().as_dict()),
                 release=lambda: release_conversation(project_id, conversation),
+                stopped=lambda: journal.turn_interrupted(INTERRUPTED_NOTE),
             ))
     except BaseException:
         # The task never started: release the conversation now or it stays busy forever.

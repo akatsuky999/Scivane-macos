@@ -5,7 +5,8 @@ model's guess with another's, in the text every answer is based on.
 
 cite searches the source PDF because restructuring removes page boundaries from md/context.md.
 That needs a text layer; on scanned PDFs it says it can't locate the passage rather than
-inventing a page number.
+inventing a page number. Where it finds the passage it also hands back the PDF's own words there:
+a second source, independent of recognition, for checking numbers and symbols.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 from ..projects import workspace
 from .definition import ToolContext, ToolDef, ToolError, ToolOutcome
 
-__all__ = ["paper_tools", "MAX_REOCR_PAGES", "find_anchor_probe", "locate_in_pdf"]
+__all__ = ["paper_tools", "MAX_REOCR_PAGES", "EXCERPT_CHARS", "find_anchor_probe", "locate_in_pdf", "pdf_words"]
 
 #: re-running loads the 2.8 GB model and takes seconds per page; "redo the whole paper" would take
 #: a quarter of an hour
@@ -26,7 +27,16 @@ MAX_REOCR_PAGES = 20
 #: probe length searched in the PDF: too short matches unrelated places, too long misses on
 #: OCR differences (ligatures, spaces)
 PROBE_CHARS = 60
-_MARKUP = re.compile(r"[#*`_>\[\]()!]|<[^>]+>")
+_MARKUP = re.compile(r"[#*`_>\[\]()!]")
+#: Table cell separators, pipe or HTML. They become spaces: dropped, they glued cells together and a
+#: table row never matched the PDF, whose text layer separates cells with spaces.
+_SEPARATORS = re.compile(r"\||<[^>]+>")
+
+#: PDF words handed back with a located passage: the paragraph around it, or the rows under a
+#: caption, without flooding the context.
+EXCERPT_CHARS = 500
+#: how much of the PDF text before the probe the excerpt keeps
+_LEAD_CHARS = 60
 
 
 def _project(context: ToolContext) -> Path:
@@ -43,7 +53,7 @@ def find_anchor_probe(markdown: str, anchor: str) -> tuple[str, int] | None:
     for number, line in enumerate(markdown.splitlines(), 1):
         if needle not in line.lower():
             continue
-        clean = _MARKUP.sub("", line).strip()
+        clean = " ".join(_MARKUP.sub("", _SEPARATORS.sub(" ", line)).split())
         if len(clean) < 4:
             # a bare heading such as "## 3.2" would match the table of contents; use the next line with content
             continue
@@ -66,6 +76,32 @@ def locate_in_pdf(pdf: Path, probe: str) -> tuple[int, tuple[float, float, float
                     r = rects[0]
                     return index + 1, (r.x0, r.y0, r.x1, r.y1)
     return None
+
+
+def pdf_words(pdf: Path, page: int, rect: tuple[float, float, float, float], probe: str) -> str:
+    """The PDF's own text at a located passage: from the text block holding `rect` onward, in the
+    file's reading order, starting a little before the probe and EXCERPT_CHARS long. Empty when no
+    block holds the hit. Pure reading; nothing is rendered.
+    """
+    import pymupdf
+
+    with pymupdf.open(pdf) as doc:
+        blocks = doc.load_page(page - 1).get_text("blocks")
+    hit = pymupdf.Rect(rect)
+    texts = [(pymupdf.Rect(b[:4]), " ".join(b[4].split())) for b in blocks if b[6] == 0]
+    start = next((i for i, (box, _) in enumerate(texts) if box.intersects(hit)), None)
+    if start is None:
+        return ""
+    joined = ""
+    for _, text in texts[start:]:
+        if text:
+            joined = f"{joined} {text}" if joined else text
+        if len(joined) >= EXCERPT_CHARS * 2:
+            break
+    found = joined.casefold().find(probe[:20].casefold())
+    begin = max(0, found - _LEAD_CHARS) if found > 0 else 0
+    excerpt = joined[begin:begin + EXCERPT_CHARS]
+    return ("…" if begin else "") + excerpt + ("…" if begin + EXCERPT_CHARS < len(joined) else "")
 
 
 def _has_text_layer(pdf: Path) -> bool:
@@ -116,10 +152,16 @@ async def _cite(arguments: dict[str, object], context: ToolContext) -> ToolOutco
             detail={"line": line_number},
         )
     page, (x0, y0, x1, y1) = hit
-    return ToolOutcome(
+    words = await asyncio.to_thread(pdf_words, pdf, page, (x0, y0, x1, y1), probe)
+    text = (
         f"「{anchor}」在原稿第 {page} 页，位置 ({x0:.0f}, {y0:.0f})–({x1:.0f}, {y1:.0f})；"
-        f"正文第 {line_number} 行：{probe}",
-        detail={"page": page, "rect": [x0, y0, x1, y1], "line": line_number},
+        f"正文第 {line_number} 行：{probe}"
+    )
+    if words:
+        # the PDF's own text layer, independent of recognition: compare numbers and symbols with it
+        text += f"\n原稿文本层从这一处起的原字：{words}"
+    return ToolOutcome(
+        text, detail={"page": page, "rect": [x0, y0, x1, y1], "line": line_number},
     )
 
 
@@ -187,14 +229,13 @@ def paper_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="reocr",
             description=(
-                "对原稿指定的几页**重新识别**。**这是最后手段，不是修错别字的工具。**\n\n"
-                "只在**整段乱码**、公式结构整个塌了、表格错位到认不出原形时才用它 —— "
-                "那种情况你推不出正确形式，重跑才比瞎猜接近根因。\n\n"
-                "**认得出正确形式的错误一律用 `edit` 改**（字符认错、断词、"
-                "希腊字母被认成拉丁字母等）。代价差三个数量级：`edit` 是毫秒级、"
-                "可逆、只动你指定的那一处；这个工具要加载 2.8GB 引擎按页重跑，"
-                "几十秒起步。\n\n"
-                "结果写进 workbench/reocr/，不直接覆盖正文。"
+                "对原稿指定的几页**重新跑本地 OCR**，结果写进 `workbench/reocr/page-NNNN.md`，不碰正文。"
+                "**这是最后手段，不是修错别字的工具。**\n\n"
+                "- 只在**整段乱码**、公式结构整个塌了、表格错位到认不出原形时才用 —— 那种情况你推不出正确形式，"
+                "重跑才比瞎猜接近根因。\n"
+                "- **认得出正确形式的错误一律用 `edit` 改**（字符认错、断词、希腊字母被认成拉丁字母等）。代价差三个数量级："
+                "`edit` 是毫秒级、可逆、只动你指定的那一处；这个工具要加载 2.8GB 引擎按页重跑，几十秒起步。\n"
+                f"- 一次最多 {MAX_REOCR_PAGES} 页。跑完先 read 结果、与正文那一段对照，确认是好的再用 edit 把需要的部分合进 `md/context.md`。"
             ),
             parameters={
                 "type": "object",
@@ -214,15 +255,17 @@ def paper_tools() -> tuple[ToolDef, ...]:
         ToolDef(
             name="cite",
             description=(
-                "把正文里的一个位置（章节号、图号、公式号，或一句原文）"
-                "解析回原稿的页码与坐标，供用户核对。"
+                "把正文里的一个位置（章节号、图号、表号、公式号，或一句原文）解析回原稿："
+                "给出页码、坐标，**以及原稿文本层从那一处起的原字** —— 它与识别无关，拿来核对正文里的数字、"
+                "符号与用词。要核对表格里的数，拿表题（如「Table 2」）当锚点，原字会带出表下面的几行。"
+                "它只在 PDF 的文本层里搜字：**不显示页面，也看不到图**；扫描件没有文本层，会如实说定位不到。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "anchor": {
                         "type": "string",
-                        "description": "章节号如 3.2、图号如「图 3」、或正文里的一句话",
+                        "description": "章节号如 3.2、图号如「图 3」、表题如「Table 2」，或正文里的一句话",
                     }
                 },
                 "required": ["anchor"],

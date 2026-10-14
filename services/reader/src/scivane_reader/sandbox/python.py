@@ -29,7 +29,7 @@ __all__ = [
     "ANALYSIS_PACKAGES", "PythonEnv", "interpreter",
     "analysis_env", "analysis_ready", "ensure_analysis_env",
     "project_env", "create_project_env", "install_into_project",
-    "python_argv", "run_python",
+    "python_argv", "run_python", "WORKSPACE_ROOT_ENV",
 ]
 
 #: Only what paper reading actually uses; a grab bag would be slow and suggest the agent can do anything.
@@ -40,6 +40,11 @@ _PROJECT_ENV_SUBDIR = "workbench/.venv"
 
 #: the python executor's cwd, so a relative savefig("fig.png") lands here
 _OUTPUTS_SUBDIR = "workbench/outputs"
+
+#: The project root, set for every run because the cwd is workbench/outputs/: open("code/x.py")
+#: looks for workbench/outputs/code/x.py. The python tool's description names this variable, so
+#: both take it from here. Not SCIVANE_PROJECT_ROOT, which elsewhere means the code repository root.
+WORKSPACE_ROOT_ENV = "SCIVANE_WORKSPACE_ROOT"
 
 #: Written last when the shared env is complete; without it the env counts as unfinished
 #: and is rebuilt.
@@ -239,8 +244,7 @@ def run_python(
         env_extra={
             # no display: interactive backends crash
             "MPLBACKEND": "Agg",
-            # Not SCIVANE_PROJECT_ROOT, which elsewhere means the code repository root.
-            "SCIVANE_WORKSPACE_ROOT": str(policy.workspace_root),
+            WORKSPACE_ROOT_ENV: str(policy.workspace_root),
             "SCIVANE_OUTPUT_DIR": str(outputs),
         },
         stdin=None if script is not None else code,

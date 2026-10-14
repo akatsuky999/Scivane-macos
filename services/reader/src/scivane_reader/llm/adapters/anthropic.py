@@ -37,6 +37,7 @@ from ..types import (
     Usage,
     UsageUpdate,
     argument_chars,
+    arguments_cut_short,
 )
 from .base import ProtocolAdapter, SseEvent, StreamTranslator
 
@@ -101,6 +102,10 @@ class AnthropicTranslator(StreamTranslator):
         self._error: LlmFailure | None = None
         # content_block_start opens a slot, input_json_delta fills it, content_block_stop delivers it
         self._tools: dict[int, dict[str, str]] = {}
+        #: Calls whose arguments don't parse, held until the stop reason says why: cut by max_tokens
+        #: (withheld) or malformed (delivered as {} so the tool rejects it and the model retries).
+        self._held: list[tuple[int, dict[str, str]]] = []
+        self._cut: str | None = None
 
     def feed(self, event: SseEvent) -> Iterable[StreamChunk]:
         try:
@@ -148,11 +153,10 @@ class AnthropicTranslator(StreamTranslator):
             slot = self._tools.pop(index, None) if isinstance(index, int) else None
             if slot and slot["name"]:
                 self._emitted = True
-                yield ToolCall(
-                    id=slot["id"] or f"call_{index}",
-                    name=slot["name"],
-                    arguments=_parse_arguments(slot["arguments"]),
-                )
+                if arguments_cut_short(slot["arguments"]):
+                    self._held.append((index, slot))
+                    return
+                yield _call(index, slot)
             return
 
         if kind == "content_block_delta":
@@ -186,6 +190,12 @@ class AnthropicTranslator(StreamTranslator):
                 reason = delta.get("stop_reason")
                 if isinstance(reason, str):
                     self._stop_reason = reason
+                    for index, slot in self._held:
+                        if reason == "max_tokens":
+                            self._cut = self._cut or slot["name"]
+                        else:
+                            yield _call(index, slot)
+                    self._held = []
             usage = payload.get("usage")
             if isinstance(usage, dict):
                 # message_delta reports only the output delta; input and cache counts came with message_start
@@ -214,10 +224,18 @@ class AnthropicTranslator(StreamTranslator):
         if self._stop_reason == "tool_use":
             kind = "tool_use"
         elif self._stop_reason == "max_tokens":
-            kind = "length"
+            return Finish(kind="length", usage=self._usage, cut=self._cut)
         else:
             kind = "stop"
         return Finish(kind=kind, usage=self._usage)
+
+
+def _call(index: int, slot: dict[str, str]) -> ToolCall:
+    return ToolCall(
+        id=slot["id"] or f"call_{index}",
+        name=slot["name"],
+        arguments=_parse_arguments(slot["arguments"]),
+    )
 
 
 def _parse_arguments(text: str) -> dict[str, object]:

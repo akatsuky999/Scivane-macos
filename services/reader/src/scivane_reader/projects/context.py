@@ -1,6 +1,6 @@
 """Assemble a project into one model call.
 
-    system          the reader prompt (stable)
+    system          the agent's prompt (stable; tools/agents.py)
     messages[0]     the paper's Markdown     <- cacheable_prefix ends here
     messages[1..]   earlier turns
     messages[-1]    this question
@@ -22,14 +22,6 @@ from ..llm.types import ContentBlock, ToolResultBlock, ToolSchema, ToolUseBlock
 from .model import Project
 from .session import user_content
 
-#: Short and stable: it heads the cache prefix, so changing one character invalidates every
-#: project's cache.
-SYSTEM_PROMPT = """You are a paper-reading assistant. The user is reading one paper, and its complete OCR-derived text is provided in the conversation context.
-
-Ground your answer in the provided paper text and the user's request. If the text does not establish a fact, say so instead of silently filling the gap with prior knowledge; label any outside background or inference explicitly. When citing the paper, name the relevant section, figure, table, equation, or page so the user can verify it in the original. Because the text comes from OCR, formulas and tables may contain recognition errors; flag suspicious passages instead of treating them as certain.
-
-Choose the response language from the user's latest substantive question or instruction, not from the interface language, the paper's language, tool output, stored history, or this prompt. Use Simplified Chinese for a predominantly Chinese request and English for a predominantly English request. For mixed or ambiguous input, follow the main request sentence, then the latest user message if needed. Keep quoted source text, code, filenames, identifiers, equations, and citations unchanged unless the user asks for translation."""
-
 
 def assemble(
     project: Project,
@@ -38,15 +30,18 @@ def assemble(
     history: list[Message] | None = None,
     *,
     model: str,
+    system: str,
     purpose: Purpose = "foreground",
     max_tokens: int | None = None,
     tools: tuple[ToolSchema, ...] = (),
-    system: str | None = None,
     images: Sequence[ContentBlock] = (),
+    note: str = "",
 ) -> CallRequest:
     """Assemble project, history and question into one call; `images` go with the question.
 
-    `system` overrides the default prompt; the two agent levels keep separate prompts.
+    `system` is the agent's prompt; there is no default, so no second prompt can quietly stand in
+    for it. `note` is an app message placed before the question's words (History.pending_note), so
+    the projection of the log rebuilds this request byte for byte.
     Raises ValueError for text an older version left unconfirmed.
     """
     if project.context is not None and not project.context.confirmed:
@@ -57,12 +52,12 @@ def assemble(
 
     messages: list[Message] = [paper_message(project, context_markdown)]
     messages.extend(settle_history(history or []))
-    messages.append(Message("user", user_content(question, images)))
+    messages.append(Message("user", user_content(question, images, note=note)))
 
     return CallRequest(
         model=model,
         messages=tuple(messages),
-        system=system if system is not None else SYSTEM_PROMPT,
+        system=system,
         max_tokens=max_tokens,
         purpose=purpose,
         tools=tools,
@@ -79,11 +74,22 @@ def paper_message(project: Project, markdown: str) -> Message:
     return Message.text("user", _wrap_paper(project, markdown))
 
 
+#: closing tag of the paper wrapper, escaped inside the text so a paper can't end its own wrapper
+_CLOSE = "</paper"
+
+
 def _wrap_paper(project: Project, markdown: str) -> str:
-    """A stable wrapper around the text. The title is left out on purpose: it changes after OCR and
-    would invalidate the most expensive cache entry.
+    """The paper inside a tagged wrapper that names where the text came from.
+
+    The tag marks the paper as material rather than the user's words (papers quote instructions,
+    some are about prompt injection), and `source` tells the model how much to trust symbols and
+    numbers: OCR garbles them, a transcribing model may fill gaps, an upload may not be the paper
+    at all. The origin only changes together with the text, so it costs the cache nothing; the
+    title is left out on purpose, since it changes after OCR.
     """
-    return f"以下是论文的完整正文，供后续所有问题参考。\n\n---\n\n{markdown}"
+    origin = project.context.origin if project.context is not None else "unknown"
+    body = markdown.replace(_CLOSE, "<\\/paper")
+    return f'<paper source="{origin}">\n{body}\n</paper>'
 
 
 #: Results from earlier turns longer than this (characters) are not resent verbatim.
