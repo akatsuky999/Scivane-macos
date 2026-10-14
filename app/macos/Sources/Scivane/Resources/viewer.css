@@ -265,6 +265,8 @@ h4, h5, h6 {
   letter-spacing: .01em;
   color: var(--ink-soft);
 }
+/* a heading reached from the outline stops a little below the top edge */
+.page-body h1, .page-body h2, .page-body h3 { scroll-margin-top: 24px; }
 /* no extra top margin for the first paragraph after a heading */
 h1 + p, h2 + p, h3 + p { margin-top: 0; }
 

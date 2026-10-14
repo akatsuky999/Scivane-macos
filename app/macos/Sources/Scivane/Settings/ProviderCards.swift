@@ -13,10 +13,88 @@ enum CardKeyState: Equatable {
   case missing
 
   var usable: Bool { self != .missing }
+
+  var name: String {
+    switch self {
+    case .own: return L("key：本卡专用", "Key: this card's own")
+    case .macro(let id, let note): return note.isEmpty ? L("key：共享 \(id)", "Key: shared \(id)") : L("key：共享 \(id) · \(note)", "Key: shared \(id) · \(note)")
+    case .missing: return L("没有 key", "No key")
+    }
+  }
 }
 
-/// A card's header, which is the whole card when collapsed. The whole row expands; the dot on the
-/// left is a separate button for Make Default, so the two actions don't share an area.
+/// What a card's model takes in. Every chat model reads text; images only once a check has shown it
+/// one, so an unchecked card says so rather than guessing from the model name.
+struct ModalityTags: View {
+  let vision: Bool?
+
+  var body: some View {
+    HStack(spacing: 4) {
+      SettingsTag(text: L("文本", "Text"))
+      switch vision {
+      case true?: SettingsTag(text: L("图像", "Image"), tint: Palette.accent, emphasized: true)
+      case nil: SettingsTag(text: L("待检测", "Unchecked"), tint: Palette.inkFaint)
+      case false?: EmptyView()
+      }
+    }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(Self.name(vision))
+    .help(Self.name(vision))
+  }
+
+  static func name(_ vision: Bool?) -> String {
+    switch vision {
+    case true?: return L("模态：文本、图像", "Modality: text, image")
+    case false?: return L("模态：仅文本", "Modality: text only")
+    case nil: return L("模态：文本；图像未检测", "Modality: text; image not checked")
+    }
+  }
+}
+
+/// The endpoint at a glance: two letters for a gateway or vendor, LAN for a machine on this network.
+struct ProviderMark: View {
+  let baseURL: String
+
+  var body: some View {
+    let letters = Self.letters(for: baseURL)
+    let tint = letters == "LAN" ? Palette.codeString : Palette.codeNumber
+    Text(letters)
+      .font(.system(size: letters.count > 2 ? 9 : 10.5, weight: .bold)).tracking(0.3)
+      .foregroundStyle(tint)
+      .frame(width: 30, height: 30)
+      .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+      .accessibilityHidden(true)
+  }
+
+  static func letters(for baseURL: String) -> String {
+    guard let host = URL(string: baseURL)?.host?.lowercased(), !host.isEmpty else { return "API" }
+    if isLocal(host) { return "LAN" }
+    let known: [(String, String)] = [
+      ("openrouter.ai", "OR"), ("deepseek.com", "DS"), ("openai.com", "OA"),
+      ("anthropic.com", "AN"), ("googleapis.com", "GE"),
+    ]
+    if let hit = known.first(where: { host == $0.0 || host.hasSuffix("." + $0.0) }) { return hit.1 }
+    // the registrable name: api.example.com -> example
+    let labels = host.split(separator: ".")
+    let name = labels.count >= 2 ? labels[labels.count - 2] : labels.first ?? "api"
+    return String(name.prefix(2)).uppercased()
+  }
+
+  /// localhost, .local and the private IPv4 ranges: a model served on this machine or network
+  static func isLocal(_ host: String) -> Bool {
+    if host == "localhost" || host == "::1" || host.hasSuffix(".local") { return true }
+    let parts = host.split(separator: ".").compactMap { Int($0) }
+    guard parts.count == 4 else { return false }
+    switch (parts[0], parts[1]) {
+    case (10, _), (127, _), (192, 168): return true
+    case (172, 16...31): return true
+    default: return false
+    }
+  }
+}
+
+/// A card's header, which is the whole card when collapsed. The whole row expands; making a card
+/// the default is a separate control, shown on the open card and in the context menu.
 struct ProviderCardHeader: View {
   let provider: AppModel.ProviderSummary
   let isDefault: Bool
@@ -25,84 +103,58 @@ struct ProviderCardHeader: View {
   let onUse: () -> Void
   let onToggle: () -> Void
 
-  /// host only: the full URL doesn't fit, and the host is what people check
-  private var host: String {
-    URL(string: provider.baseUrl)?.host ?? provider.baseUrl
-  }
-
   private var reasoningLabel: String {
     AppModel.reasoningLevels.first { $0.value == provider.reasoning }?.label ?? provider.reasoning
   }
 
   var body: some View {
-    HStack(alignment: .top, spacing: 10) {
-      // a separate button, since the row itself expands
-      Button(action: onUse) {
-        Image(systemName: isDefault ? "largecircle.fill.circle" : "circle")
-          .font(.system(size: 13))
-          .foregroundStyle(isDefault ? Palette.accent : Palette.inkFaint)
-      }
-      .buttonStyle(.plain)
-      .help(isDefault ? L("新对话默认用这张", "New chats use this card") : L("设为新对话的默认", "Use this card for new chats"))
-
-      VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 8) {
-          Text(provider.label.isEmpty ? provider.id : provider.label)
-            .font(.system(size: 12.5, weight: .medium)).foregroundStyle(Palette.ink)
-          Text(provider.model)
-            .font(.system(size: 10.5, design: .monospaced))
-            .foregroundStyle(Palette.inkSoft)
-            .lineLimit(1).truncationMode(.middle)
-          Spacer(minLength: 0)
-        }
+    HStack(spacing: 11) {
+      ProviderMark(baseURL: provider.baseUrl)
+      VStack(alignment: .leading, spacing: 2) {
         HStack(spacing: 6) {
-          chip(host, tint: Palette.inkFaint)
-          chip(reasoningLabel, tint: Palette.inkFaint)
-          if let window = provider.window {
-            chip(UsageMeter.compact(window), tint: Palette.inkFaint)
+          Text(provider.displayName)
+            .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
+            .lineLimit(1)
+          if isDefault {
+            SettingsTag(text: L("默认", "Default"), tint: Palette.accent, emphasized: true)
+              .help(L("新对话默认用这张", "New chats use this card"))
           }
-          // known only after a check; nothing is guessed from the model name
-          if let vision = provider.vision {
-            chip(vision ? L("看图", "Images") : L("纯文字", "Text only"),
-                 tint: vision ? Palette.accent : Palette.inkFaint)
-          }
-          keyChip
-          Spacer(minLength: 0)
         }
+        Text(provider.model)
+          .font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.inkFaint)
+          .lineLimit(1).truncationMode(.middle)
       }
-
-      // only an indicator; the whole row is clickable
+      .layoutPriority(1)
+      Spacer(minLength: 8)
+      if isExpanded && !isDefault {
+        Button(L("设为默认", "Make Default"), action: onUse)
+          .buttonStyle(SettingsButtonStyle())
+          .help(L("新对话默认用这张", "Use this card for new chats"))
+      }
+      ModalityTags(vision: provider.vision)
+      SettingsTag(text: reasoningLabel).help(L("推理档位", "Reasoning"))
+      Circle().fill(keyState.usable ? Palette.ok : Palette.danger)
+        .frame(width: 7, height: 7)
+        .help(keyState.name)
+        .accessibilityLabel(keyState.name)
       Image(systemName: "chevron.right")
         .font(.system(size: 9, weight: .semibold))
-        .foregroundStyle(Palette.inkFaint.opacity(0.7))
+        .foregroundStyle(Palette.inkFaint)
         .rotationEffect(.degrees(isExpanded ? 90 : 0))
-        .padding(.top, 2)
+        .accessibilityHidden(true)
     }
-    .padding(.horizontal, 12).padding(.vertical, 10)
+    .padding(.horizontal, 10).frame(minHeight: 56)
     .contentShape(Rectangle())
-    // the row expands; the dot's Button takes its own clicks
+    // the row expands; buttons inside take their own clicks
     .onTapGesture(perform: onToggle)
-  }
-
-  @ViewBuilder
-  private var keyChip: some View {
-    switch keyState {
-    case .own:
-      chip(L("已配置 key", "Key set"), tint: Palette.accent)
-    case .macro(let id, let note):
-      chip(note.isEmpty ? L("共享 \(id)", "Shared \(id)") : "\(id) · \(note)", tint: Palette.accent)
-    case .missing:
-      chip(L("未配置 key", "No key"), tint: Palette.danger)
+    .contextMenu {
+      if !isDefault {
+        Button(L("设为新对话的默认", "Use for New Chats"), action: onUse)
+      }
+      Button(isExpanded ? L("收起", "Collapse") : L("编辑…", "Edit…"), action: onToggle)
     }
-  }
-
-  private func chip(_ text: String, tint: Color) -> some View {
-    Text(text)
-      .font(.system(size: 9.5))
-      .foregroundStyle(tint)
-      .lineLimit(1)
-      .padding(.horizontal, 5).padding(.vertical, 1.5)
-      .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+    .accessibilityElement(children: .contain)
+    .accessibilityAction(named: isExpanded ? L("收起", "Collapse") : L("编辑", "Edit"), onToggle)
   }
 }
 
@@ -120,61 +172,65 @@ struct MacroKeyPanel: View {
   @State private var failure: String?
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
+    VStack(spacing: 0) {
       ForEach(entries) { entry in
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
           Text(entry.id)
             .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
             .foregroundStyle(Palette.accent)
-            .frame(minWidth: 26, alignment: .leading)
+            .padding(.horizontal, 6).frame(height: 20)
+            .background(Palette.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
           TextField(L("备注", "Note"), text: binding(for: entry.id), prompt: Text(L("备注", "Note")))
             .textFieldStyle(.plain)
-            .font(.system(size: 11.5))
+            .font(.system(size: 12.5))
             .onSubmit(onChanged)
           Text(entry.masked)
-            .font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.inkFaint)
+            .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Palette.inkFaint)
           Text(usage[entry.id].map { L("\($0) 张卡", plural($0, "card", "cards")) } ?? L("未使用", "Unused"))
-            .font(.system(size: 9.5)).foregroundStyle(Palette.inkFaint)
+            .font(.system(size: 11)).foregroundStyle(Palette.inkFaint)
           Button(L("删除", "Delete")) {
             MacroKeys.delete(id: entry.id)
             entries = MacroKeys.all
             onChanged()
           }
-          .buttonStyle(.link).foregroundStyle(Palette.danger)
+          .buttonStyle(SettingsButtonStyle(kind: .destructive))
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(Palette.sunk.opacity(0.5), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .padding(.leading, 16).padding(.trailing, 10).frame(minHeight: 46)
+        SettingsDivider()
       }
 
       if creating {
-        VStack(alignment: .leading, spacing: 6) {
-          HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
+          HStack(spacing: 8) {
             Text(MacroKeys.nextID())
               .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
               .foregroundStyle(Palette.accent)
             TextField(L("备注", "Note"), text: $note, prompt: Text(L("备注", "Note")))
-              .textFieldStyle(.roundedBorder).font(.system(size: 11.5))
+              .settingsField()
           }
-          HStack(spacing: 6) {
+          HStack(spacing: 8) {
             SecureField("API key", text: $secret, prompt: Text(L("粘贴 key", "Paste key")))
-              .textFieldStyle(.roundedBorder)
-              .font(.system(size: 11.5, design: .monospaced))
+              .settingsField(monospaced: true)
               .onSubmit(save)
-            Button(L("保存", "Save"), action: save)
-              .buttonStyle(StudioButtonStyle(primary: true))
-              .disabled(secret.trimmingCharacters(in: .whitespaces).isEmpty)
             Button(L("取消", "Cancel")) { creating = false; note = ""; secret = "" }
+              .buttonStyle(SettingsButtonStyle())
+            Button(L("保存", "Save"), action: save)
+              .buttonStyle(SettingsButtonStyle(kind: .primary))
+              .disabled(secret.trimmingCharacters(in: .whitespaces).isEmpty)
           }
           if let failure {
-            Text(failure).font(.uiCaption).foregroundStyle(Palette.danger)
+            Text(failure).font(.system(size: 11)).foregroundStyle(Palette.danger)
           }
         }
-        .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(Palette.sunk.opacity(0.5), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .padding(.horizontal, 16).padding(.vertical, 12)
       } else {
-        Button(L("＋ 新建共享 key", "＋ New Shared Key")) { creating = true }
+        SettingsRow(title: entries.isEmpty ? L("还没有共享 key", "No shared keys") : L("新建共享 key", "New Shared Key")) {
+          Button(L("新建", "Add")) { creating = true }
+            .buttonStyle(SettingsButtonStyle())
+        }
       }
     }
+    .cardSurface()
   }
 
   private func binding(for id: String) -> Binding<String> {

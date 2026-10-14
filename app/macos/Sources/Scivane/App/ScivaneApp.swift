@@ -59,10 +59,16 @@ struct ScivaneApp: App {
                 Button(L("查找正文", "Find in Text")) { model.isSearching.toggle() }
                     .keyboardShortcut("f", modifiers: .command)
                     .disabled(model.readingDocument == nil)
-                Button(sidebarVisible ? L("隐藏侧栏", "Hide Sidebar") : L("显示侧栏", "Show Sidebar")) {
+                // folded, the sidebar keeps its rail of papers
+                Button(sidebarVisible ? L("收起侧栏", "Collapse Sidebar") : L("展开侧栏", "Expand Sidebar")) {
                     sidebarVisible.toggle()
                 }
                     .keyboardShortcut("b", modifiers: .command)
+                Button(L("搜索论文与对话", "Search Papers and Chats")) {
+                    sidebarVisible = true
+                    model.sidebar.focusRequest += 1
+                }
+                    .keyboardShortcut("k", modifiers: .command)
                 Button(L("页面缩略图", "Page Thumbnails")) { model.showThumbnails.toggle() }
                     .keyboardShortcut("t", modifiers: [.command, .control])
             }

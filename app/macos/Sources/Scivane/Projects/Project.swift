@@ -57,6 +57,15 @@ struct ProjectContext: Codable, Equatable, Hashable {
   /// the transcribing model, for origin "model"
   var model: String?
 
+  /// The kind of source alone, for one line under a title: a model's id reads as noise there.
+  var kindLabel: String {
+    switch origin {
+    case "ocr": return L("本地 OCR", "Local OCR")
+    case "model": return L("模型转写", "Model transcription")
+    default: return L("Markdown 文件", "Markdown file")
+    }
+  }
+
   /// How the text came to be, in a few words.
   var originLabel: String {
     switch origin {

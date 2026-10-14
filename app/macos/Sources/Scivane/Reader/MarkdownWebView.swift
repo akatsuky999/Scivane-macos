@@ -129,6 +129,24 @@ struct MarkdownWebView: NSViewRepresentable {
             case "pageVisible":
                 if let page = body["page"] as? Int { model.markdownDidScroll(to: page) }
 
+            case "outline":
+                let items = body["items"] as? [[String: Any]] ?? []
+                let entries = items.enumerated().compactMap { index, item -> DocumentOutline.Entry? in
+                    guard let level = item["level"] as? Int, let title = item["title"] as? String else { return nil }
+                    return DocumentOutline.Entry(id: index, level: level, title: title)
+                }
+                model.outline.update(document: model.readingDocument?.id, entries: entries)
+                // a heading asked for before this renderer existed
+                if let pending = model.outline.pending, !entries.isEmpty {
+                    call("scrollToHeading", [pending])
+                }
+
+            case "outlineCurrent":
+                model.outline.setCurrent(body["index"] as? Int)
+
+            case "outlineScrolled":
+                model.outline.pending = nil
+
             default:
                 break
             }

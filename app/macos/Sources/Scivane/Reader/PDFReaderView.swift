@@ -45,6 +45,7 @@ struct PDFReaderView: NSViewRepresentable {
         context.coordinator.thumbWidth = thumbWidth
         context.coordinator.observe(pdfView)
         context.coordinator.marks.attach(pdfView, in: container)
+        context.coordinator.zoom.attach(pdfView)
 
         model.pdfGoToPage = { [weak coordinator = context.coordinator] page in
             coordinator?.go(to: page)
@@ -60,6 +61,7 @@ struct PDFReaderView: NSViewRepresentable {
 
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
         coordinator.marks.detach()
+        coordinator.zoom.detach()
     }
 
     // MARK: - Coordinator
@@ -70,6 +72,7 @@ struct PDFReaderView: NSViewRepresentable {
         var pdfView: PDFView?
         var thumbWidth: NSLayoutConstraint?
         let marks = AnnotationController()
+        let zoom = PDFZoom()
 
         private var shownJobID: DocumentJob.ID?
         private var suppress = false
@@ -117,6 +120,96 @@ struct PDFReaderView: NSViewRepresentable {
             let index = doc.index(for: current) + 1
             Task { @MainActor in self.model.pdfDidScroll(to: index) }
         }
+    }
+}
+
+/// Zoom from the keyboard and a mouse: ⌘ or ⌥ with the scroll wheel, around the pointer, and ⌘+ / ⌘− /
+/// ⌘0 while the PDF has the focus. The trackpad pinch is PDFKit's own.
+///
+/// A local event monitor, because wheel events land on PDFKit's inner page view and its scroll view
+/// consumes them: an override on the PDFView never sees one.
+@MainActor
+final class PDFZoom {
+    private weak var view: PDFView?
+    private var monitor: Any?
+
+    func attach(_ view: PDFView) {
+        self.view = view
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .keyDown]) { [weak self] event in
+            // local monitors run on the main thread
+            let handled = MainActor.assumeIsolated { self?.handle(event) ?? false }
+            return handled ? nil : event
+        }
+    }
+
+    func detach() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    private func handle(_ event: NSEvent) -> Bool {
+        guard let view, let window = view.window, view.document != nil else { return false }
+        return event.type == .scrollWheel ? wheel(event, view, window) : key(event, view, window)
+    }
+
+    private func wheel(_ event: NSEvent, _ view: PDFView, _ window: NSWindow) -> Bool {
+        let keys = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !keys.isDisjoint(with: [.command, .option]) else { return false }
+        // an event without a window carries screen coordinates
+        let inWindow: NSPoint
+        if let source = event.window {
+            guard source === window else { return false }
+            inWindow = event.locationInWindow
+        } else {
+            inWindow = window.convertPoint(fromScreen: event.locationInWindow)
+        }
+        let point = view.convert(inWindow, from: nil)
+        guard view.visibleRect.contains(point) else { return false }
+        // trackpad momentum after the fingers lift would overshoot
+        guard event.momentumPhase.isEmpty else { return true }
+        // the wheel's physical direction: away from you zooms in, whatever natural scrolling says
+        let delta = event.isDirectionInvertedFromDevice ? -event.scrollingDeltaY : event.scrollingDeltaY
+        // a wheel notch is about one line; a trackpad reports points
+        let step = event.hasPreciseScrollingDeltas ? delta * 0.006 : delta * 0.1
+        view.zoom(by: exp(max(-0.4, min(0.4, step))), around: point)
+        return true
+    }
+
+    private func key(_ event: NSEvent, _ view: PDFView, _ window: NSWindow) -> Bool {
+        let keys = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            .subtracting([.shift, .numericPad, .function])
+        guard keys == .command, event.window === window,
+              let focus = window.firstResponder as? NSView, focus.isDescendant(of: view) else { return false }
+        switch event.charactersIgnoringModifiers {
+        case "=", "+": if view.canZoomIn { view.zoomIn(nil) }
+        case "-": if view.canZoomOut { view.zoomOut(nil) }
+        case "0": view.autoScales = true
+        default: return false
+        }
+        return true
+    }
+}
+
+extension PDFView {
+    /// Scales by `factor` within PDFKit's limits and keeps the spot under `point` (view coordinates)
+    /// where it is, as a pinch does.
+    func zoom(by factor: CGFloat, around point: NSPoint) {
+        let scale = min(maxScaleFactor, max(minScaleFactor, scaleFactor * factor))
+        guard scale != scaleFactor else { return }
+        let page = page(for: point, nearest: true)
+        let spot = page.map { convert(point, to: $0) }
+        autoScales = false
+        scaleFactor = scale
+        guard let page, let spot, let clip = documentView?.enclosingScrollView?.contentView else { return }
+        layoutDocumentView()
+        let now = clip.convert(convert(spot, from: page), from: self)
+        let target = clip.convert(point, from: self)
+        var bounds = clip.bounds
+        bounds.origin.x += now.x - target.x
+        bounds.origin.y += now.y - target.y
+        clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
+        clip.enclosingScrollView?.reflectScrolledClipView(clip)
     }
 }
 

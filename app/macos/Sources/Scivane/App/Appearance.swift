@@ -45,25 +45,40 @@ enum AppAppearance: String, CaseIterable, Identifiable {
     }
 }
 
-/// Both entry points share one stored preference; the system appearance is never changed.
+/// The sidebar's appearance switch. Every entry point (this, the rail's single button, the tiles in
+/// Settings) writes one stored preference and applies it from its own onChange; the system appearance
+/// is never changed.
 struct AppearanceControl: View {
     @AppStorage("appearance") private var appearance: AppAppearance = .system
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(AppAppearance.allCases) { option in
-                Button { appearance = option } label: {
-                    Image(systemName: option.symbol)
-                        .font(.system(size: 11))
-                        .frame(width: 28, height: 25)
-                        .foregroundStyle(appearance == option ? Palette.inkSoft : Palette.inkSoft.opacity(0.55))
-                        .background(appearance == option ? Palette.selectedRow : .clear, in: RoundedRectangle(cornerRadius: 5))
-                }
-                .buttonStyle(.plain)
-                .help(option.label)
-                .accessibilityLabel(option.label)
-                .accessibilityAddTraits(appearance == option ? .isSelected : [])
-            }
+        PillPicker(options: AppAppearance.allCases, selection: $appearance, height: 22, segmentWidth: 26,
+                   name: \.label) { option, selected in
+            Image(systemName: option.symbol)
+                .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Palette.ink : Palette.inkFaint)
         }
+        .onChange(of: appearance) { _, value in value.apply() }
+    }
+}
+
+/// The collapsed rail has room for one button: it shows the current choice and steps to the next.
+struct AppearanceCycleButton: View {
+    @AppStorage("appearance") private var appearance: AppAppearance = .system
+    var body: some View {
+        Button {
+            let all = AppAppearance.allCases
+            appearance = all[(all.firstIndex(of: appearance)! + 1) % all.count]
+        } label: {
+            Image(systemName: appearance.symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.inkSoft)
+                .frame(width: 30, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(L("外观：\(appearance.label)", "Appearance: \(appearance.label)"))
+        .accessibilityLabel(L("外观", "Appearance"))
+        .accessibilityValue(appearance.label)
         .onChange(of: appearance) { _, value in value.apply() }
     }
 }

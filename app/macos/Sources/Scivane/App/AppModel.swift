@@ -137,6 +137,18 @@ final class AppModel: ObservableObject {
   var renderBridge: ((String, [Any]) -> Void)?
   /// set by PDFReaderView
   var pdfGoToPage: ((Int) -> Void)?
+  /// headings of the document in the text pane; reported by MarkdownWebView
+  let outline = DocumentOutline()
+  let sidebar = SidebarState()
+
+  /// Show the text and scroll to one of its headings. A renderer that exists scrolls now; one about
+  /// to be created (the text pane wasn't showing) scrolls once it has drawn the document.
+  func showOutlineEntry(_ id: Int) {
+    outline.pending = id
+    textMode = .document
+    if !dualPane { singlePane = .text }
+    renderBridge?("scrollToHeading", [id])
+  }
 
   // MARK: - Agent
   //

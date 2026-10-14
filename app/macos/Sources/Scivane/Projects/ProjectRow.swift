@@ -1,87 +1,69 @@
 import SwiftUI
 
-/// Title, chevron and New Chat have separate hit areas; nested Buttons swallow clicks.
-struct ProjectRow<Trailing: View>: View {
+/// A paper in the library list: its glyph, its title over two lines, where its text came from.
+/// Entering it is the row; recognising, renaming, revealing and deleting are in its context menu.
+struct PaperRow: View {
   @ObservedObject var model: AppModel
   let project: Project
-  var expanded = false
-  var toggleExpanded: (() -> Void)? = nil
-  @ViewBuilder var trailing: () -> Trailing
   @State private var hovering = false
   @State private var renaming = false
-  @State private var draftTitle = ""
-
-  private var isActive: Bool { model.activeProjectID == project.id }
-
-  /// With the title cut to one line the tooltip is the only place for the full title, so it comes
-  /// first. Empty projects have no file name to show.
-  private var tooltip: String {
-    project.sourceName.isEmpty ? project.displayTitle : "\(project.displayTitle)\n\(project.sourceName)"
-  }
 
   var body: some View {
-    HStack(spacing: 0) {
-      if let toggleExpanded {
-        Button(action: toggleExpanded) {
-          Image(systemName: "chevron.right")
-            .font(.system(size: 8.5, weight: .semibold))
-            .rotationEffect(.degrees(expanded ? 90 : 0))
-            .frame(width: SidebarMetrics.disclosure, height: SidebarMetrics.treeRow).contentShape(Rectangle())
+    Button { Task { await model.enterProjectFromSidebar(project) } } label: {
+      HStack(alignment: .top, spacing: 10) {
+        PaperGlyph(title: project.displayTitle, size: CGSize(width: 24, height: 30))
+        VStack(alignment: .leading, spacing: 2) {
+          Text(project.displayTitle)
+            .font(.system(size: 12.5, weight: .medium, design: .serif))
+            .foregroundStyle(Palette.ink)
+            .lineLimit(2).multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+          Text(project.summaryLine)
+            .font(.system(size: 10.5)).foregroundStyle(Palette.inkFaint).lineLimit(1)
         }
-        .buttonStyle(.plain).foregroundStyle(Palette.inkFaint)
-        .help(expanded ? L("收起对话", "Collapse Chats") : L("展开对话", "Expand Chats"))
-        .accessibilityLabel(expanded ? L("收起项目 \(project.displayTitle)", "Collapse project \(project.displayTitle)") : L("展开项目 \(project.displayTitle)", "Expand project \(project.displayTitle)"))
-        .accessibilityIdentifier("project-disclosure-\(project.id)")
-        .accessibilityValue(expanded ? L("已展开", "Expanded") : L("已收起", "Collapsed"))
+        Spacer(minLength: 0)
       }
-      row
-      trailing().padding(.trailing, 2)
-    }
-    .background(Palette.ink.opacity(hovering ? 0.05 : 0),
-                in: RoundedRectangle(cornerRadius: SidebarMetrics.corner))
-    .onHover { hovering = $0 }
-  }
-
-  private var row: some View {
-    Button {
-      Task {
-        guard !model.sidebarNavigationBusy else { return }
-        model.sidebarNavigationBusy = true
-        defer { model.sidebarNavigationBusy = false }
-        await model.enterProject(project)
-      }
-    } label: {
-      // One line: paper titles run long, and two-line rows would leave room for three or four projects.
-      // The opening words are what people recognise; the full title is in the tooltip.
-      HStack(spacing: 6) {
-        Text(project.displayTitle)
-          .font(.system(size: 12, weight: .medium))
-          .lineLimit(1).truncationMode(.tail)
-        Spacer(minLength: 6)
-      }.foregroundStyle(isActive ? Palette.ink : Palette.inkSoft)
-        .padding(.leading, toggleExpanded == nil ? SidebarMetrics.inset : 0).padding(.trailing, 4)
-        .frame(height: SidebarMetrics.treeRow).frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
+      .padding(.horizontal, 8).padding(.vertical, 7)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(Palette.ink.opacity(hovering ? 0.045 : 0),
+                  in: RoundedRectangle(cornerRadius: SidebarMetrics.corner, style: .continuous))
+      .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
+    .onHover { hovering = $0 }
     .disabled(model.sidebarNavigationBusy || model.projectBusy)
-    .accessibilityIdentifier("project-open-\(project.id)")
-    .help(tooltip)
+    .help(project.tooltip)
     .contextMenu { ProjectActions(model: model, project: project, renaming: $renaming) }
-    .accessibilityAddTraits(isActive ? .isSelected : [])
-    .alert(L("重命名项目", "Rename Project"), isPresented: $renaming) {
-      TextField(L("标题", "Title"), text: $draftTitle)
-      Button(L("保存", "Save")) {
-        let title = draftTitle
-        Task { await model.renameProject(project, to: title) }
-      }
-      Button(L("取消", "Cancel"), role: .cancel) {}
-    } message: {
-      Text(L("改过的名字不会被后续识别覆盖。", "A name you set won't be overwritten by later OCR."))
-    }
-    .onChange(of: renaming) { _, active in
-      if active { draftTitle = project.displayTitle }
-    }
+    .projectRename(model: model, project: project, isPresented: $renaming)
+    .accessibilityLabel(project.displayTitle)
+    .accessibilityIdentifier("project-open-\(project.id)")
+  }
+}
+
+extension Project {
+  /// Where the paper's text came from, or that there is none yet; one line under its title.
+  var summaryLine: String {
+    if !hasSource && !hasUsableContext { return L("空项目", "Empty project") }
+    guard hasUsableContext, let context else { return L("还没有正文", "No text yet") }
+    return context.kindLabel
+  }
+
+  /// the full title, the original's file name and, for a transcription, the model that made it
+  var tooltip: String {
+    var lines = [displayTitle]
+    if !sourceName.isEmpty { lines.append(sourceName) }
+    if hasUsableContext, let context, context.origin == "model", let model = context.model { lines.append(model) }
+    return lines.joined(separator: "\n")
+  }
+}
+
+extension AppModel {
+  /// Enter a project from the sidebar, once: a second click while the first is on its way is ignored.
+  func enterProjectFromSidebar(_ project: Project) async {
+    guard !sidebarNavigationBusy else { return }
+    sidebarNavigationBusy = true
+    defer { sidebarNavigationBusy = false }
+    await enterProject(project)
   }
 }
 
@@ -124,9 +106,33 @@ struct ProjectActions: View {
   }
 }
 
-extension ProjectRow where Trailing == EmptyView {
-  /// without a trailing control
-  init(model: AppModel, project: Project) {
-    self.init(model: model, project: project, trailing: { EmptyView() })
+/// The rename prompt shared by every place a project can be renamed from.
+private struct ProjectRename: ViewModifier {
+  @ObservedObject var model: AppModel
+  let project: Project
+  @Binding var isPresented: Bool
+  @State private var draft = ""
+
+  func body(content: Content) -> some View {
+    content
+      .alert(L("重命名项目", "Rename Project"), isPresented: $isPresented) {
+        TextField(L("标题", "Title"), text: $draft)
+        Button(L("保存", "Save")) {
+          let title = draft
+          Task { await model.renameProject(project, to: title) }
+        }
+        Button(L("取消", "Cancel"), role: .cancel) {}
+      } message: {
+        Text(L("改过的名字不会被后续识别覆盖。", "A name you set won't be overwritten by later OCR."))
+      }
+      .onChange(of: isPresented) { _, active in
+        if active { draft = project.displayTitle }
+      }
+  }
+}
+
+extension View {
+  func projectRename(model: AppModel, project: Project, isPresented: Binding<Bool>) -> some View {
+    modifier(ProjectRename(model: model, project: project, isPresented: isPresented))
   }
 }

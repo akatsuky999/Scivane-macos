@@ -27,6 +27,23 @@ enum Palette {
     static let codeChip = Color(light: .black.opacity(0.055), dark: .white.opacity(0.085))
     static let forest = Color(red: 0.075, green: 0.18, blue: 0.15)
     static let cream = Color(red: 0.94, green: 0.94, blue: 0.83)
+    // Floating surfaces (the sidebar, the settings navigation): the window material tinted towards
+    // the paper green, a light edge and a soft shadow.
+    static let glassTint = Color(light: Color(red: 0.91, green: 0.94, blue: 0.90).opacity(0.62),
+                                 dark: Color(red: 0.11, green: 0.15, blue: 0.13).opacity(0.62))
+    static let glassEdge = Color(light: .white.opacity(0.78), dark: .white.opacity(0.09))
+    static let glassShadow = Color(light: Color(red: 0.07, green: 0.18, blue: 0.15).opacity(0.13),
+                                   dark: .black.opacity(0.42))
+    /// Grouped rows on glass or paper; a white card on the light paper, a faint lift in dark.
+    static let card = Color(light: .white.opacity(0.66), dark: .white.opacity(0.05))
+    static let cardSolid = Color(light: .white, dark: Color(red: 0.12, green: 0.15, blue: 0.13))
+    static let cardEdge = Color(light: .black.opacity(0.05), dark: .white.opacity(0.07))
+    /// Track of a segmented control, and its raised thumb.
+    static let track = Color(light: Color(red: 0.13, green: 0.19, blue: 0.17).opacity(0.07), dark: .black.opacity(0.25))
+    static let thumb = Color(light: .white, dark: .white.opacity(0.15))
+    /// Running and healthy. Not the accent: a status dot must read as a state, not as branding.
+    static let ok = Color(light: Color(red: 0.18, green: 0.49, blue: 0.34), dark: Color(red: 0.37, green: 0.76, blue: 0.56))
+    static let pending = Color(light: Color(red: 0.72, green: 0.48, blue: 0.13), dark: Color(red: 0.93, green: 0.75, blue: 0.42))
 }
 extension Color {
     init(light: Color, dark: Color) {

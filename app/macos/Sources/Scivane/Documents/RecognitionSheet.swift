@@ -170,7 +170,8 @@ struct RecognitionSheet: View {
     }
   }
 
-  /// Transcription needs a model that sees images. Say so in three words, never in a paragraph.
+  /// Transcription needs a model that takes images. The card's modalities, as Settings shows them;
+  /// a word on why when it can't, never a paragraph.
   @ViewBuilder private var visionLine: some View {
     HStack(spacing: 6) {
       if checking {
@@ -179,15 +180,13 @@ struct RecognitionSheet: View {
       } else if let failure = checkFailure {
         caption(failure.text, tint: Palette.danger)
       } else {
+        ModalityTags(vision: selectedCard?.vision)
         switch selectedCard?.vision {
         case true?:
-          Label(L("能看图", "Sees images"), systemImage: "eye")
-            .font(.uiCaption).foregroundStyle(Palette.accent)
+          EmptyView()
         case false?:
-          Label(L("看不到图，转写不了", "Can't see images"), systemImage: "eye.slash")
-            .font(.uiCaption).foregroundStyle(Palette.danger)
+          caption(L("转写需要图像模态", "Transcription needs image input"), tint: Palette.danger)
         case nil:
-          caption(L("还没检测能不能看图", "Image input not checked yet"))
           Button(L("检测", "Check")) { Task { await check() } }
             .buttonStyle(.link).font(.uiCaption).foregroundStyle(Palette.accent)
         }

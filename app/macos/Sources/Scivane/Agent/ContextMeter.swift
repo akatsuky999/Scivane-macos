@@ -108,27 +108,42 @@ struct ContextBreakdown: View {
     let color: Color
   }
 
-  static let summaryTint = Color(
-    light: Color(red: 0.36, green: 0.42, blue: 0.62), dark: Color(red: 0.62, green: 0.68, blue: 0.88))
+  /// One hue per part, so neighbouring segments in the bar stay apart, also for red-green colour
+  /// blindness, in both appearances and whichever optional parts are missing. Lightness and chroma
+  /// sit in one muted band, and the paper keeps the accent's green.
+  enum Tint {
+    static let system = Color(
+      light: Color(red: 0.31, green: 0.56, blue: 0.82), dark: Color(red: 0.19, green: 0.62, blue: 0.87))
+    static let tools = Color(
+      light: Color(red: 0.71, green: 0.41, blue: 0.62), dark: Color(red: 0.68, green: 0.36, blue: 0.62))
+    static let paper = Color(
+      light: Color(red: 0.11, green: 0.48, blue: 0.35), dark: Color(red: 0.31, green: 0.64, blue: 0.48))
+    static let summary = Color(
+      light: Color(red: 0.39, green: 0.36, blue: 0.67), dark: Color(red: 0.42, green: 0.43, blue: 0.78))
+    static let history = Color(
+      light: Color(red: 0.66, green: 0.49, blue: 0.17), dark: Color(red: 0.61, green: 0.44, blue: 0.06))
+    static let turn = Color(
+      light: Color(red: 0.61, green: 0.25, blue: 0.33), dark: Color(red: 0.85, green: 0.43, blue: 0.44))
+  }
 
   var rows: [Row] {
     var rows: [Row] = [
       Row(id: "system", label: L("系统提示词", "System prompt"),
-          tokens: report.tokens(.system), color: Palette.ink.opacity(0.55)),
+          tokens: report.tokens(.system), color: Tint.system),
       Row(id: "tools", label: L("工具定义", "Tool definitions"),
-          tokens: report.tokens(.tools), color: Palette.ink.opacity(0.32)),
+          tokens: report.tokens(.tools), color: Tint.tools),
       Row(id: "paper", label: L("论文正文", "Paper text"),
-          tokens: report.tokens(.paper), color: Palette.accent),
+          tokens: report.tokens(.paper), color: Tint.paper),
     ]
     if report.tokens(.summary) > 0 {
       rows.append(Row(id: "summary", label: L("对话摘要", "Conversation summary"),
-                      tokens: report.tokens(.summary), color: Self.summaryTint))
+                      tokens: report.tokens(.summary), color: Tint.summary))
     }
     rows.append(Row(id: "history", label: L("之前的对话", "Earlier turns"),
-                    tokens: report.tokens(.history), color: Palette.accent.opacity(0.5)))
+                    tokens: report.tokens(.history), color: Tint.history))
     if report.live || report.tokens(.turn) > 0 {
       rows.append(Row(id: "turn", label: L("这一轮", "This turn"),
-                      tokens: report.tokens(.turn), color: ActivityCard.amber.opacity(0.75)))
+                      tokens: report.tokens(.turn), color: Tint.turn))
     }
     if report.window != nil {
       // the reserve is darker than truly free space: it looks empty but isn't usable

@@ -1,49 +1,87 @@
 import SwiftUI
 
-/// Local OCR in Settings > Engine: which tier is in use, with install from here. Observes
-/// OCRInstaller itself; progress uses the same card as the text pane.
+/// Local OCR in Settings > Local Engine: whether it's installed and which tier is in use, with install
+/// from here. Observes OCRInstaller itself; progress uses the same card as the text pane.
 struct OCRRuntimeRow: View {
 
     @ObservedObject var installer: OCRInstaller
+    /// asked for when the page is shown, not whenever Settings opens
+    var visible = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            LabeledContent(L("本地 OCR", "Local OCR")) {
-                HStack(spacing: 6) {
-                    Text(summary)
-                        .font(.uiCaption).foregroundStyle(Palette.inkSoft)
-                        .lineLimit(1).truncationMode(.middle)
-                        .help(installer.status?.root ?? "")
-                    Spacer()
-                    // not installed: install or migrate. On a legacy deployment this is the one-click migration
-                    if let status = installer.status, !status.available || status.migratable,
-                       status.overrideProblem == nil, case .idle = installer.phase {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 14)).foregroundStyle(Palette.inkSoft)
+                    .frame(width: 20)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L("本地 OCR", "Local OCR")).font(.system(size: 13)).foregroundStyle(Palette.ink)
+                    if let location {
+                        Text(location)
+                            .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Palette.inkFaint)
+                            .lineLimit(1).truncationMode(.middle)
+                            .help(installer.status?.root ?? "")
+                    }
+                }
+                Spacer(minLength: 12)
+                state
+            }
+            .padding(.leading, 16).padding(.trailing, 10).padding(.vertical, 8)
+            .frame(minHeight: SettingsMetrics.row)
+            OCRInstallCard(installer: installer, dismissible: false)
+                .padding(.horizontal, 10)
+        }
+        .task(id: visible) {
+            if visible { await installer.refresh() }
+        }
+    }
+
+    /// Installed: a tag. Not installed, or on the old deployment: the action that fixes it.
+    @ViewBuilder
+    private var state: some View {
+        if let status = installer.status {
+            if status.available && !status.migratable {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark").font(.system(size: 9, weight: .bold))
+                    Text(tier(status.tier ?? ""))
+                }
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.ok)
+                .padding(.horizontal, 8).frame(height: 22)
+                .background(Palette.ok.opacity(0.11), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            } else {
+                HStack(spacing: 8) {
+                    if !status.available {
+                        Text(status.migratable ? L("可迁移", "Can migrate") : L("未安装 · 约 2.2 GB", "Not installed · about 2.2 GB"))
+                            .font(.system(size: 11)).foregroundStyle(Palette.inkFaint)
+                    }
+                    if status.overrideProblem == nil, case .idle = installer.phase {
                         Button(status.available ? L("迁成组件…", "Convert to Component…")
                                : (status.migratable ? L("迁移…", "Migrate…") : L("安装…", "Install…"))) {
                             installer.offer(status)
                         }
+                        .buttonStyle(SettingsButtonStyle())
                     }
                 }
             }
-            OCRInstallCard(installer: installer, dismissible: false)
+        } else {
+            Text(L("查询中…", "Checking…")).font(.system(size: 11)).foregroundStyle(Palette.inkFaint)
+                .help(L("本地服务没起来时查不到", "Unavailable while the local service is down"))
         }
-        .task { await installer.refresh() }
     }
 
-    private var summary: String {
-        guard let status = installer.status else {
-            return L("查询中…（本地服务没起来时查不到）", "Checking… (unavailable while the local service is down)")
-        }
-        guard status.available else {
-            return status.migratable
-                ? L("没装 · 这台机器上有旧部署可以迁过来", "Not installed · an old deployment on this Mac can be migrated")
-                : L("没装（可选组件，约 2.2 GB）", "Not installed (optional, about 2.2 GB)")
-        }
-        switch status.tier {
-        case "component": return L("已装", "Installed")
-        case "legacy": return L("在用旧部署（只有这台机器有）", "Using the old deployment (only on this Mac)")
-        case "override": return L("在用指定的位置", "Using the location you set")
-        default: return L("已装", "Installed")
+    /// where it is, home as ~; nothing before the status is known or when not installed
+    private var location: String? {
+        guard let status = installer.status, status.available, let root = status.root, !root.isEmpty else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return root.hasPrefix(home) ? "~" + root.dropFirst(home.count) : root
+    }
+
+    private func tier(_ tier: String) -> String {
+        switch tier {
+        case "legacy": return L("旧部署", "Old deployment")
+        case "override": return L("指定位置", "Custom location")
+        default: return L("已安装", "Installed")
         }
     }
 }

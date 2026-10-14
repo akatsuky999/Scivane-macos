@@ -102,6 +102,11 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
   let suppressReport = false;
   /** whether the paper's language has been decided (see setPage) */
   let langSettled = false;
+  /** the rendered h1–h3, in document order: the sidebar's outline */
+  let headings = [];
+  let currentHeading = -1;
+  let outlineTimer = null;
+  let headingQueued = false;
 
   function post(payload) {
     try {
@@ -225,6 +230,60 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
     }, { rootMargin: "-15% 0px -60% 0px", threshold: [0, 0.1, 0.5] });
   }
 
+  /** Report the headings once rendering settles: pages arrive one at a time, and reporting after
+   * each would send a growing list per page. */
+  function scheduleOutline() {
+    clearTimeout(outlineTimer);
+    outlineTimer = setTimeout(reportOutline, 150);
+  }
+
+  /** Visible text only: KaTeX keeps a MathML copy of each formula for screen readers, and ends a
+   * formula with a zero-width space. At the end of a title trim() takes it; mid-title it would stay,
+   * invisible, and break search. */
+  function headingText(el) {
+    const copy = el.cloneNode(true);
+    copy.querySelectorAll(".katex-mathml").forEach(function (n) { n.remove(); });
+    return (copy.textContent || "").replace(/[​-‍﻿]/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
+  }
+
+  function reportOutline() {
+    headings = Array.from(doc.querySelectorAll(".page-body h1, .page-body h2, .page-body h3"))
+      .filter(function (h) { return headingText(h).length > 0; })
+      .slice(0, 400);
+    const items = headings.map(function (h) {
+      return { level: parseInt(h.tagName.slice(1), 10), title: headingText(h) };
+    });
+    currentHeading = -1;
+    post({ type: "outline", items: items });
+    trackHeading();
+  }
+
+  /** The heading being read: the last one above a line a quarter down the window. Headings are in
+   * document order, so their tops increase and a binary search finds it without measuring all. */
+  function trackHeading() {
+    if (!headings.length) return;
+    const line = window.innerHeight * 0.25;
+    let low = 0, high = headings.length - 1, found = -1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (headings[mid].getBoundingClientRect().top <= line) { found = mid; low = mid + 1; }
+      else { high = mid - 1; }
+    }
+    if (found !== currentHeading) {
+      currentHeading = found;
+      post({ type: "outlineCurrent", index: found >= 0 ? found : null });
+    }
+  }
+
+  // A short timer rather than requestAnimationFrame: WebKit pauses animation frames for a window that
+  // is hidden or covered, and the outline would stop following. The last position after a scroll
+  // still arrives within the delay.
+  window.addEventListener("scroll", function () {
+    if (headingQueued) return;
+    headingQueued = true;
+    setTimeout(function () { headingQueued = false; trackHeading(); }, 80);
+  }, { passive: true });
+
   function markCurrent(n) {
     doc.querySelectorAll(".page.is-current").forEach(function (el) {
       el.classList.remove("is-current");
@@ -248,6 +307,10 @@ md.renderer.rules.scivane_math_block = (tokens, idx) => mathHTML(tokens[idx].con
       showDoc(false);
       if (observer) { observer.disconnect(); observer = null; }
       this.total = total || 0;
+      clearTimeout(outlineTimer);
+      headings = [];
+      currentHeading = -1;
+      post({ type: "outline", items: [] });
     },
 
     /** write (or overwrite) one page */
@@ -301,6 +364,14 @@ resolveImages(body);
       el.appendChild(mark);
       el.appendChild(body);
       el.dataset.state = "done";
+      scheduleOutline();
+    },
+
+    /** scroll to a heading of the outline; says so, so the app can drop the request */
+    scrollToHeading: function (index) {
+      const el = headings[index];
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      post({ type: "outlineScrolled", index: index });
     },
 
     /** scroll to a page requested by the PDF side, without reporting back (no loop) */

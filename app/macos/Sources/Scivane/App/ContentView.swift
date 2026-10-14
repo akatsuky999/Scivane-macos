@@ -14,7 +14,8 @@ struct ContentView: View {
 
   var body: some View {
     HStack(spacing: 0) {
-      if sidebarVisible { SidebarView(model: model, backend: backend) }
+      // Always there: folded, it is the rail. Above the reading area, so a tile's title can overlap it.
+      SidebarView(model: model, backend: backend).zIndex(1)
       VStack(spacing: 0) {
         header
         Hairline()
@@ -30,6 +31,7 @@ struct ContentView: View {
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
       }.background(Palette.paper)
     }
+    .background(Palette.paper)
     .overlay(alignment: .bottom) {
       if let notice = model.notice {
         Label(notice, systemImage: "checkmark.circle.fill")
@@ -144,9 +146,6 @@ struct ContentView: View {
 
   private var header: some View {
     HStack(spacing: 12) {
-      Button { sidebarVisible.toggle() } label: { Image(systemName: "sidebar.left") }
-        .help(L("文档列表（⌘B）", "Sidebar (⌘B)")).accessibilityLabel(L("切换侧栏", "Toggle Sidebar"))
-
       // A way back out of a project, without which the librarian could never be reached again.
       if model.activeProject != nil {
         Button { model.leaveProject() } label: { Image(systemName: "chevron.backward") }
@@ -214,7 +213,8 @@ struct ContentView: View {
         .help(L("导入文档", "Import Document")).accessibilityLabel(L("导入文档", "Import Document"))
     }
     .buttonStyle(ToolButtonStyle()).foregroundStyle(Palette.inkSoft)
-    .padding(.horizontal, 16).padding(.leading, sidebarVisible ? 0 : 76)
+    // the traffic lights live in the sidebar's island, which never goes away
+    .padding(.horizontal, 16)
     .frame(height: 46)
   }
 
