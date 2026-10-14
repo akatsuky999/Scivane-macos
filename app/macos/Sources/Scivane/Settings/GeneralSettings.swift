@@ -3,12 +3,23 @@ import SwiftUI
 /// Settings > General: appearance, language, export.
 struct GeneralSettings: View {
   @ObservedObject var model: AppModel
+  @AppStorage("sidebarOverlaysContent") private var sidebarOverlaysContent = true
 
   var body: some View {
     VStack(alignment: .leading, spacing: 26) {
       SettingsTitle(L("通用", "General"))
 
       SettingsSection(title: L("外观", "Appearance")) { AppearanceTiles() }
+
+      SettingsSection(title: L("侧栏", "Sidebar")) {
+        SettingsGroup {
+          SettingsRow(title: L("侧栏覆盖阅读区", "Overlay the Reading Area")) {
+            Toggle(L("侧栏覆盖阅读区", "Overlay the Reading Area"), isOn: $sidebarOverlaysContent)
+              .labelsHidden().toggleStyle(.switch)
+              .accessibilityIdentifier("sidebar-overlay-setting")
+          }
+        }
+      }
 
       // bilingual on purpose: findable by someone who switched to a language they can't read
       SettingsSection(title: "语言 · Language") {  // 不翻: bilingual on purpose

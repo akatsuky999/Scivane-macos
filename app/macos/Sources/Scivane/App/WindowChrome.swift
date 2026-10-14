@@ -55,7 +55,7 @@ struct WindowChrome: NSViewRepresentable {
       guard buttons.count == 3 else { return }
       let width = buttons.reduce(CGFloat.zero) { $0 + $1.frame.width }
         + SidebarMetrics.trafficLightGap * 2
-      var x = expanded ? SidebarMetrics.trafficLightInset : (SidebarMetrics.rail - width) / 2
+      var x = expanded ? SidebarMetrics.trafficLightInset : (SidebarMetrics.crown - width) / 2
       for button in buttons {
         guard let parent = button.superview else { continue }
         let header = convert(bounds, to: parent)

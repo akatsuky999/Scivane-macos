@@ -20,7 +20,10 @@ enum SidebarMetrics {
   /// top bar's side padding, where the fold button sits
   static let topBarPadding: CGFloat = 8
   static let trafficLightInset: CGFloat = 14
-  static let trafficLightGap: CGFloat = 6
+  static let trafficLightGap: CGFloat = 8
+  static let crownOverflow: CGFloat = 24
+  static var crown: CGFloat { rail + crownOverflow }
+  static var collapsedSurfaceWidth: CGFloat { collapsedWidth + crownOverflow }
   static let logo: CGFloat = 36
   static let logoMark = CGSize(width: 18, height: 22)
   static let toolbarHeight: CGFloat = 46
@@ -55,7 +58,7 @@ struct SidebarView: View {
   var body: some View {
     island
       .padding(SidebarMetrics.inset)
-      .frame(width: expanded ? SidebarMetrics.width : SidebarMetrics.collapsedWidth)
+      .frame(width: expanded ? SidebarMetrics.width : SidebarMetrics.collapsedSurfaceWidth, alignment: .leading)
       .frame(maxHeight: .infinity)
       .overlayPreferenceValue(TileAnchors.self) { anchors in tooltip(anchors) }
       .task(id: hovering) {
@@ -77,8 +80,9 @@ struct SidebarView: View {
   }
 
   private var island: some View {
-    let shape = RoundedRectangle(cornerRadius: SidebarMetrics.radius, style: .continuous)
-    return VStack(spacing: 0) {
+    let width = expanded ? SidebarMetrics.rail + SidebarMetrics.panel : SidebarMetrics.crown
+    let shape = SidebarIslandShape(bodyWidth: expanded ? width : SidebarMetrics.rail)
+    return VStack(alignment: .leading, spacing: 0) {
       topBar
       HStack(spacing: 0) {
         SidebarRail(model: model, backend: backend, expanded: expanded, toggle: toggle, hovering: $hovering)
@@ -90,8 +94,10 @@ struct SidebarView: View {
         }
       }
     }
+    .frame(width: width, alignment: .leading)
     .clipShape(shape)
-    .glassSurface(radius: SidebarMetrics.radius)
+    .sidebarSurface(shape: shape)
+    .contentShape(shape)
   }
 
   /// The traffic lights sit at its left; the panel's fold button at its right.
@@ -112,6 +118,7 @@ struct SidebarView: View {
       }
     }
     .padding(.horizontal, SidebarMetrics.topBarPadding)
+    .frame(width: expanded ? SidebarMetrics.rail + SidebarMetrics.panel : SidebarMetrics.crown)
     .frame(height: SidebarMetrics.topBar)
     .background(WindowChrome(expanded: expanded))
   }

@@ -6,6 +6,7 @@ struct ContentView: View {
   @ObservedObject var backend: BackendManager
   @State private var isTargeted = false
   @AppStorage("sidebarVisible") private var sidebarVisible = true
+  @AppStorage("sidebarOverlaysContent") private var sidebarOverlaysContent = true
   @State private var documentQuery = ""
   @State private var creatingProject = false
   @State private var newProjectTitle = ""
@@ -14,8 +15,10 @@ struct ContentView: View {
 
   var body: some View {
     HStack(spacing: 0) {
-      // Always there: folded, it is the rail. Above the reading area, so a tile's title can overlap it.
-      SidebarView(model: model, backend: backend).zIndex(1)
+      // Keep one reader subtree in both modes; overlaying changes no reading geometry.
+      Color.clear.frame(width: sidebarOverlaysContent || !sidebarVisible
+        ? SidebarMetrics.collapsedWidth : SidebarMetrics.width)
+        .allowsHitTesting(false).accessibilityHidden(true)
       VStack(spacing: 0) {
         header
         Hairline()
@@ -32,6 +35,9 @@ struct ContentView: View {
       }.background(Palette.paper)
     }
     .background(Palette.paper)
+    .overlay(alignment: .leading) {
+      SidebarView(model: model, backend: backend)
+    }
     .overlay(alignment: .bottom) {
       if let notice = model.notice {
         Label(notice, systemImage: "checkmark.circle.fill")
@@ -60,6 +66,7 @@ struct ContentView: View {
     // Quietly load the project list at launch; without a runtime the list is just empty.
     .task { await model.refreshProjects(quiet: true) }
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: sidebarVisible)
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: sidebarOverlaysContent)
     .tint(Palette.accent)
     .dropDestination(for: URL.self) { urls, _ in
       let accepted = urls.filter { url in
@@ -224,6 +231,8 @@ struct ContentView: View {
     .buttonStyle(ToolButtonStyle()).foregroundStyle(Palette.inkSoft)
     // the traffic lights live in the sidebar's island, which never goes away
     .padding(.horizontal, SidebarMetrics.toolbarInset)
+    .padding(.leading, sidebarVisible
+      ? (sidebarOverlaysContent ? SidebarMetrics.panel : 0) : SidebarMetrics.crownOverflow)
     .frame(height: SidebarMetrics.toolbarHeight)
   }
 
