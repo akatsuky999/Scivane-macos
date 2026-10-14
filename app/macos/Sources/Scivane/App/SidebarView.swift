@@ -14,11 +14,17 @@ enum SidebarMetrics {
   static var width: CGFloat { inset + rail + panel + inset }
   /// with only the rail
   static var collapsedWidth: CGFloat { inset + rail + inset }
-  /// the fold button at the top bar's right, and the unfold button atop the folded rail
+  /// the fold button at the top bar's right; the toolbar owns unfolding
   static let foldButton = CGSize(width: 28, height: 26)
-  static let unfoldButton = CGSize(width: 34, height: 28)
+  static let unfoldButton = CGSize(width: 24, height: 26)
   /// top bar's side padding, where the fold button sits
   static let topBarPadding: CGFloat = 8
+  static let trafficLightInset: CGFloat = 14
+  static let trafficLightGap: CGFloat = 6
+  static let logo: CGFloat = 36
+  static let logoMark = CGSize(width: 18, height: 22)
+  static let toolbarHeight: CGFloat = 46
+  static let toolbarInset: CGFloat = 16
   static let tile = CGSize(width: 36, height: 44)
   static let tileGap: CGFloat = 8
   static let row: CGFloat = 28
@@ -107,6 +113,7 @@ struct SidebarView: View {
     }
     .padding(.horizontal, SidebarMetrics.topBarPadding)
     .frame(height: SidebarMetrics.topBar)
+    .background(WindowChrome(expanded: expanded))
   }
 
   private func toggle() {
@@ -177,19 +184,6 @@ struct SidebarRail: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      if !expanded {
-        Button(action: toggle) {
-          Image(systemName: "sidebar.left").font(.system(size: 13))
-            .foregroundStyle(Palette.inkSoft)
-            .frame(width: SidebarMetrics.unfoldButton.width, height: SidebarMetrics.unfoldButton.height)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(SidebarRowStyle())
-        .help(L("展开侧栏（⌘B）", "Expand Sidebar (⌘B)"))
-        .accessibilityLabel(L("展开侧栏", "Expand Sidebar"))
-        .accessibilityIdentifier("sidebar-expand")
-        .padding(.bottom, 8)
-      }
       library.padding(.bottom, 4)
       ScrollView(.vertical) {
         VStack(spacing: SidebarMetrics.tileGap) {
@@ -229,8 +223,9 @@ struct SidebarRail: View {
   private var library: some View {
     let here = model.activeProjectID == nil
     return Button { model.leaveProject() } label: {
-      ScivaneMark().frame(width: 13, height: 16).padding(7.5)
-        .background(Palette.forest, in: RoundedRectangle(cornerRadius: 8.5, style: .continuous))
+      ScivaneMark().frame(width: SidebarMetrics.logoMark.width, height: SidebarMetrics.logoMark.height)
+        .frame(width: SidebarMetrics.logo, height: SidebarMetrics.logo)
+        .background(Palette.forest, in: RoundedRectangle(cornerRadius: 10.5, style: .continuous))
         .shadow(color: .black.opacity(0.16), radius: 2.5, y: 1)
         .contentShape(Rectangle())
     }

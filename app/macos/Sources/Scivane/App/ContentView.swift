@@ -146,6 +146,15 @@ struct ContentView: View {
 
   private var header: some View {
     HStack(spacing: 12) {
+      if !sidebarVisible {
+        Button { sidebarVisible = true } label: {
+          Image(systemName: "sidebar.left")
+            .frame(width: SidebarMetrics.unfoldButton.width, height: SidebarMetrics.unfoldButton.height)
+        }
+        .help(L("展开侧栏（⌘B）", "Expand Sidebar (⌘B)"))
+        .accessibilityLabel(L("展开侧栏", "Expand Sidebar"))
+        .accessibilityIdentifier("sidebar-expand")
+      }
       // A way back out of a project, without which the librarian could never be reached again.
       if model.activeProject != nil {
         Button { model.leaveProject() } label: { Image(systemName: "chevron.backward") }
@@ -214,8 +223,8 @@ struct ContentView: View {
     }
     .buttonStyle(ToolButtonStyle()).foregroundStyle(Palette.inkSoft)
     // the traffic lights live in the sidebar's island, which never goes away
-    .padding(.horizontal, 16)
-    .frame(height: 46)
+    .padding(.horizontal, SidebarMetrics.toolbarInset)
+    .frame(height: SidebarMetrics.toolbarHeight)
   }
 
   /// Recognised already, in this session or as its project's paper text.
