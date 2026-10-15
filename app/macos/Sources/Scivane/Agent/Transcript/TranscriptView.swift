@@ -5,13 +5,6 @@ import SwiftUI
 struct AgentTranscript: View {
   @ObservedObject var session: AgentSession
   let onApprove: (Bool, String) -> Void
-  @State private var expandedRows: Set<String> = []
-
-  private func expansion(for id: String) -> Binding<Bool> {
-    Binding(get: { expandedRows.contains(id) }, set: { value in
-      if value { expandedRows.insert(id) } else { expandedRows.remove(id) }
-    })
-  }
 
   /// A plain item or a whole stretch of process.
   enum Row: Identifiable {
@@ -42,9 +35,6 @@ struct AgentTranscript: View {
   /// the column follows the conversation font size and density
   @AppStorage(TypeScale.chat.sizeKey) private var fontSize = TypeScale.chat.standardSize
   @AppStorage(TypeScale.chat.densityKey) private var density = ReadingDensity.standard
-
-  /// consecutive process items merge into one card
-  private var rows: [Row] { Self.group(session.items, running: session.running) }
 
   /// Static so checks can pin it.
   ///
@@ -88,40 +78,33 @@ struct AgentTranscript: View {
     return rows
   }
 
-  /// the running stretch, for the status block
-  private var liveRun: [TranscriptItem] {
-    guard session.running, case .activity(let items)? = rows.last else { return [] }
-    return items
-  }
+  /// The column's width while the window or the pane divider is being dragged. Re-wrapping every row
+  /// on every frame of the drag takes a long conversation several frames each time; the column keeps
+  /// the width it had and takes the new one once, when the drag ends.
+  @State private var heldWidth: CGFloat?
+
+  private static let resizeBegan = NotificationCenter.default
+    .publisher(for: NSWindow.willStartLiveResizeNotification)
+    .merge(with: NotificationCenter.default.publisher(for: .paneResizeWillStart))
+  private static let resizeEnded = NotificationCenter.default
+    .publisher(for: NSWindow.didEndLiveResizeNotification)
+    .merge(with: NotificationCenter.default.publisher(for: .paneResizeDidEnd))
 
   var body: some View {
     // Short content starts at the top: defaultScrollAnchor(.bottom) also decides where short content
     // sits. A container at least as tall as the viewport, aligned to the top, keeps it up there.
     GeometryReader { viewport in
+      let column = Self.column(
+        width: viewport.size.width, fontSize: TypeScale.chat.clamp(fontSize), density: density)
       ScrollView {
-        // Not a LazyVStack: row heights vary widely and lazy containers estimate unrealised rows, which
-        // showed as blank space at the bottom and jumping layout. There are few rows anyway, since
-        // grouping turns a turn into three or four.
-        VStack(alignment: .leading, spacing: 2) {
-          ForEach(rows) { row in
-            view(for: row).id(row.id)
-          }
-          // The only progress indicator while running, always in the same place for the whole turn.
-          if session.running && session.pending == nil {
-            LiveStatus(run: liveRun, fallback: session.activity,
-                       stopping: session.cancelRequested, since: session.askedAt, pulse: session.pulse)
-              .padding(.top, 8)
-              .transition(.opacity)
-          }
-          // Must be a Spacer: VStack hands spare height from the minHeight container to flexible children,
-          // and a two-row table got stretched to half the screen.
-          Spacer(minLength: 10)
-        }
+        // Rows of their own, outside this closure: it runs again on every change of the viewport, and
+        // rows built in here were all rebuilt and re-laid out on every frame of a resize.
+        TranscriptRows(session: session, onApprove: onApprove, density: density).equatable()
         // Bound to `running` so the end of a turn (status removed, card finalised) animates as one
         // change, without catching per-chunk growth.
         .padding(.horizontal, 22).padding(.top, 20)
-        .frame(maxWidth: Self.column(
-          width: viewport.size.width, fontSize: TypeScale.chat.clamp(fontSize), density: density))
+        // one frame either way: switching modifiers would rebuild every row
+        .frame(minWidth: heldWidth, maxWidth: heldWidth ?? column)
         .frame(
           maxWidth: .infinity, minHeight: viewport.size.height,
           alignment: .top)
@@ -129,13 +112,62 @@ struct AgentTranscript: View {
       // One anchor, always at the bottom. Flipping it with `running` dragged the viewport to the top
       // at the end of every turn, just as the content changed.
       .defaultScrollAnchor(.bottom)
+      .onReceive(Self.resizeBegan) { _ in heldWidth = min(column, viewport.size.width) }
+      .onReceive(Self.resizeEnded) { _ in heldWidth = nil }
+    }
+  }
+}
+
+/// The rows of the transcript. Equal while the session and density are, so a change of the viewport
+/// (a resize, the sidebar, single or dual panes) reaches only the frame around them.
+private struct TranscriptRows: View, Equatable {
+  @ObservedObject var session: AgentSession
+  let onApprove: (Bool, String) -> Void
+  let density: ReadingDensity
+  @State private var expandedRows: Set<String> = []
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.session === rhs.session && lhs.density == rhs.density
+  }
+
+  private func expansion(for id: String) -> Binding<Bool> {
+    Binding(get: { expandedRows.contains(id) }, set: { value in
+      if value { expandedRows.insert(id) } else { expandedRows.remove(id) }
+    })
+  }
+
+  /// consecutive process items merge into one card
+  private var rows: [AgentTranscript.Row] { AgentTranscript.group(session.items, running: session.running) }
+
+  /// the running stretch, for the status block
+  private var liveRun: [TranscriptItem] {
+    guard session.running, case .activity(let items)? = rows.last else { return [] }
+    return items
+  }
+
+  var body: some View {
+    // Not a LazyVStack: row heights vary widely and lazy containers estimate unrealised rows, which
+    // showed as blank space at the bottom and jumping layout. There are few rows anyway, since
+    // grouping turns a turn into three or four.
+    VStack(alignment: .leading, spacing: 2) {
+      ForEach(rows) { row in
+        view(for: row).id(row.id)
+      }
+      // The only progress indicator while running, always in the same place for the whole turn.
+      if session.running && session.pending == nil {
+        LiveStatus(run: liveRun, fallback: session.activity,
+                   stopping: session.cancelRequested, since: session.askedAt, pulse: session.pulse)
+          .padding(.top, 8)
+          .transition(.opacity)
+      }
+      // Must be a Spacer: VStack hands spare height from the minHeight container to flexible children,
+      // and a two-row table got stretched to half the screen.
+      Spacer(minLength: 10)
     }
   }
 
-
-
   @ViewBuilder
-  private func view(for row: Row) -> some View {
+  private func view(for row: AgentTranscript.Row) -> some View {
     switch row {
     case .single(let item):
       // Only user rows animate in: every other kind is edited in place, and RiseIn's @State replays

@@ -13,31 +13,33 @@ struct UserLine: View {
   @AppStorage(TypeScale.chat.sizeKey) private var base = TypeScale.chat.standardSize
 
   var body: some View {
-    VStack(alignment: .trailing, spacing: 6) {
-      if !images.isEmpty {
-        HStack(spacing: 6) {
-          Spacer(minLength: 44)
-          ForEach(images) { SentImage(image: $0) }
+    SelectableRow { _ in
+      VStack(alignment: .trailing, spacing: 6) {
+        if !images.isEmpty {
+          HStack(spacing: 6) {
+            Spacer(minLength: 44)
+            ForEach(images) { SentImage(image: $0) }
+          }
+        }
+        if !text.isEmpty {
+          HStack(spacing: 0) {
+            Spacer(minLength: 44)
+            Text(text)
+              .font(.system(size: TypeScale.chat.clamp(base) - 0.5)).foregroundStyle(Palette.ink)
+              .selectableText()
+              .multilineTextAlignment(.leading)
+              .fixedSize(horizontal: false, vertical: true)
+              .padding(.horizontal, 13).padding(.vertical, 9)
+              .background(
+                Palette.sunk, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+              .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                  .strokeBorder(Palette.ruleSoft.opacity(0.6)))
+          }
         }
       }
-      if !text.isEmpty {
-        HStack(spacing: 0) {
-          Spacer(minLength: 44)
-          Text(text)
-            .font(.system(size: TypeScale.chat.clamp(base) - 0.5)).foregroundStyle(Palette.ink)
-            .textSelection(.enabled)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 13).padding(.vertical, 9)
-            .background(
-              Palette.sunk, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            .overlay(
-              RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .strokeBorder(Palette.ruleSoft.opacity(0.6)))
-        }
-      }
+      .frame(maxWidth: .infinity, alignment: .trailing)
     }
-    .frame(maxWidth: .infinity, alignment: .trailing)
   }
 }
 
@@ -81,52 +83,52 @@ struct AssistantLine: View {
   /// While streaming the text comes from here, not from `item`, whose text is the last finalised one.
   var live: StreamPacer? = nil
   @Binding var showThinking: Bool
-  @State private var hovering = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 9) {
-      if !item.thinking.isEmpty {
-        // reasoning collapsed by default; expanded, it would push the answer down
-        Button {
-          showThinking.toggle()
-        } label: {
-          HStack(spacing: 5) {
-            Image(systemName: showThinking ? "chevron.down" : "chevron.right")
-              .font(.system(size: 8, weight: .semibold))
-            Text(showThinking ? L("收起思考", "Hide Thinking") : L("展开思考", "Show Thinking"))
-              .font(.system(size: 11, weight: .medium))
-            Spacer(minLength: 0)
-          }.foregroundStyle(Palette.inkFaint)
-            .padding(.vertical, 5).contentShape(Rectangle())
-        }.buttonStyle(.plain)
-          .accessibilityValue(showThinking ? L("已展开", "Expanded") : L("已收起", "Collapsed"))
+    SelectableRow { hovering in
+      VStack(alignment: .leading, spacing: 9) {
+        if !item.thinking.isEmpty {
+          // reasoning collapsed by default; expanded, it would push the answer down
+          Button {
+            showThinking.toggle()
+          } label: {
+            HStack(spacing: 5) {
+              Image(systemName: showThinking ? "chevron.down" : "chevron.right")
+                .font(.system(size: 8, weight: .semibold))
+              Text(showThinking ? L("收起思考", "Hide Thinking") : L("展开思考", "Show Thinking"))
+                .font(.system(size: 11, weight: .medium))
+              Spacer(minLength: 0)
+            }.foregroundStyle(Palette.inkFaint)
+              .padding(.vertical, 5).contentShape(Rectangle())
+          }.buttonStyle(.plain)
+            .accessibilityValue(showThinking ? L("已展开", "Expanded") : L("已收起", "Collapsed"))
 
-        if showThinking {
-          ThinkingContent(text: item.thinking)
-            .padding(.leading, 10)
-            .overlay(alignment: .leading) {
-              Rectangle().fill(Palette.rule).frame(width: 1.5)
-            }
+          if showThinking {
+            ThinkingContent(text: item.thinking)
+              .padding(.leading, 10)
+              .overlay(alignment: .leading) {
+                Rectangle().fill(Palette.rule).frame(width: 1.5)
+              }
+          }
+        }
+        if streaming, let live {
+          LiveAnswer(pacer: live)
+        } else if !item.text.isEmpty {
+          MarkdownText(item.text, streaming: streaming)
+        } else if streaming {
+          // no text yet (thinking, or about to call a tool): a caret, so the row isn't empty
+          StreamingCaret()
         }
       }
-      if streaming, let live {
-        LiveAnswer(pacer: live)
-      } else if !item.text.isEmpty {
-        MarkdownText(item.text, streaming: streaming)
-      } else if streaming {
-        // no text yet (thinking, or about to call a tool): a caret, so the row isn't empty
-        StreamingCaret()
+      .frame(maxWidth: .infinity, alignment: .leading)
+      // Copy the whole answer as Markdown with LaTeX: rendered formulas are images and don't survive a
+      // text selection copy. Appears on hover only.
+      .overlay(alignment: .topTrailing) {
+        if hovering, !streaming, !item.text.isEmpty {
+          CopyAnswerButton(text: item.text).offset(y: -4)
+        }
       }
     }
-    .frame(maxWidth: .infinity, alignment: .leading)
-    // Copy the whole answer as Markdown with LaTeX: rendered formulas are images and don't survive a
-    // text selection copy. Appears on hover only.
-    .overlay(alignment: .topTrailing) {
-      if hovering, !streaming, !item.text.isEmpty {
-        CopyAnswerButton(text: item.text).offset(y: -4)
-      }
-    }
-    .onHover { hovering = $0 }
   }
 }
 

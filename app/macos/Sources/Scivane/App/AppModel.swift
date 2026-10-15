@@ -107,8 +107,10 @@ final class AppModel: ObservableObject {
   @Published var noticeID = UUID()
   private var jobChanges: AnyCancellable?
 
+  /// Only what views derive through the model: forwarding every change would redraw the whole window
+  /// on each progress tick of a run, several times a second for minutes.
   private func observeJobs() {
-    jobChanges = Publishers.MergeMany(jobs.map { $0.objectWillChange })
+    jobChanges = Publishers.MergeMany(jobs.map(\.milestones))
       .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
       .sink { [weak self] _ in self?.objectWillChange.send() }
   }
@@ -119,7 +121,12 @@ final class AppModel: ObservableObject {
   }
   @Published var selection: DocumentJob.ID?
 
-  @Published var currentPage = 1
+  /// Not published here: see ReadingPosition.
+  var currentPage: Int {
+    get { position.page }
+    set { if position.page != newValue { position.page = newValue } }
+  }
+  let position = ReadingPosition()
   @Published var syncScroll = true
   /// Off by default: it doesn't replace scrolling and permanently takes a column.
   @Published var showThumbnails = false
@@ -327,6 +334,17 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// Documents dropped onto the window; false when none of them can be opened.
+  func importDropped(_ urls: [URL]) -> Bool {
+    let accepted = urls.filter { url in
+      guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+      return DocumentJob.supportedTypes.contains { type.conforms(to: $0) }
+    }
+    guard !accepted.isEmpty else { return false }
+    add(urls: accepted)
+    return true
+  }
+
   /// Shared with projects, so opening a project and importing by hand follow the same rules.
   @discardableResult
   func adopt(url raw: URL, restoreCache: Bool = true) -> DocumentJob? {
@@ -391,14 +409,16 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func reloadMarkdown(_ job: DocumentJob) {
+  /// - Parameter show: false when the caller shows it itself: selecting replays the document into the
+  ///   renderer, and a second replay right after redoes the whole paper.
+  func reloadMarkdown(_ job: DocumentJob, show: Bool = true) {
     guard job.isMarkdown else { return }
     do {
       let text = try String(contentsOf: job.url, encoding: .utf8)
       job.pages = [1: text]
       job.consolidated = text
       job.status = .imported
-      select(job)
+      if show { select(job) }
     } catch { notify(L("重新载入失败：", "Couldn't reload: ") + error.localizedDescription) }
   }
 

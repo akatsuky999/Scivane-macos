@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import PDFKit
 import UniformTypeIdentifiers
 
@@ -95,6 +96,34 @@ final class DocumentJob: ObservableObject, Identifiable {
     }
 
     var hasResult: Bool { !pages.isEmpty }
+
+    /// The status without its counters.
+    enum Stage: Equatable { case ready, imported, queued, running, finished, failed, cancelled }
+
+    static func stage(_ status: Status) -> Stage {
+        switch status {
+        case .ready: return .ready
+        case .imported: return .imported
+        case .queued: return .queued
+        case .running: return .running
+        case .finished: return .finished
+        case .failed: return .failed
+        case .cancelled: return .cancelled
+        }
+    }
+
+    /// Fires when something other views derive from the document changes: its stage, whether it has
+    /// text, whether pages failed. Progress within a run (pages done, the page being read, seconds,
+    /// tokens) changes several times a second and is left to the views that observe the job itself.
+    var milestones: AnyPublisher<Void, Never> {
+        Publishers.CombineLatest3(
+            $status.map(Self.stage).removeDuplicates(),
+            $pages.map { !$0.isEmpty }.removeDuplicates(),
+            $failedPages.map { !$0.isEmpty }.removeDuplicates())
+        .dropFirst()
+        .map { _ in () }
+        .eraseToAnyPublisher()
+    }
 
     @discardableResult
     func write(to directory: URL, assetsRoot: URL? = nil) throws -> URL {

@@ -48,6 +48,9 @@ struct SidebarView: View {
   @State private var tipFor: Project.ID?
   @State private var newProjectTitle = ""
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.colorScheme) private var colorScheme
+  /// the scheme the folded panel keeps; nil while it shows
+  @State private var foldedScheme: ColorScheme?
 
   init(model: AppModel, backend: BackendManager) {
     self.model = model
@@ -77,6 +80,7 @@ struct SidebarView: View {
         Button(L("取消", "Cancel"), role: .cancel) {}
       }
       .onChange(of: state.creatingProject) { _, active in if active { newProjectTitle = "" } }
+      .onChange(of: expanded, initial: true) { _, now in foldedScheme = now ? nil : colorScheme }
   }
 
   private var island: some View {
@@ -86,12 +90,20 @@ struct SidebarView: View {
       topBar
       HStack(spacing: 0) {
         SidebarRail(model: model, backend: backend, expanded: expanded, toggle: toggle, hovering: $hovering)
-        if expanded {
-          Rectangle().fill(Palette.ruleSoft).frame(width: 1)
-          SidebarPanel(model: model, backend: backend, outline: model.outline, state: state)
-            .frame(width: SidebarMetrics.panel - 1)
-            .transition(.opacity)
-        }
+        // Kept built while folded, clipped by the island: building it again on every unfold stalled the
+        // first frame of the animation.
+        Rectangle().fill(Palette.ruleSoft).frame(width: 1)
+          .opacity(expanded ? 1 : 0)
+        SidebarPanel(model: model, backend: backend, outline: model.outline, state: state)
+          .frame(width: SidebarMetrics.panel - 1)
+          // Folded, it keeps the scheme it had: a switch between light and dark would otherwise redraw
+          // every icon of a panel nobody sees, and each redrawn icon may wait on the render server for
+          // a new surface. It catches up as it unfolds.
+          .environment(\.colorScheme, expanded ? colorScheme : foldedScheme ?? colorScheme)
+          .opacity(expanded ? 1 : 0)
+          .allowsHitTesting(expanded)
+          .disabled(!expanded)
+          .accessibilityHidden(!expanded)
       }
     }
     .frame(width: width, alignment: .leading)

@@ -5,8 +5,13 @@ import Foundation
 /// shows a mask computed at write time and stored separately.
 enum Keychain {
   private static let service = "local.scivane.app.llm"
+  /// Off until the app turns it on. Checks build the same models and views; reading or replacing the
+  /// user's entries from a test binary makes macOS ask for their password, and an unattended run hangs
+  /// on the dialog. A check that needs the Keychain turns it on and uses an entry of its own.
+  nonisolated(unsafe) static var enabled = false
 
   static func set(_ secret: String, provider: String) -> Bool {
+    guard enabled else { return false }
     let account = provider as CFString
     let base: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
@@ -24,6 +29,7 @@ enum Keychain {
 
   /// Only for injecting into the backend; never keep the result in UI state.
   static func secret(provider: String) -> String? {
+    guard enabled else { return nil }
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,

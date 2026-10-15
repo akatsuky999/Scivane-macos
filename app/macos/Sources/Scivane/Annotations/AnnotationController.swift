@@ -6,7 +6,7 @@ import SwiftUI
 ///
 /// PDFKit tracks a drag inside its own mouseDown loop, so the selection is complete when
 /// super.mouseDown returns; mouseUp may follow as well. Whichever comes first ends the gesture.
-final class AnnotatingPDFView: PDFView {
+final class AnnotatingPDFView: ReadingPDFView {
   var onPress: () -> Void = {}
   /// where the gesture started, in view coordinates
   var onRelease: (NSPoint) -> Void = { _ in }

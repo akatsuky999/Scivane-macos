@@ -6,6 +6,9 @@ struct PDFReaderView: NSViewRepresentable {
 
     @ObservedObject var model: AppModel
     let job: DocumentJob
+    /// Hidden rather than removed while the other pane shows, so the page and zoom stay; a hidden
+    /// view isn't drawn.
+    var visible = true
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
@@ -54,6 +57,7 @@ struct PDFReaderView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSView, context: Context) {
+        if view.isHidden == visible { view.isHidden = !visible }
         context.coordinator.show(job: job)
         context.coordinator.setThumbnails(visible: model.showThumbnails)
         context.coordinator.marks.update(store: model.annotations, projectID: model.annotatableProject(for: job))

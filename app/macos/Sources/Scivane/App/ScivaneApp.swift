@@ -12,9 +12,11 @@ struct ScivaneApp: App {
         let backend = BackendManager()
         _backend = StateObject(wrappedValue: backend)
         let model = AppModel(backend: backend)
-        // The only place this is set: startup side effects (seeding provider cards, which writes
-        // providers.json and starts the backend) belong to the real app, not to offscreen checks.
+        // The only place these are set: startup side effects (seeding provider cards, which writes
+        // providers.json and starts the backend) and the user's Keychain belong to the real app, not to
+        // offscreen checks.
         model.isLiveApp = true
+        Keychain.enabled = true
         _model = StateObject(wrappedValue: model)
     }
 

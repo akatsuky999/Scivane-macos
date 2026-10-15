@@ -41,7 +41,8 @@ extension AppModel {
   func refreshProjects(quiet: Bool = false) async {
     guard await awaitBackend(quiet: quiet) else { return }
     do {
-      projects = try await projectClient.list()
+      let found = try await projectClient.list()
+      if found != projects { projects = found }
     } catch {
       if !quiet { notifyProject(L("读取项目失败：", "Couldn't load projects: ") + error.localizedDescription) }
     }
@@ -201,8 +202,9 @@ extension AppModel {
       return
     }
     jobProjects[text.id] = project.id
-    // the file may have just been replaced; disk is newer than the job's copy
-    reloadMarkdown(text)
+    // the file may have just been replaced; disk is newer than the job's copy. Both callers select
+    // the source afterwards, which shows this text.
+    reloadMarkdown(text, show: false)
     pair(source: source, text: text)
   }
 
@@ -292,7 +294,7 @@ extension AppModel {
   func refreshProjectNotes(_ projectID: String) async {
     guard await awaitBackend(quiet: true) else { return }
     guard let found = try? await projectClient.notes(projectID) else { return }
-    projectNotes[projectID] = found
+    if projectNotes[projectID] != found { projectNotes[projectID] = found }
   }
 
   /// Copy a Markdown file into the project's notes/ (with its images) and show it in the text pane.

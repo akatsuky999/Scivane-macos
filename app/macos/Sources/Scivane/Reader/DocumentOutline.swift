@@ -40,6 +40,13 @@ final class DocumentOutline: ObservableObject {
   }
 }
 
+/// The page being read. An object of its own for the same reason as the outline: it changes with every
+/// page scrolled past, and only the page number over the PDF shows it.
+@MainActor
+final class ReadingPosition: ObservableObject {
+  @Published var page = 1
+}
+
 /// The sidebar's own state. Whether the panel is open is a stored preference (sidebarVisible); the
 /// search text and a request to focus it (⌘K from the menu) live here, so typing doesn't redraw the
 /// reading area.

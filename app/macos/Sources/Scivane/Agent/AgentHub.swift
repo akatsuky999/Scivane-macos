@@ -129,10 +129,13 @@ extension AppModel {
       let raw = root["providers"]
     else { return }
     let blob = try? JSONSerialization.data(withJSONObject: raw)
-    providers = (blob.flatMap { try? JSONDecoder().decode([ProviderSummary].self, from: $0) }) ?? []
+    let found = (blob.flatMap { try? JSONDecoder().decode([ProviderSummary].self, from: $0) }) ?? []
+    // an unchanged list must not publish: every view of the model would redraw for nothing
+    if found != providers { providers = found }
     if providers.isEmpty && isLiveApp { await seedPresetsOnce() }
     if agentProvider.isEmpty || !providers.contains(where: { $0.id == agentProvider }) {
-      agentProvider = providers.first?.id ?? ""
+      let fallback = providers.first?.id ?? ""
+      if fallback != agentProvider { agentProvider = fallback }
     }
     await injectCredentials()
   }
@@ -337,7 +340,7 @@ extension AppModel {
   func refreshProjectFiles(_ projectID: String) async {
     guard await awaitBackend(quiet: true) else { return }
     guard let found = try? await projectClient.files(projectID) else { return }
-    projectFiles[projectID] = found
+    if projectFiles[projectID] != found { projectFiles[projectID] = found }
   }
 
   /// Files are sent one by one, so a bad file fails on its own. The backend puts Markdown into
@@ -538,7 +541,7 @@ extension AppModel {
   func refreshConversations(_ projectID: String) async -> Bool {
     guard await awaitBackend(quiet: true) else { return false }
     guard let found = try? await projectClient.conversations(projectID) else { return false }
-    conversations[projectID] = found
+    if conversations[projectID] != found { conversations[projectID] = found }
     // the selection was deleted (or never made): back to the most recent
     if let current = activeConversation[projectID],
       found.contains(where: { $0.id == current })

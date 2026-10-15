@@ -5,6 +5,18 @@ import SwiftUI
 struct ReaderView: View {
   @ObservedObject var model: AppModel
   @FocusState private var searchFocused: Bool
+  /// Where the divider was moved to, as the split's share; kept across switches between single and
+  /// dual mode.
+  @State private var movedFraction: CGFloat?
+  @Environment(\.displayScale) private var displayScale
+  /// The PDF and the text's WebView are created the first time they are shown, then kept.
+  @State private var sourceMounted = false
+  @State private var documentMounted = false
+
+  private var sourceShown: Bool { model.dualPane || model.singlePane == .source }
+  private var textShown: Bool { model.dualPane || model.singlePane == .text }
+  private var documentShown: Bool { textShown && model.textMode == .document }
+  private var agentShown: Bool { textShown && model.textMode == .chat }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -17,22 +29,40 @@ struct ReaderView: View {
         ScanProgressBar(job: source, onCancel: { model.cancelCurrent() }, onRetry: { model.retry(source) },
                         firstRun: model.ocrInstaller.freshlyInstalled && source.engine == .local)
       }
-      if model.dualPane {
-        HSplitView {
-          // the agent gets most of the width; the source stays as a reference
-          sourcePane.frame(minWidth: 240, idealWidth: model.textMode == .chat ? 360 : 460)
-          textPane.frame(minWidth: 460, idealWidth: model.textMode == .chat ? 760 : 560)
-        }
-      } else {
-        Group {
-          if model.singlePane == .source { sourcePane } else { textPane }
+      GeometryReader { area in
+        ReadingSplit(
+          dual: model.dualPane, fraction: movedFraction ?? ReadingSplit.initialFraction, scale: displayScale
+        ) {
+          sourcePane
+            .opacity(sourceShown ? 1 : 0)
+            .allowsHitTesting(sourceShown)
+            .accessibilityHidden(!sourceShown)
+            .zIndex(sourceShown ? 1 : 0)
+          ReadingDivider(
+            fraction: Binding(
+              get: { movedFraction ?? ReadingSplit.initialFraction }, set: { movedFraction = $0 }),
+            width: area.size.width, scale: displayScale
+          )
+          .opacity(model.dualPane ? 1 : 0)
+          .allowsHitTesting(model.dualPane)
+          .zIndex(3)
+          textPane
+            .opacity(textShown ? 1 : 0)
+            .allowsHitTesting(textShown)
+            .accessibilityHidden(!textShown)
+            .zIndex(textShown ? 2 : 0)
         }
       }
+      // Panes change places at once. Animated, their frames would change on every frame of the
+      // animation, and each change re-lays out the whole paper and conversation.
+      .transaction { $0.animation = nil }
     }
     .onChange(of: model.selection) { _, _ in
       model.searchQuery = ""
       model.runSearch()
     }
+    .onChange(of: sourceShown, initial: true) { _, shown in if shown { sourceMounted = true } }
+    .onChange(of: documentShown, initial: true) { _, shown in if shown { documentMounted = true } }
   }
 
   // MARK: - Source pane
@@ -42,7 +72,11 @@ struct ReaderView: View {
       Group {
         if let job = model.readingSource {
           if job.isPDF {
-            PDFReaderView(model: model, job: job)
+            if sourceMounted {
+              PDFReaderView(model: model, job: job, visible: sourceShown)
+            } else {
+              Palette.sunk
+            }
           } else if let image = job.image {
             ImageReaderView(image: image)
           } else {
@@ -53,7 +87,7 @@ struct ReaderView: View {
         }
       }
       if let source = model.readingSource, source.isPDF, source.pageCount > 1 {
-        PageCapsule(model: model, pageCount: source.pageCount).padding(.bottom, 16)
+        PageCapsule(model: model, position: model.position, pageCount: source.pageCount).padding(.bottom, 16)
       }
     }
     .background(Palette.paper)
@@ -61,28 +95,43 @@ struct ReaderView: View {
 
   // MARK: - Text pane / agent
   //
-  // Both stay in one ZStack and switch by opacity, not if/switch: leaving the tree would rebuild
-  // the WKWebView, reload viewer.html, replay the whole paper and lose the scroll position.
+  // Neither leaves the tree when the other shows: that would rebuild the WKWebView, reload
+  // viewer.html, replay the whole paper and lose the scroll position, or rebuild every row of the
+  // conversation. The text is hidden by opacity: a hidden WebView costs the app nothing, and one kept
+  // in the window doesn't flash blank when shown again. The conversation leaves the window instead
+  // (RetainedPane): hidden by opacity it was still laid out and redrawn on every change.
 
   private var textPane: some View {
     ZStack {
       documentLayer
-        .opacity(model.textMode == .document ? 1 : 0)
-        .allowsHitTesting(model.textMode == .document)
-        .accessibilityHidden(model.textMode != .document)
-      AgentPane(model: model)
-        .opacity(model.textMode == .chat ? 1 : 0)
-        .allowsHitTesting(model.textMode == .chat)
-        .accessibilityHidden(model.textMode != .chat)
+        .opacity(documentShown ? 1 : 0)
+        .allowsHitTesting(documentShown)
+        .accessibilityHidden(!documentShown)
+      RetainedPane(
+        isPresented: agentShown,
+        identity: AppModel.sessionKey(model.activeProjectID, model.activeConversationID)
+      ) {
+        // its own hosting view: the environment ContentView sets doesn't reach it
+        AgentPane(model: model)
+          .tint(Palette.accent)
+          .modifier(DocumentDrop(model: model))
+      }
+      .allowsHitTesting(agentShown)
+      .accessibilityHidden(!agentShown)
     }
     .background(Palette.paper)
+    .background { AgentUpkeep(model: model) }
   }
 
   @ViewBuilder
   private var documentLayer: some View {
     Group {
       if model.readingDocument != nil {
-        MarkdownWebView(model: model, language: Localization.shared.language)
+        if documentMounted {
+          MarkdownWebView(model: model, language: Localization.shared.language)
+        } else {
+          Palette.paper
+        }
       } else {
         emptyPane(.text)
       }
@@ -184,7 +233,10 @@ struct ReaderView: View {
 // Dim until hovered, as in Preview.
 
 private struct PageCapsule: View {
-  @ObservedObject var model: AppModel
+  /// not observed: only the position changes while reading, and the model's other changes don't
+  /// concern the page number
+  let model: AppModel
+  @ObservedObject var position: ReadingPosition
   let pageCount: Int
   @State private var hovering = false
   @State private var draft = ""
@@ -192,21 +244,21 @@ private struct PageCapsule: View {
 
   var body: some View {
     HStack(spacing: 3) {
-      step("chevron.left", enabled: model.currentPage > 1) { model.goToPage(model.currentPage - 1) }
+      step("chevron.left", enabled: position.page > 1) { model.goToPage(position.page - 1) }
       TextField("", text: $draft)
         .textFieldStyle(.plain).multilineTextAlignment(.center).focused($editing)
         .font(.system(size: 11, weight: .medium).monospacedDigit())
         .frame(width: max(18, CGFloat("\(pageCount)".count) * 9))
         .onSubmit {
-          model.goToPage(Int(draft) ?? model.currentPage)
-          draft = String(model.currentPage)
+          model.goToPage(Int(draft) ?? position.page)
+          draft = String(position.page)
           editing = false
         }
         .accessibilityLabel(L("跳转页码", "Go to Page"))
       Text("/ \(pageCount)")
         .font(.system(size: 11).monospacedDigit()).foregroundStyle(Palette.inkFaint)
         .padding(.trailing, 2)
-      step("chevron.right", enabled: model.currentPage < pageCount) { model.goToPage(model.currentPage + 1) }
+      step("chevron.right", enabled: position.page < pageCount) { model.goToPage(position.page + 1) }
     }
     .padding(.horizontal, 7).padding(.vertical, 5)
     .background(.regularMaterial, in: Capsule())
@@ -215,8 +267,8 @@ private struct PageCapsule: View {
     .opacity(hovering || editing ? 1 : 0.62)
     .onHover { hovering = $0 }
     .animation(.easeOut(duration: 0.15), value: hovering)
-    .onAppear { draft = String(model.currentPage) }
-    .onChange(of: model.currentPage) { _, page in if !editing { draft = String(page) } }
+    .onAppear { draft = String(position.page) }
+    .onChange(of: position.page) { _, page in if !editing { draft = String(page) } }
   }
 
   private func step(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {

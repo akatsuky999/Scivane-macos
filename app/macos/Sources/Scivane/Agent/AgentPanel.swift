@@ -5,15 +5,90 @@ import SwiftUI
 /// its changes aren't AppModel changes, so passing only the model would never redraw a reply.
 struct AgentPane: View {
   @ObservedObject var model: AppModel
+  /// The conversation shown, fixed for the pane's life: the reader gives another conversation another
+  /// pane, so a hidden one doesn't rebuild itself when the selection moves on.
+  let projectID: String?
+  let conversationID: String?
+
+  init(model: AppModel, projectID: String?, conversationID: String?) {
+    self.model = model
+    self.projectID = projectID
+    self.conversationID = conversationID
+  }
+
+  /// The current level's conversation.
+  init(model: AppModel) {
+    self.init(model: model, projectID: model.activeProjectID, conversationID: model.activeConversationID)
+  }
 
   var body: some View {
     // The id must include the conversation: otherwise SwiftUI reuses the view and the composer stays
     // bound to the previous conversation's session.
-    AgentPanel(
-      model: model,
-      session: model.session(
-        for: model.activeProjectID, conversation: model.activeConversationID))
+    AgentPanel(model: model, session: model.session(for: projectID, conversation: conversationID))
+      .id(AppModel.sessionKey(projectID, conversationID))
+  }
+}
+
+/// The current conversation's loading and after-turn refresh, apart from the panel and present for as
+/// long as the reader is. The panel is built when first shown and leaves the window while hidden; tied
+/// to it, this would wait for the first show, run again on every show, and miss a turn that ends while
+/// the text is on screen (a note the agent wrote, the document it edited, the name of a new conversation).
+struct AgentUpkeep: View {
+  @ObservedObject var model: AppModel
+
+  var body: some View {
+    // keyed like the panel, so the after-turn refresh follows the conversation in view
+    Keyed(model: model, session: model.agentSession)
       .id(AppModel.sessionKey(model.activeProjectID, model.activeConversationID))
+      // Warm up the math typesetter. Creating its WebView blocks the main thread for over 100 ms (first
+      // time only) and loading takes a few tenths more; do it once the reader settles rather than when
+      // the first `$` streams in.
+      .task {
+        try? await Task.sleep(for: .milliseconds(700))
+        guard !Task.isCancelled else { return }
+        MathRenderer.shared.prepare()
+      }
+  }
+
+  private struct Keyed: View {
+    @ObservedObject var model: AppModel
+    /// observed for `running`; its changes aren't AppModel changes
+    @ObservedObject var session: AgentSession
+
+    var body: some View {
+      Color.clear
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+        .task(id: AppModel.sessionKey(model.activeProjectID, model.activeConversationID)) {
+          // restore history when the level or conversation changes (fetched once)
+          model.restoreAgentHistory()
+          await model.refreshProviders()
+        }
+        .task(id: model.activeProjectID) {
+          guard let projectID = model.activeProjectID else { return }
+          await model.refreshProjectFiles(projectID)
+          await model.refreshProjectNotes(projectID)
+        }
+        // refetch on opening a conversation, switching cards or changing the window; during a turn it
+        // comes from events (AgentSession)
+        .task(id: contextKey) {
+          await model.refreshAgentContext()
+        }
+        .onChange(of: session.running) { _, running in
+          // After each turn: the backend names a conversation after its first question, and the agent
+          // may have written a note or edited the document on screen.
+          guard !running, let projectID = model.activeProjectID else { return }
+          Task {
+            await model.refreshConversations(projectID)
+            await model.refreshAfterAgentTurn(projectID)
+          }
+        }
+    }
+
+    private var contextKey: String {
+      "\(AppModel.sessionKey(model.activeProjectID, model.activeConversationID))|"
+        + "\(model.activeProviderID)|\(model.activeContextWindow ?? 0)"
+    }
   }
 }
 
@@ -82,53 +157,15 @@ struct AgentPanel: View {
           }
         }
       } else {
-        AgentTranscript(session: session) { approved, reason in
-          session.answer(approved, reason: reason)
-        }
+        TranscriptPane(session: session).equatable()
       }
       composer(session)
     }
     .background(Palette.paper)
-    // Warm up the math typesetter. Creating its WebView blocks the main thread for over 100 ms (first
-    // time only) and loading takes a few tenths more; do it after the panel settles rather than when
-    // the first `$` streams in.
-    .task {
-      try? await Task.sleep(for: .milliseconds(700))
-      guard !Task.isCancelled else { return }
-      MathRenderer.shared.prepare()
-    }
-    .task(id: AppModel.sessionKey(model.activeProjectID, model.activeConversationID)) {
-      // restore history when the level or conversation changes (fetched once)
-      model.restoreAgentHistory()
-      await model.refreshProviders()
-    }
-    .task(id: model.activeProjectID) {
-      guard let projectID = model.activeProjectID else { return }
-      await model.refreshProjectFiles(projectID)
-      await model.refreshProjectNotes(projectID)
-    }
-    // refetch on opening a conversation, switching cards or changing the window; during a turn it
-    // comes from events (AgentSession)
-    .task(id: contextKey) {
-      await model.refreshAgentContext()
-    }
+    // loading and the after-turn refresh are AgentUpkeep's: this panel may be off screen
     .onAppear { pasteMonitor.start { attach($0) } }
     .onDisappear { pasteMonitor.stop() }
     .onChange(of: composing) { _, focused in pasteMonitor.active = focused && !isDesk }
-    .onChange(of: session.running) { _, running in
-      // After each turn: the backend names a conversation after its first question, and the agent
-      // may have written a note or edited the document on screen.
-      guard !running, let projectID = model.activeProjectID else { return }
-      Task {
-        await model.refreshConversations(projectID)
-        await model.refreshAfterAgentTurn(projectID)
-      }
-    }
-  }
-
-  private var contextKey: String {
-    "\(AppModel.sessionKey(model.activeProjectID, model.activeConversationID))|"
-      + "\(model.activeProviderID)|\(model.activeContextWindow ?? 0)"
   }
 
   // MARK: - Empty state
@@ -482,6 +519,21 @@ struct AgentPanel: View {
     .background(Palette.sunk, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     .frame(maxWidth: 220, alignment: .leading)
     .help(title)
+  }
+}
+
+/// The transcript changes only with its session, which it observes itself. The panel around it redraws
+/// on every change of the app model (the provider list, notes, the open project); without this the
+/// transcript was regrouped and its rows rebuilt each time, at a cost that grows with the history.
+private struct TranscriptPane: View, Equatable {
+  let session: AgentSession
+
+  static func == (lhs: Self, rhs: Self) -> Bool { lhs.session === rhs.session }
+
+  var body: some View {
+    AgentTranscript(session: session) { approved, reason in
+      session.answer(approved, reason: reason)
+    }
   }
 }
 

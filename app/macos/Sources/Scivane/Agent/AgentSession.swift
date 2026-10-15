@@ -130,7 +130,8 @@ final class AgentSession: ObservableObject {
     guard let projectID, !running else { return }
     let report = await AgentClient(base: base)
       .context(projectID: projectID, conversation: conversationID, provider: provider)
-    guard let report, !running else { return }
+    // an unchanged report must not publish: the whole transcript observes this session
+    guard let report, !running, report != context else { return }
     context = report
   }
 

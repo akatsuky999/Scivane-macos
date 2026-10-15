@@ -8,6 +8,8 @@ struct SidebarPanel: View {
   @ObservedObject var outline: DocumentOutline
   @ObservedObject var state: SidebarState
   @FocusState private var searchFocused: Bool
+  /// The panel stays built while folded; the search field must not keep the keyboard then.
+  @AppStorage("sidebarVisible") private var shown = true
 
   private var query: String { state.query.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -31,6 +33,7 @@ struct SidebarPanel: View {
       SidebarControls(backend: backend).padding(.horizontal, 12).padding(.bottom, 12).padding(.top, 2)
     }
     .onChange(of: state.focusRequest) { _, _ in searchFocused = true }
+    .onChange(of: shown) { _, now in if !now { searchFocused = false } }
   }
 
   private var search: some View {

@@ -59,11 +59,14 @@ enum MarkdownColumnAlignment: Equatable {
 enum MarkdownParser {
 
   /// The whole transcript is rebuilt on every chunk, so without a cache every finished answer would
-  /// be re-split each time. Finished text never changes, which makes the text a good key. Only the
-  /// most recent 32 are kept.
+  /// be re-split each time. Finished text never changes, which makes the text a good key. Bounded by
+  /// the text it holds rather than a count: a long conversation has well over a hundred answers and
+  /// narration lines, and a cache smaller than that re-parsed the oldest ones on every redraw.
   private static var cache: [String: [MarkdownBlock]] = [:]
+  /// oldest first
   private static var recent: [String] = []
-  private static let cacheLimit = 32
+  private static var cachedBytes = 0
+  private static let byteLimit = 8 << 20
 
   /// - Parameter cache: false for the streaming message. It has a new text, and so a new key,
   ///   every frame, which would keep flushing the finished answers out of the cache.
@@ -73,9 +76,11 @@ enum MarkdownParser {
     guard useCache else { return parsed }
     cache[text] = parsed
     recent.append(text)
-    if recent.count > cacheLimit {
+    cachedBytes += text.utf8.count
+    while cachedBytes > byteLimit, recent.count > 1 {
       let evicted = recent.removeFirst()
       cache.removeValue(forKey: evicted)
+      cachedBytes -= evicted.utf8.count
     }
     return parsed
   }
@@ -514,14 +519,14 @@ private struct MarkdownBlockView: View, Equatable {
     case .heading(let level, let text):
       // heading sizes are ratios of the base, so they move together
       prose(text, size: base * [0, 1.26, 1.13, 1.03, 1.0, 1.0, 1.0][min(level, 6)], weight: .semibold)
-        .textSelection(.enabled)
+        .selectableText()
         .fixedSize(horizontal: false, vertical: true)
         .padding(.top, gap(level <= 2 ? 15 : 12)).padding(.bottom, gap(4))
 
     case .paragraph(let text):
       HStack(alignment: .bottom, spacing: 3) {
         prose(text, size: base, live: live)
-          .lineSpacing(base * density.leading).textSelection(.enabled)
+          .lineSpacing(base * density.leading).selectableText()
           .fixedSize(horizontal: false, vertical: true)
         if live { StreamingCaret().padding(.bottom, 2) }
       }
@@ -533,7 +538,7 @@ private struct MarkdownBlockView: View, Equatable {
           HStack(alignment: .firstTextBaseline, spacing: 8) {
             ListMarker(marker: item.marker, depth: item.depth, size: base)
             prose(item.text, size: base, live: live && index == items.count - 1)
-              .lineSpacing(base * density.leading * 0.3 / 0.37).textSelection(.enabled)
+              .lineSpacing(base * density.leading * 0.3 / 0.37).selectableText()
               .fixedSize(horizontal: false, vertical: true)
           }
           .padding(.leading, CGFloat(item.depth) * base * 1.45)
@@ -544,7 +549,7 @@ private struct MarkdownBlockView: View, Equatable {
       // The rule is an overlay sized by the text. As an HStack sibling a shape takes whatever height
       // is offered, and a transcript shorter than the window offers it the spare height.
       prose(lines.joined(separator: "\n"), size: base - 0.5, tint: Palette.inkSoft, live: live)
-        .lineSpacing(base * density.leading * 0.33 / 0.37).textSelection(.enabled)
+        .lineSpacing(base * density.leading * 0.33 / 0.37).selectableText()
         .fixedSize(horizontal: false, vertical: true)
         .padding(.leading, 12)
         .overlay(alignment: .leading) {
@@ -635,7 +640,7 @@ private struct CodeBlock: View {
           .font(.system(size: size, design: .monospaced))
           .foregroundStyle(Palette.ink.opacity(0.88))
           .lineSpacing(3.5)
-          .textSelection(.enabled)
+          .selectableText()
           .padding(.horizontal, 13)
           .padding(.top, language.isEmpty ? 11 : 6).padding(.bottom, 11)
       }
@@ -740,7 +745,7 @@ private struct MarkdownTable: View {
     }
     .multilineTextAlignment(alignment.text)
     .lineSpacing(2.5)
-    .textSelection(.enabled)
+    .selectableText()
     .fixedSize(horizontal: false, vertical: true)
     .frame(minWidth: 52, maxWidth: wraps ? .infinity : 230, alignment: alignment.frame)
     // 11 and 7 pt at the standard 12 pt

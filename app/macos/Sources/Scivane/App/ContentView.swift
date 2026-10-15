@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
   @ObservedObject var model: AppModel
@@ -24,13 +23,7 @@ struct ContentView: View {
         Hairline()
         ZStack {
           ReaderView(model: model)
-          if isTargeted {
-            RoundedRectangle(cornerRadius: 16)
-              .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
-              .background(Palette.accent.opacity(0.05)).padding(.horizontal, 10).padding(
-                .vertical, 9
-              ).allowsHitTesting(false)
-          }
+          if isTargeted { DropHighlight() }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
       }.background(Palette.paper)
     }
@@ -69,13 +62,7 @@ struct ContentView: View {
     .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: sidebarOverlaysContent)
     .tint(Palette.accent)
     .dropDestination(for: URL.self) { urls, _ in
-      let accepted = urls.filter { url in
-        guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
-        return DocumentJob.supportedTypes.contains { type.conforms(to: $0) }
-      }
-      guard !accepted.isEmpty else { return false }
-      model.add(urls: accepted)
-      return true
+      model.importDropped(urls)
     } isTargeted: {
       isTargeted = $0
     }
