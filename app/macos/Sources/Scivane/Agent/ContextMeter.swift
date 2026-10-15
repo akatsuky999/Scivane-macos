@@ -9,27 +9,30 @@ struct ContextMeter: View {
   var busy = false
   var onCompact: () -> Void = {}
   @State private var showing = false
+  @State private var hovering = false
 
   var body: some View {
     if let report {
       Button { showing.toggle() } label: {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
           if let fraction = report.fraction {
-            ContextRing(fraction: fraction, tint: Self.level(of: report).ring).frame(width: 11, height: 11)
+            ContextRing(fraction: fraction, tint: Self.level(of: report).ring).frame(width: 14, height: 14)
             Text("\(report.measured ? "" : "≈")\(Int((fraction * 100).rounded()))%")
-              .font(.system(size: 9.5, design: .monospaced)).monospacedDigit()
+              .font(.system(size: 11)).monospacedDigit()
           } else {
-            Image(systemName: "square.stack.3d.up").font(.system(size: 8.5))
+            Image(systemName: "square.stack.3d.up").font(.system(size: 11))
             Text("≈" + UsageMeter.compact(report.used))
-              .font(.system(size: 9.5, design: .monospaced)).monospacedDigit()
+              .font(.system(size: 11)).monospacedDigit()
           }
         }
         .foregroundStyle(Self.level(of: report).text)
-        .padding(.horizontal, 5).padding(.vertical, 2.5)
-        .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Palette.ink.opacity(0.05)))
-        .contentShape(Rectangle())
+        .padding(.leading, 7).padding(.trailing, 9)
+        .frame(height: 24)
+        .background(Capsule().fill(hovering ? Palette.ink.opacity(0.045) : .clear))
+        .contentShape(Capsule())
       }
       .buttonStyle(.plain)
+      .onHover { hovering = $0 }
       .fixedSize()
       .help(Self.summary(report))
       .accessibilityLabel(Self.summary(report))

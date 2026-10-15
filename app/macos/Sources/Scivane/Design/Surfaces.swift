@@ -1,6 +1,25 @@
 import AppKit
 import SwiftUI
 
+/// Within-window blending samples content beneath a floating surface, rather than the wallpaper.
+struct WindowGlassBackdrop: NSViewRepresentable {
+  @Environment(\.colorScheme) private var colorScheme
+
+  func makeNSView(context: Context) -> NSVisualEffectView {
+    let view = NSVisualEffectView()
+    view.blendingMode = .withinWindow
+    view.state = .active
+    return view
+  }
+
+  func updateNSView(_ view: NSVisualEffectView, context: Context) {
+    view.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+    // Aqua's sidebar material masks the paper beneath a floating panel.
+    let material: NSVisualEffectView.Material = colorScheme == .light ? .popover : .sidebar
+    if view.material != material { view.material = material }
+  }
+}
+
 /// A frosted panel floating over the window: the sidebar island and the settings navigation. The
 /// window's own material, tinted towards the paper green, with a light edge and a soft shadow; the
 /// shadow sits on the shape, never on the content, so text stays crisp.
@@ -79,22 +98,5 @@ struct PillPicker<Value: Hashable, Label: View>: View {
     .padding(2)
     .background(Palette.track, in: RoundedRectangle(cornerRadius: (height + 4) * 0.42, style: .continuous))
     .animation(reduceMotion ? nil : .spring(duration: 0.26, bounce: 0.12), value: selection)
-  }
-}
-
-/// Lets a titled window's content run under its title bar, with the traffic lights over it, the way
-/// the main window's hidden title bar does. The Settings scene takes no window style of its own.
-struct TransparentTitleBar: NSViewRepresentable {
-  func makeNSView(context: Context) -> NSView { Probe() }
-  func updateNSView(_ view: NSView, context: Context) {}
-
-  final class Probe: NSView {
-    override func viewDidMoveToWindow() {
-      super.viewDidMoveToWindow()
-      guard let window, window.styleMask.contains(.titled) else { return }
-      window.titlebarAppearsTransparent = true
-      window.titleVisibility = .hidden
-      window.styleMask.insert(.fullSizeContentView)
-    }
   }
 }

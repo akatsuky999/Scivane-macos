@@ -56,25 +56,6 @@ struct SidebarIslandShape: Shape {
   }
 }
 
-/// Within-window blending samples the paper under the island, rather than the desktop wallpaper.
-struct SidebarBackdrop: NSViewRepresentable {
-  @Environment(\.colorScheme) private var colorScheme
-
-  func makeNSView(context: Context) -> NSVisualEffectView {
-    let view = NSVisualEffectView()
-    view.blendingMode = .withinWindow
-    view.state = .active
-    return view
-  }
-
-  func updateNSView(_ view: NSVisualEffectView, context: Context) {
-    view.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
-    // Aqua's sidebar material masks the paper beneath a floating panel.
-    let material: NSVisualEffectView.Material = colorScheme == .light ? .popover : .sidebar
-    if view.material != material { view.material = material }
-  }
-}
-
 private struct SidebarSurface: ViewModifier {
   let shape: SidebarIslandShape
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -86,7 +67,7 @@ private struct SidebarSurface: ViewModifier {
         ZStack {
           if reduceTransparency { shape.fill(Palette.sidebar) }
           else {
-            SidebarBackdrop().clipShape(shape)
+            WindowGlassBackdrop().clipShape(shape)
             shape.fill(Palette.glassTint.opacity(colorScheme == .light ? 0.38 : 0.65))
           }
         }

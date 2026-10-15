@@ -82,6 +82,7 @@ struct AgentTranscript: View {
   /// on every frame of the drag takes a long conversation several frames each time; the column keeps
   /// the width it had and takes the new one once, when the drag ends.
   @State private var heldWidth: CGFloat?
+  @Environment(\.composerInset) private var composerInset
 
   private static let resizeBegan = NotificationCenter.default
     .publisher(for: NSWindow.willStartLiveResizeNotification)
@@ -106,8 +107,9 @@ struct AgentTranscript: View {
         // one frame either way: switching modifiers would rebuild every row
         .frame(minWidth: heldWidth, maxWidth: heldWidth ?? column)
         .frame(
-          maxWidth: .infinity, minHeight: viewport.size.height,
+          maxWidth: .infinity, minHeight: max(0, viewport.size.height - composerInset),
           alignment: .top)
+        .padding(.bottom, composerInset)
       }
       // One anchor, always at the bottom. Flipping it with `running` dragged the viewport to the top
       // at the end of every turn, just as the content changed.

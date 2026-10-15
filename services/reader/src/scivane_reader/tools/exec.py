@@ -389,8 +389,8 @@ def exec_tools() -> tuple[ToolDef, ...]:
                 "之后这个项目的调用都用它。**项目环境是独立的**：共享环境里的 numpy / pandas / matplotlib 不在其中，"
                 "要用就一并写进 packages。拿到 ModuleNotFoundError 的正确反应是带上 `packages` 重试，"
                 "而不是改写成纯 numpy 或者就此收工。\n"
-                "- 把要看的数 print 出来，结果里才看得到。画的图要让用户看见，就在 notes/ 的笔记里按相对路径链接它 —— "
-                "对话里不显示图。\n"
+                "- 把要看的数 print 出来，结果里才看得到。对话里不显示生成的图，在回复里给出产物路径；"
+                "只有用户明确要求笔记时，才在 notes/ 的笔记里按相对路径链接图，不自动创建笔记。\n"
                 f"- 可以联网（经本机审计代理，代理已配在环境变量里；标准库的 urllib 直接用即可）。"
                 f"默认 {int(DEFAULT_TIMEOUT)} 秒超时，`timeout` 最多 {int(MAX_TIMEOUT)}。{spill}"
             ),

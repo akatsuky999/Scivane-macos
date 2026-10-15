@@ -2,8 +2,12 @@ import SwiftUI
 
 /// The settings window's layout, set in one place: the pages and the navigation are tuned together.
 enum SettingsMetrics {
-  static let window = CGSize(width: 760, height: 620)
+  static let window = CGSize(width: 760, height: 580)
+  static let minimumWindow = CGSize(width: 760, height: 540)
   static let navigation: CGFloat = 196
+  static let navigationHeader: CGFloat = 40
+  static let trafficLightLeading: CGFloat = 7
+  static let trafficLightSpacing: CGFloat = 20
   /// navigation island to the window edge
   static let inset: CGFloat = 8
   /// clears the transparent title bar

@@ -6,7 +6,7 @@ struct GeneralSettings: View {
   @AppStorage("sidebarOverlaysContent") private var sidebarOverlaysContent = true
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 26) {
+    VStack(alignment: .leading, spacing: 20) {
       SettingsTitle(L("通用", "General"))
 
       SettingsSection(title: L("外观", "Appearance")) { AppearanceTiles() }

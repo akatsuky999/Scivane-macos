@@ -20,7 +20,7 @@
 
 你的 AI 论文阅读智能体。Scivane 以论文为中心，将文献阅读、AI 交互与研究工具整合于一体，让阅读与思考始终围绕原文展开。Agent 不仅能够结合论文上下文进行深入分析，还能自主检索相关文献、获取开源代码并辅助理解，让每一篇论文都成为可以持续探索的独立研究项目。
 
-![Scivane app preview](./pic/readme-app.png)
+![Scivane 界面预览](./pic/readme-app.png)
 
 ---
 
@@ -57,6 +57,8 @@ make app
 ```
 
 看到 `Finished Scivane …` 就成功了，App 在桌面上。
+
+![编译完成后的终端输出示例](./pic/readme-build.png)
 
 ### 3 · 填 API key
 

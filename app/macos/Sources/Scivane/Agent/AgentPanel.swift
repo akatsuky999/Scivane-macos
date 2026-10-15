@@ -102,6 +102,8 @@ struct AgentPanel: View {
   @State private var pasteMonitor = ImagePasteMonitor()
   @FocusState private var composing: Bool
   @State private var dropping = false
+  @State private var composerFootprint: CGFloat = 142
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   /// 0 = grow with content. Stored as a preference so a tuned height survives relaunches.
   @AppStorage("agentComposerHeight") private var composerHeight: Double = 0
@@ -148,18 +150,29 @@ struct AgentPanel: View {
     VStack(spacing: 0) {
       // the librarian has no conversations
       if !isDesk { ConversationBar(model: model) }
-      if session.isEmpty {
-        // Centre when there is room, scroll otherwise; a Spacer can't expand inside a ScrollView, hence
-        // the minHeight.
-        GeometryReader { geo in
-          ScrollView {
-            welcome.padding(.horizontal, 28).frame(minHeight: geo.size.height)
+      ZStack(alignment: .bottom) {
+        if session.isEmpty {
+          GeometryReader { geo in
+            ScrollView {
+              welcome.padding(.horizontal, 28)
+                .frame(minHeight: max(0, geo.size.height - composerFootprint))
+                .padding(.bottom, composerFootprint)
+            }
           }
+        } else {
+          TranscriptPane(session: session).equatable()
+            .environment(\.composerInset, composerFootprint)
         }
-      } else {
-        TranscriptPane(session: session).equatable()
+        composer(session)
+          .background {
+            GeometryReader { geometry in
+              Color.clear.preference(key: ComposerFootprint.self, value: geometry.size.height.rounded())
+            }
+          }
       }
-      composer(session)
+      .onPreferenceChange(ComposerFootprint.self) { height in
+        if height > 0, composerFootprint != height { composerFootprint = height }
+      }
     }
     .background(Palette.paper)
     // loading and the after-turn refresh are AgentUpkeep's: this panel may be off screen
@@ -256,42 +269,28 @@ struct AgentPanel: View {
 
   // MARK: - Composer
   //
-  // Separated from the transcript by a floating card, not a divider: a shadow doesn't cut the
-  // reading flow the way a line does.
+  // The tray overlays the scroll view so the glass can sample the conversation beneath it.
 
   private func composer(_ session: AgentSession) -> some View {
-    VStack(alignment: .leading, spacing: 10) {
+    VStack(alignment: .leading, spacing: 8) {
       contextRow(session)
       if !images.isEmpty { imageStrip }
       TextField(
         placeholder, text: $draft, axis: .vertical
       )
       .textFieldStyle(.plain).lineLimit(1...lineCap)
-      .font(.system(size: 13)).foregroundStyle(Palette.ink)
+      .font(.system(size: 14)).foregroundStyle(Palette.ink)
       .focused($composing).disabled(!canAsk || session.running || session.preparing)
-      .padding(.vertical, 2)
+      .padding(.horizontal, 2).padding(.top, 2)
       .frame(
-        minHeight: composerHeight > 0 ? composerHeight : nil,
+        minHeight: max(26, composerHeight),
         alignment: .topLeading)
       .onSubmit { send(session) }
+      .accessibilityIdentifier("agent-composer-input")
 
       if !model.activeProjectFiles.isEmpty { attachments }
 
-      HStack(spacing: 8) {
-        if !isDesk {
-          attachButton
-        }
-        ComposerStatusBar(
-          model: model, usage: session.usage, context: isDesk ? nil : session.context,
-          locked: session.running || session.preparing,
-          onCompact: { model.compactAgentContext() })
-        Spacer(minLength: 0)
-        if canAsk && hasSomethingToSend && !session.running && !session.preparing {
-          Text(L("⏎ 发送", "⏎ Send")).font(.system(size: 10)).foregroundStyle(Palette.inkFaint)
-            .transition(.opacity)
-        }
-        sendButton(session)
-      }
+      composerFooter(session)
     }
     // Dropped images go with the next question; anything else goes into the project's files/.
     .dropDestination(for: URL.self) { urls, _ in
@@ -299,22 +298,40 @@ struct AgentPanel: View {
       receive(urls)
       return true
     } isTargeted: { dropping = $0 }
-    .padding(14)
-    .background(Palette.panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    .padding(.leading, 14).padding([.top, .trailing, .bottom], 10)
+    .composerSurface(focused: composing, targeted: dropping)
     .overlay(alignment: .top) { resizeGrabber }
-    .overlay(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .strokeBorder(
-          dropping
-            ? Palette.accent
-            : (composing ? Palette.accent.opacity(0.5) : Palette.rule.opacity(0.55)),
-          lineWidth: dropping ? 1.8 : (composing ? 1.2 : 1))
-    )
-    .shadow(color: .black.opacity(composing ? 0.10 : 0.05), radius: composing ? 14 : 9, y: 3)
-    .padding(.horizontal, 16).padding(.bottom, 16).padding(.top, 4)
-    .animation(.easeOut(duration: 0.16), value: composing)
-    .animation(.easeOut(duration: 0.16), value: draft.isEmpty)
-    .animation(.easeOut(duration: 0.14), value: dropping)
+    .padding(.horizontal, 20).padding(.bottom, 16).padding(.top, 4)
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: composing)
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: dropping)
+  }
+
+  private func composerFooter(_ session: AgentSession) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 6) {
+        if !isDesk { attachButton }
+        ComposerStatusBar(model: model, locked: session.running || session.preparing)
+          .frame(maxWidth: 420, alignment: .leading)
+        Spacer(minLength: 0)
+        ViewThatFits(in: .horizontal) {
+          if canAsk && hasSomethingToSend && !session.running && !session.preparing {
+            Text(L("⏎ 发送", "⏎ Send")).font(.system(size: 10.5))
+              .foregroundStyle(Palette.inkFaint).fixedSize()
+          }
+          Color.clear.frame(width: 0, height: 0)
+        }
+        sendButton(session)
+      }
+      if !session.usage.isEmpty {
+        HStack(spacing: 8) {
+          Text(L("本轮", "This turn")).font(.system(size: 9.5))
+            .foregroundStyle(Palette.inkFaint)
+          UsageMeter(usage: session.usage)
+          Spacer(minLength: 0)
+        }
+        .padding(.leading, 2)
+      }
+    }
   }
 
   /// Files already in files/, not a staging area: they were written when dropped, and a pending
@@ -340,17 +357,18 @@ struct AgentPanel: View {
       Button(L("放进项目材料…", "Add to Project Files…")) { model.chooseProjectFiles() }
     } label: {
       Image(systemName: "paperclip")
-        .font(.system(size: 12, weight: .medium))
-        .foregroundStyle(Palette.inkFaint)
-        .frame(width: 22, height: 22)
-        .contentShape(Rectangle())
+        .font(.system(size: 15))
+        .foregroundStyle(Palette.inkSoft)
+        .frame(width: 32, height: 32)
+        .contentShape(Circle())
     }
-    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
     .help(model.activeVision == false
           ? L("这张卡看不到图片；材料可以放进项目", "This card can't see images; files can go into the project")
           : L("图片随这条消息发送；材料放进项目，Markdown 进 notes/（都可以直接拖进来）",
               "Images go with this message; files go into the project, Markdown into notes/ (or drag them in)"))
     .accessibilityLabel(L("添加附件", "Attach"))
+    .accessibilityIdentifier("agent-composer-attach")
   }
 
   /// Images waiting to be sent; the cross shows on hover.
@@ -362,7 +380,7 @@ struct AgentPanel: View {
         }
       }
     }
-    .frame(height: 46)
+    .frame(height: 52)
   }
 
   private func attach(_ incoming: [ComposerImage]) {
@@ -409,14 +427,13 @@ struct AgentPanel: View {
   private var placeholder: String {
     if model.agentProvider.isEmpty { return L("先在设置里配一个模型", "Set up a model in Settings first") }
     switch contextState {
-    case .desk: return L("问问书房里都有什么…", "Ask what's in your library…")
-    case .ready: return L("让它读、跑、画，或者直接提问…", "Have it read, run, plot — or just ask…")
+    case .desk, .ready: return L("描述任务或提出问题", "Describe a task or ask a question")
     case .empty: return L("先备好正文，再开始提问", "Get the text ready before asking")
     }
   }
 
   private func send(_ session: AgentSession) {
-    guard canAsk, !session.running, hasSomethingToSend else { return }
+    guard canAsk, !session.running, !session.preparing, hasSomethingToSend else { return }
     let question = draft
     let attached = images
     draft = ""
@@ -437,7 +454,7 @@ struct AgentPanel: View {
           Self.maxComposerHeight, max(Self.minComposerHeight, base - translation))).rounded()
       },
       onEnded: { dragBaseline = nil },
-      onReset: { withAnimation(.easeOut(duration: 0.18)) { composerHeight = 0 } }
+      onReset: { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { composerHeight = 0 } }
     )
   }
 
@@ -448,12 +465,14 @@ struct AgentPanel: View {
       if session.running { session.cancel() } else { send(session) }
     } label: {
       Image(systemName: session.running ? "stop.fill" : "arrow.up")
-        .font(.system(size: session.running ? 10 : 12, weight: .bold))
-        .foregroundStyle(session.running || live ? Palette.cream : Palette.inkFaint.opacity(0.55))
-        .frame(width: 28, height: 28)
+        .font(.system(size: session.running ? 10 : 14, weight: .semibold))
+        .foregroundStyle(session.running || live ? Palette.paper : Palette.inkFaint)
+        .frame(width: 34, height: 34)
         .background(
-          session.running ? Palette.danger : (live ? Palette.accent : Palette.inkFaint.opacity(0.12)),
+          session.running ? Palette.ink : (live ? Palette.accent : Palette.card),
           in: Circle())
+        .overlay(Circle().strokeBorder(Palette.cardEdge, lineWidth: 1))
+        .shadow(color: live && !session.running ? Palette.accent.opacity(0.18) : .clear, radius: 5, y: 2)
     }
     .buttonStyle(.plain)
     // one cancel is enough; a button that stays live invites repeated clicks
@@ -462,62 +481,38 @@ struct AgentPanel: View {
           ? (session.cancelRequested ? L("正在停下…", "Stopping…") : L("停下这一轮", "Stop this turn"))
           : L("发送（⏎）", "Send (⏎)"))
     .accessibilityLabel(session.running ? L("停止", "Stop") : L("发送", "Send"))
-    .animation(.easeOut(duration: 0.16), value: session.running)
+    .accessibilityIdentifier("agent-composer-send")
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: session.running)
   }
 
   /// The title is truncated at the tail on its own chip; a middle-truncated combined string was
   /// unreadable.
   @ViewBuilder
   private func contextRow(_ session: AgentSession) -> some View {
-    switch contextState {
-    case .ready(let project):
-      HStack(spacing: 7) {
+    HStack(spacing: 8) {
+      switch contextState {
+      case .ready(let project), .empty(let project):
         ContextChip(model: model, project: project, locked: session.running || session.preparing)
-        if let context = project.context {
-          Text(context.sizeLabel)
-            .font(.system(size: 10).monospacedDigit()).foregroundStyle(Palette.inkFaint)
-        }
-        Spacer(minLength: 0)
-        modelChip
-      }
-    case .empty(let project):
-      HStack(spacing: 7) {
-        ContextChip(model: model, project: project, locked: session.running || session.preparing)
-        Text(L("尚无正文", "No text yet")).font(.system(size: 10, weight: .medium))
-          .foregroundStyle(Palette.inkFaint)
-        Spacer(minLength: 0)
-        modelChip
-      }
-    case .desk:
-      HStack(spacing: 7) {
+      case .desk:
         chip(icon: "books.vertical", title: L("书房 · 只见清单", "Library · list only"))
-        Spacer(minLength: 0)
-        modelChip
       }
+      Spacer(minLength: 0)
+      ContextMeter(
+        report: isDesk ? nil : session.context, busy: session.running || session.preparing,
+        onCompact: { model.compactAgentContext() })
     }
-  }
-
-  /// Clicking the model opens Settings to change it.
-  @ViewBuilder
-  private var modelChip: some View {
-    if let provider = model.providers.first(where: { $0.id == model.agentProvider }) {
-      Text(provider.model.isEmpty ? provider.label : provider.model)
-        .font(.system(size: 9.5, design: .monospaced))
-        .foregroundStyle(Palette.inkFaint)
-        .lineLimit(1).truncationMode(.head)
-        .help(L("当前模型：\(provider.label) · \(provider.model)", "Current model: \(provider.label) · \(provider.model)"))
-    }
+    .frame(height: 26)
   }
 
   private func chip(icon: String, title: String) -> some View {
-    HStack(spacing: 5) {
-      Image(systemName: icon).font(.system(size: 9))
+    HStack(spacing: 6) {
+      Image(systemName: icon).font(.system(size: 11))
       Text(title).lineLimit(1).truncationMode(.tail)
     }
-    .font(.system(size: 10)).foregroundStyle(Palette.inkSoft)
-    .padding(.horizontal, 7).padding(.vertical, 3.5)
-    .background(Palette.sunk, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-    .frame(maxWidth: 220, alignment: .leading)
+    .font(.system(size: 11.5)).foregroundStyle(Palette.inkSoft)
+    .padding(.horizontal, 9).frame(height: 24)
+    .composerCapsule()
+    .frame(maxWidth: 360, alignment: .leading)
     .help(title)
   }
 }
@@ -591,29 +586,42 @@ private struct ContextChip: View {
         Button(L("其他文件…", "Other File…")) { model.chooseMarkdownToReplaceContext() }
       }
     } label: {
-      HStack(spacing: 5) {
-        Image(systemName: "doc.text").font(.system(size: 9))
+      HStack(spacing: 6) {
+        Image(systemName: "doc").font(.system(size: 11))
         Text(project.displayTitle).lineLimit(1).truncationMode(.tail)
+        Text(sizeLabel).foregroundStyle(Palette.inkFaint).monospacedDigit().fixedSize()
         Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
       }
-      .font(.system(size: 10)).foregroundStyle(Palette.inkSoft)
-      .padding(.horizontal, 7).padding(.vertical, 3.5)
-      .background(Palette.sunk, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-      .contentShape(Rectangle())
+      .font(.system(size: 11.5)).foregroundStyle(Palette.inkSoft)
+      .padding(.leading, 8).padding(.trailing, 9).frame(height: 24)
+      .composerCapsule()
+      .contentShape(Capsule())
     }
     // A plain button-style menu draws the label as written. The native style keeps only the first
     // image and text, drops the background, and never truncates, so a long title runs over its neighbours.
     .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
-    .frame(maxWidth: 240, alignment: .leading)
-    .fixedSize(horizontal: true, vertical: false)
+    .frame(maxWidth: 360, alignment: .leading)
     .disabled(locked || model.projectBusy)
     .help(help)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(L("论文正文：\(project.displayTitle)", "Paper text: \(project.displayTitle)"))
     .accessibilityIdentifier("context-chip")
+  }
+
+  private var sizeLabel: String {
+    guard let context = project.context, project.hasUsableContext else {
+      return L("· 尚无正文", "· No text")
+    }
+    let tokens = context.tokens
+    let amount = tokens >= 1_000_000 ? String(format: "%.1fM", Double(tokens) / 1_000_000)
+      : (tokens >= 1_000 ? String(format: "%.1fK", Double(tokens) / 1_000) : "\(tokens)")
+    return "· \(amount)"
   }
 
   private var help: String {
     guard let context = project.context, project.hasUsableContext else { return project.displayTitle }
     return "\(project.displayTitle)\n" + L("正文来自：\(context.originLabel)", "Text from: \(context.originLabel)")
+      + "\n" + context.sizeLabel
   }
 }
 
@@ -631,15 +639,16 @@ private struct PendingImage: View {
         Image(systemName: "photo").foregroundStyle(Palette.inkFaint)
       }
     }
-    .frame(width: 56, height: 44)
-    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Palette.ruleSoft))
+    .frame(width: 64, height: 48)
+    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(Palette.ruleSoft))
     .overlay(alignment: .topTrailing) {
       if hovering {
         Button(action: onRemove) {
-          Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+          Image(systemName: "xmark.circle.fill").font(.system(size: 15))
             .symbolRenderingMode(.palette)
             .foregroundStyle(Palette.cream, Palette.ink.opacity(0.7))
+            .frame(width: 18, height: 18)
         }
         .buttonStyle(.plain).padding(2)
         .accessibilityLabel(L("移除这张图", "Remove this image"))
@@ -670,9 +679,8 @@ private struct ResizeGrabber: View {
       .fill(Palette.inkFaint)
       .frame(width: 34, height: 3.5)
       .opacity(isDragging ? 0.7 : (hovering ? 0.42 : 0))
-      .padding(.top, 5)
-      // much larger hit area: a 3.5 pt bar can't be grabbed
-      .frame(maxWidth: .infinity).frame(height: 16)
+      // Keep the hit area above, rather than across, the document and context controls.
+      .frame(width: 72, height: 10)
       .contentShape(Rectangle())
       .onHover { inside in
         hovering = inside

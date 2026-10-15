@@ -1,10 +1,10 @@
 import Foundation
 
-/// How the app names its own version: "0.0.5" and the day it was built. The packaging script stamps
+/// How the app names its own version: "0.1.0" and the day it was built. The packaging script stamps
 /// the build number as a UTC timestamp (yyyyMMddHHmmss); people read a date, while a bug report
 /// needs the exact build, which stays available as `build` (shown in tooltips, selectable).
 enum AppVersion {
-  /// "0.0.5"; nil when running outside a packaged app
+  /// "0.1.0"; nil when running outside a packaged app
   static var short: String? {
     nonEmpty(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
   }
@@ -16,7 +16,7 @@ enum AppVersion {
     return raw
   }
 
-  /// "版本 0.0.5" / "Version 0.0.5", or a development build.
+  /// "版本 0.1.0" / "Version 0.1.0", or a development build.
   static var title: String {
     guard let short else { return L("开发版本", "Development Build") }
     return L("版本 \(short)", "Version \(short)")

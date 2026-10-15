@@ -5,8 +5,8 @@ struct AboutSettings: View {
   static let repository = URL(string: "https://github.com/akatsuky999/Scivane-macos")!
 
   var body: some View {
-    VStack(spacing: 14) {
-      Spacer(minLength: 40)
+    VStack(spacing: 12) {
+      Spacer(minLength: 20)
       ScivaneMark().frame(width: 30, height: 36).padding(18)
         .background(Palette.forest, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .shadow(color: Palette.forest.opacity(0.32), radius: 14, y: 8)
@@ -40,8 +40,8 @@ struct AboutSettings: View {
           .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.rule, lineWidth: 1))
           .help(L("许可证", "License"))
       }
-      .padding(.top, 10)
-      Spacer(minLength: 40)
+      .padding(.top, 6)
+      Spacer(minLength: 20)
     }
     .frame(maxWidth: .infinity)
   }

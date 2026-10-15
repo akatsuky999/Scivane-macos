@@ -50,6 +50,8 @@ make app
 
 When you see `Finished Scivane …`, the app is on your Desktop.
 
+![Example build output](./pic/readme-build.png)
+
 ### 3 · Add an API Key
 
 Open Scivane, press <kbd>⌘</kbd> <kbd>,</kbd>, and go to **Models**. The app comes with three cards: OpenRouter, DeepSeek, and OpenAI. Expand one, paste your API key, click **Save Key** and **Test Connection**, then click the circle on the left of the card to make it the default.

@@ -44,28 +44,37 @@ struct SettingsView: View {
       SettingsNavigation(selection: Binding(get: { page }, set: { chosen = $0 }), backend: backend)
         .frame(width: SettingsMetrics.navigation)
         .padding([.top, .bottom, .leading], SettingsMetrics.inset)
-      ZStack(alignment: .topLeading) {
-        ForEach(SettingsPage.allCases) { item in
-          let shown = item == page
-          ScrollView {
-            content(item)
-              .padding(.top, SettingsMetrics.pageTop)
-              .padding(.leading, SettingsMetrics.pageLeading)
-              .padding(.trailing, SettingsMetrics.pageTrailing)
-              .padding(.bottom, 28)
-              .frame(maxWidth: .infinity, alignment: .topLeading)
+      GeometryReader { viewport in
+        ZStack(alignment: .topLeading) {
+          ForEach(SettingsPage.allCases) { item in
+            let shown = item == page
+            ScrollView {
+              content(item)
+                .frame(
+                  maxWidth: .infinity,
+                  minHeight: item == .about
+                    ? max(0, viewport.size.height - SettingsMetrics.pageTop - 28) : nil,
+                  alignment: .topLeading)
+                .padding(.top, SettingsMetrics.pageTop)
+                .padding(.leading, SettingsMetrics.pageLeading)
+                .padding(.trailing, SettingsMetrics.pageTrailing)
+                .padding(.bottom, 28)
+            }
+            .opacity(shown ? 1 : 0)
+            .allowsHitTesting(shown)
+            // hidden pages leave the key view loop too, or Tab would land in an invisible field
+            .disabled(!shown)
+            .accessibilityHidden(!shown)
           }
-          .opacity(shown ? 1 : 0)
-          .allowsHitTesting(shown)
-          // hidden pages leave the key view loop too, or Tab would land in an invisible field
-          .disabled(!shown)
-          .accessibilityHidden(!shown)
         }
       }
     }
-    .frame(width: SettingsMetrics.window.width, height: SettingsMetrics.window.height)
-    .background(Palette.paper)
-    .background(TransparentTitleBar())
+    .frame(
+      minWidth: SettingsMetrics.minimumWindow.width, idealWidth: SettingsMetrics.window.width,
+      maxWidth: .infinity,
+      minHeight: SettingsMetrics.minimumWindow.height, idealHeight: SettingsMetrics.window.height,
+      maxHeight: .infinity)
+    .background(Palette.paper.ignoresSafeArea())
     .ignoresSafeArea()
     .tint(Palette.accent)
   }
@@ -89,10 +98,11 @@ private struct SettingsNavigation: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
-      // clears the traffic lights
-      Color.clear.frame(height: 30)
+      Color.clear.frame(height: SettingsMetrics.navigationHeader)
+        .background(SettingsWindowChrome())
+        .accessibilityHidden(true)
       HStack(spacing: 10) {
-        ScivaneMark().frame(width: 12, height: 15).padding(7)
+        ScivaneMark().frame(width: 14, height: 17).frame(width: 30, height: 30)
           .background(Palette.forest, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
           .shadow(color: .black.opacity(0.14), radius: 2, y: 1)
         VStack(alignment: .leading, spacing: 1) {
@@ -100,7 +110,7 @@ private struct SettingsNavigation: View {
           Text(L("设置", "Settings")).font(.system(size: 11)).foregroundStyle(Palette.inkFaint)
         }
       }
-      .padding(.horizontal, 6).padding(.top, 8).padding(.bottom, 18)
+      .padding(.horizontal, 6).padding(.top, 12).padding(.bottom, 18)
       .accessibilityElement(children: .combine)
 
       VStack(spacing: 2) {
@@ -122,6 +132,7 @@ private struct SettingsNavigation: View {
     .padding(.horizontal, 10).padding(.bottom, 10)
     .frame(maxHeight: .infinity, alignment: .top)
     .glassSurface(radius: 16)
+    .accessibilityIdentifier("settings-navigation")
   }
 
   private func row(_ item: SettingsPage) -> some View {

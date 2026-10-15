@@ -1,30 +1,25 @@
 import SwiftUI
 
-/// The line under the composer: card, reasoning level, context occupancy, this turn's usage.
-/// These drive a turn's time and cost and are decided while looking at the composer, so they live
-/// here rather than in Settings. Each item is in its shortest form; details are in the help
-/// tooltips and the context breakdown.
+/// Two independent menus in one capsule: the conversation's model and its reasoning budget.
 struct ComposerStatusBar: View {
   @ObservedObject var model: AppModel
-  let usage: AgentUsage
-  /// nil for the librarian, which draws nothing
-  var context: ContextReport? = nil
   /// locked while running: a change would only apply next turn but look immediate
   let locked: Bool
-  /// only for project conversations
-  var onCompact: () -> Void = {}
 
   private var current: AppModel.ProviderSummary? {
     model.providers.first { $0.id == model.activeProviderID }
   }
 
   var body: some View {
-    HStack(spacing: 10) {
+    HStack(spacing: 0) {
       picker
-      if current != nil { reasoning }
-      ContextMeter(report: context, busy: locked, onCompact: onCompact)
-      UsageMeter(usage: usage)
+      if current != nil {
+        Rectangle().fill(Palette.ruleSoft).frame(width: 1, height: 14)
+        reasoning.fixedSize()
+      }
     }
+    .frame(height: 30)
+    .composerCapsule()
   }
 
   // MARK: - Card
@@ -36,40 +31,37 @@ struct ComposerStatusBar: View {
           model.useProvider(entry.id)
         } label: {
           // Nickname only: model ids are long and unreadable in a menu.
-          Label(
-            AppModel.hasKey(entry)
-              ? entry.displayName : L("\(entry.displayName) · 未配置 key", "\(entry.displayName) · no key"),
-            systemImage: entry.id == model.activeProviderID ? "checkmark" : "")
+          Label(entry.displayName,
+            systemImage: entry.id == model.activeProviderID ? "checkmark"
+              : (AppModel.hasKey(entry) ? "" : "exclamationmark.triangle"))
         }
       }
       if model.providers.isEmpty {
         Text(L("没有模型卡", "No model cards"))
       }
     } label: {
-      HStack(spacing: 4) {
-        // macOS Menu labels take only the first image and the first Text and ignore custom colours, so
-        // the warning goes into the icon and the title itself.
+      HStack(spacing: 6) {
         Image(systemName: usable ? "cpu" : "exclamationmark.triangle.fill")
-          .font(.system(size: 9.5))
-        Text(title).font(.system(size: 10)).lineLimit(1)
-        Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
+          .font(.system(size: 12))
+        Text(title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
       }
       .foregroundStyle(usable ? Palette.inkSoft : Palette.danger)
-      .padding(.horizontal, 6).padding(.vertical, 2.5)
-      .background(
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-          .fill((usable ? Palette.ink : Palette.danger).opacity(0.05)))
+      .padding(.leading, 11).padding(.trailing, 10)
+      .frame(height: 30)
+      .contentShape(Capsule())
     }
-    .menuStyle(.borderlessButton)
+    .menuStyle(.button).buttonStyle(.plain)
     .menuIndicator(.hidden)
-    .fixedSize()
     .disabled(locked || model.providers.isEmpty)
     .help(helpText)
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(L("模型：\(title)", "Model: \(title)"))
+    .accessibilityIdentifier("agent-composer-model")
   }
 
   private var title: String {
     guard let current else { return L("未配置模型", "No model") }
-    return usable ? current.displayName : L("\(current.displayName) · 未配置 key", "\(current.displayName) · no key")
+    return current.displayName
   }
 
   private var usable: Bool {
@@ -105,22 +97,24 @@ struct ComposerStatusBar: View {
         }
       }
     } label: {
-      HStack(spacing: 4) {
-        Image(systemName: "brain").font(.system(size: 9.5))
-        Text(reasoningLabel).font(.system(size: 10))
-        Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
+      HStack(spacing: 5) {
+        Text(reasoningLabel).font(.system(size: 12))
+        Image(systemName: "chevron.down").font(.system(size: 7, weight: .medium))
       }
       .foregroundStyle(Palette.inkSoft)
-      .padding(.horizontal, 6).padding(.vertical, 2.5)
-      .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
-        .fill(Palette.ink.opacity(0.05)))
+      .padding(.leading, 9).padding(.trailing, 11)
+      .frame(height: 30)
+      .contentShape(Capsule())
     }
-    .menuStyle(.borderlessButton)
+    .menuStyle(.button).buttonStyle(.plain)
     .menuIndicator(.hidden)
     .fixedSize()
     .disabled(locked)
     .help(L("推理预算 · 当前「\(reasoningLabel)」：\(reasoningDetail)",
             "Reasoning budget · currently “\(reasoningLabel)”: \(reasoningDetail)"))
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel(L("推理预算：\(reasoningLabel)", "Reasoning budget: \(reasoningLabel)"))
+    .accessibilityIdentifier("agent-composer-reasoning")
   }
 
   /// just the level; the brain icon says what it is

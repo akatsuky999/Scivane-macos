@@ -129,8 +129,8 @@ def _describe_binary(target: Path, head: bytes, relative: str) -> ToolOutcome:
         pixels = f"，{shape[0]}×{shape[1]} 像素" if shape else ""
         return ToolOutcome(
             f"{relative} 是一张 {media.split('/')[1].upper()} 图片（{size} 字节{pixels}）。"
-            "read 只读文本，看不到图里画了什么。要让用户看到它，在 notes/ 的笔记里按相对笔记的路径"
-            "链接它（如 `../workbench/outputs/fig.png`），正文栏会显示；要核对它的数据，用 python 读。",
+            "read 只读文本，看不到图里画了什么。用户明确要求笔记时，在 notes/ 的笔记里按相对笔记的路径"
+            "链接它（如 `../workbench/outputs/fig.png`），正文栏会显示；否则在回复里给出图片路径，不自动建笔记。要核对数据，用 python 读。",
             detail={"binary": media, "bytes": size},
         )
     raise ToolError(
@@ -532,12 +532,11 @@ def file_tools() -> tuple[ToolDef, ...]:
                 "第一次用 write 新建，之后每次用 `append=true` 接上去 —— **按长度切，不按论文的章节切**，一节很长就拆成几次。"
                 "追加不会自动换行，段与段之间的空行写在 content 开头。原因：一次调用的参数要整段生成完才会发出来，"
                 "有的网关在这段时间里收不到任何输出，等两分钟左右就会切断，已经生成的全部作废。\n"
-                "- 用户要存下来的笔记、摘要、译文写进 `notes/`（正文栏会列出来）；脚本、草稿与中间产物写进 `workbench/`。\n"
-                "- `md/context.md` 是论文正文：不要用 write 覆盖或追加它，局部纠错用 edit；要存下来的译文、改写写进 notes/。"
+                "- 只有用户明确要求保存为文件、写入笔记或修改已有笔记时，才把笔记、摘要、译文写进 `notes/`（正文栏会列出来）；脚本、临时草稿与中间产物写进 `workbench/`。\n"
+                "- `md/context.md` 是论文正文：不要用 write 覆盖或追加它，局部纠错用 edit；用户明确要存下来的译文、改写写进 notes/。"
                 "pdf/ 与 .lumen/ 不可写。\n"
-                "- **用户要的是回答时不用它**：问题，或翻译、总结、解释一段，答案写在回复里 —— 用户在对话里等着看，"
-                "没要的文件只会让用户去找。用户要存下来（笔记、文件）、内容长到一次回复放不下（整篇、好几节）、"
-                "或对话里显示不了（图）时才写。"
+                "- **用户要的是回答时不用它**：翻译、总结、解释、代码对照的答案写在回复里。篇幅长、任务复杂、含图、你自己的计划或工具结果，"
+                "都不代表用户同意保存笔记；没有用户明确要求就直接在聊天中交付，不用别的工具绕路写成文件。"
             ),
             parameters={
                 "type": "object",
@@ -565,6 +564,7 @@ def file_tools() -> tuple[ToolDef, ...]:
                 "- 多处要改就在同一轮里发多个 edit，不要一个一个等。\n"
                 "- 改 `md/context.md`（论文正文）只做局部、确定的纠错，并且攒在一起改：正文一变，"
                 "下一问整篇论文都要重新处理、用不上缓存。\n"
+                "- 修改 notes/ 的笔记也要有用户明确要求；不要为了回答而自行补写笔记。\n"
                 "- 不要在 bash 里 sed —— 那绕过了边界检查，界面上也看不到改了什么。"
             ),
             parameters={
