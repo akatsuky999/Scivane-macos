@@ -7,6 +7,9 @@ struct ContextMeter: View {
   let report: ContextReport?
   /// no manual compaction while busy: one writer per conversation
   var busy = false
+  /// The composer keeps exact numbers in the tooltip and breakdown, leaving only the ring inline.
+  var compact = false
+  var usage = AgentUsage()
   var onCompact: () -> Void = {}
   @State private var showing = false
   @State private var hovering = false
@@ -17,8 +20,10 @@ struct ContextMeter: View {
         HStack(spacing: 6) {
           if let fraction = report.fraction {
             ContextRing(fraction: fraction, tint: Self.level(of: report).ring).frame(width: 14, height: 14)
-            Text("\(report.measured ? "" : "≈")\(Int((fraction * 100).rounded()))%")
-              .font(.system(size: 11)).monospacedDigit()
+            if !compact {
+              Text("\(report.measured ? "" : "≈")\(Int((fraction * 100).rounded()))%")
+                .font(.system(size: 11)).monospacedDigit()
+            }
           } else {
             Image(systemName: "square.stack.3d.up").font(.system(size: 11))
             Text("≈" + UsageMeter.compact(report.used))
@@ -26,18 +31,20 @@ struct ContextMeter: View {
           }
         }
         .foregroundStyle(Self.level(of: report).text)
-        .padding(.leading, 7).padding(.trailing, 9)
-        .frame(height: 24)
-        .background(Capsule().fill(hovering ? Palette.ink.opacity(0.045) : .clear))
-        .contentShape(Capsule())
+        .padding(.horizontal, compact ? 6 : 8)
+        .frame(height: compact ? 28 : 24)
+        .background(RoundedRectangle(cornerRadius: 8).fill(hovering ? Palette.ink.opacity(0.045) : .clear))
+        .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
       .onHover { hovering = $0 }
       .fixedSize()
       .help(Self.summary(report))
       .accessibilityLabel(Self.summary(report))
+      .accessibilityIdentifier("agent-composer-context")
       .popover(isPresented: $showing, arrowEdge: .top) {
-        ContextBreakdown(report: report, busy: busy, onCompact: { showing = false; onCompact() })
+        ContextBreakdown(report: report, busy: busy, usage: usage,
+          onCompact: { showing = false; onCompact() })
       }
       .animation(.easeOut(duration: 0.25), value: report.used)
     }
@@ -102,6 +109,7 @@ private struct ContextRing: View {
 struct ContextBreakdown: View {
   let report: ContextReport
   var busy = false
+  var usage = AgentUsage()
   var onCompact: () -> Void = {}
 
   struct Row: Identifiable {
@@ -197,6 +205,15 @@ struct ContextBreakdown: View {
                 .frame(width: 38, alignment: .trailing)
             }
           }
+        }
+      }
+
+      if !usage.isEmpty {
+        Divider()
+        HStack(spacing: 8) {
+          Text(L("本轮", "This turn")).font(.system(size: 10)).foregroundStyle(Palette.inkFaint)
+          Spacer(minLength: 0)
+          UsageMeter(usage: usage)
         }
       }
 

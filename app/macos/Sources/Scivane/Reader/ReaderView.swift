@@ -1,13 +1,13 @@
 import SwiftUI
 
-/// Reading workspace. No pane headers: identity, layout and mode live in the single toolbar, and the
-/// page number floats over the PDF.
+/// Reading workspace. No pane headers: identity, layout, mode and the right-hand pane's document or
+/// chat live in the toolbar island, and the page number floats over the PDF.
 struct ReaderView: View {
   @ObservedObject var model: AppModel
+  /// Where the divider was moved to, kept across switches between single and dual mode; the toolbar
+  /// lines its zones up with it.
+  @ObservedObject var split: SplitPosition
   @FocusState private var searchFocused: Bool
-  /// Where the divider was moved to, as the split's share; kept across switches between single and
-  /// dual mode.
-  @State private var movedFraction: CGFloat?
   @Environment(\.displayScale) private var displayScale
   /// The PDF and the text's WebView are created the first time they are shown, then kept.
   @State private var sourceMounted = false
@@ -31,7 +31,7 @@ struct ReaderView: View {
       }
       GeometryReader { area in
         ReadingSplit(
-          dual: model.dualPane, fraction: movedFraction ?? ReadingSplit.initialFraction, scale: displayScale
+          dual: model.dualPane, fraction: split.current, scale: displayScale
         ) {
           sourcePane
             .opacity(sourceShown ? 1 : 0)
@@ -39,8 +39,7 @@ struct ReaderView: View {
             .accessibilityHidden(!sourceShown)
             .zIndex(sourceShown ? 1 : 0)
           ReadingDivider(
-            fraction: Binding(
-              get: { movedFraction ?? ReadingSplit.initialFraction }, set: { movedFraction = $0 }),
+            fraction: Binding(get: { split.current }, set: { split.fraction = $0 }),
             width: area.size.width, scale: displayScale
           )
           .opacity(model.dualPane ? 1 : 0)
@@ -136,19 +135,7 @@ struct ReaderView: View {
         emptyPane(.text)
       }
     }
-    .overlay(alignment: .topTrailing) {
-      if let project = model.activeProject {
-        TextDocumentMenu(model: model, project: project)
-          .padding(.top, 10)
-          .padding(.trailing, Self.scrollerClearance)
-      }
-    }
   }
-
-  /// Clear of the text's vertical scroller: overlay scrollers appear under the same edge while
-  /// scrolling, and legacy ones are always there.
-  private static let scrollerClearance =
-    NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) + 8
 
   // MARK: - Empty panes
 

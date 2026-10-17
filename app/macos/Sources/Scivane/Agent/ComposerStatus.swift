@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Two independent menus in one capsule: the conversation's model and its reasoning budget.
+/// Quiet inline labels; model and reasoning remain independently selectable.
 struct ComposerStatusBar: View {
   @ObservedObject var model: AppModel
   /// locked while running: a change would only apply next turn but look immediate
@@ -14,12 +14,11 @@ struct ComposerStatusBar: View {
     HStack(spacing: 0) {
       picker
       if current != nil {
-        Rectangle().fill(Palette.ruleSoft).frame(width: 1, height: 14)
+        Text("·").font(.system(size: 12)).foregroundStyle(Palette.inkFaint)
         reasoning.fixedSize()
       }
     }
-    .frame(height: 30)
-    .composerCapsule()
+    .frame(height: 28)
   }
 
   // MARK: - Card
@@ -41,14 +40,15 @@ struct ComposerStatusBar: View {
       }
     } label: {
       HStack(spacing: 6) {
-        Image(systemName: usable ? "cpu" : "exclamationmark.triangle.fill")
-          .font(.system(size: 12))
+        if !usable {
+          Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11))
+        }
         Text(title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
       }
       .foregroundStyle(usable ? Palette.inkSoft : Palette.danger)
-      .padding(.leading, 11).padding(.trailing, 10)
-      .frame(height: 30)
-      .contentShape(Capsule())
+      .padding(.horizontal, 5)
+      .frame(height: 28)
+      .composerControl()
     }
     .menuStyle(.button).buttonStyle(.plain)
     .menuIndicator(.hidden)
@@ -101,10 +101,10 @@ struct ComposerStatusBar: View {
         Text(reasoningLabel).font(.system(size: 12))
         Image(systemName: "chevron.down").font(.system(size: 7, weight: .medium))
       }
-      .foregroundStyle(Palette.inkSoft)
-      .padding(.leading, 9).padding(.trailing, 11)
-      .frame(height: 30)
-      .contentShape(Capsule())
+      .foregroundStyle(Palette.inkFaint)
+      .padding(.leading, 5).padding(.trailing, 7)
+      .frame(height: 28)
+      .composerControl()
     }
     .menuStyle(.button).buttonStyle(.plain)
     .menuIndicator(.hidden)
@@ -117,7 +117,6 @@ struct ComposerStatusBar: View {
     .accessibilityIdentifier("agent-composer-reasoning")
   }
 
-  /// just the level; the brain icon says what it is
   private var reasoningLabel: String {
     let value = current?.reasoning ?? AppModel.ProviderDefaults.reasoning
     return AppModel.reasoningLevels.first { $0.value == value }?.label ?? value

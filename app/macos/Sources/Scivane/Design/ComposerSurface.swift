@@ -6,7 +6,7 @@ private struct ComposerSurface: ViewModifier {
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   @Environment(\.colorScheme) private var colorScheme
 
-  private let shape = RoundedRectangle(cornerRadius: 22, style: .continuous)
+  private let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
   private let edge = Color(light: .white.opacity(0.85), dark: .white.opacity(0.10))
   private let highlight = Color(light: .white.opacity(0.9), dark: .white.opacity(0.06))
 

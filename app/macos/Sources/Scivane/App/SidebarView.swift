@@ -16,7 +16,7 @@ enum SidebarMetrics {
   static var collapsedWidth: CGFloat { inset + rail + inset }
   /// the fold button at the top bar's right; the toolbar owns unfolding
   static let foldButton = CGSize(width: 28, height: 26)
-  static let unfoldButton = CGSize(width: 24, height: 26)
+  static let unfoldButton = CGSize(width: toolbarControl, height: toolbarControl)
   /// top bar's side padding, where the fold button sits
   static let topBarPadding: CGFloat = 8
   static let trafficLightInset: CGFloat = 14
@@ -26,8 +26,15 @@ enum SidebarMetrics {
   static var collapsedSurfaceWidth: CGFloat { collapsedWidth + crownOverflow }
   static let logo: CGFloat = 36
   static let logoMark = CGSize(width: 18, height: 22)
-  static let toolbarHeight: CGFloat = 46
-  static let toolbarInset: CGFloat = 16
+  /// The toolbar is an island of its own beside the sidebar's, as tall as the top bar so its controls
+  /// line up with the traffic lights. The band holds it with its margins; the panes start below.
+  static var toolbar: CGFloat { topBar }
+  static var toolbarBand: CGFloat { inset + toolbar + inset }
+  /// tighter than the sidebar's: a bar, not a panel
+  static let toolbarRadius: CGFloat = 12
+  /// island edge to its controls, the border included; inner corners are the radius less this
+  static let toolbarPadding: CGFloat = 4
+  static var toolbarControl: CGFloat { toolbar - toolbarPadding * 2 }
   static let tile = CGSize(width: 36, height: 44)
   static let tileGap: CGFloat = 8
   static let row: CGFloat = 28

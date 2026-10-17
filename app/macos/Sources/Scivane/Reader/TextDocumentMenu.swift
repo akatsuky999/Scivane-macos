@@ -2,35 +2,36 @@ import SwiftUI
 
 /// What the text pane shows inside a project: the paper text, or a Markdown document from notes/,
 /// imported by the user or written by the agent. Showing a note never changes what the model reads;
-/// that takes the text chip in the chat. Dim until hovered, like the page number over the PDF.
+/// that takes the text chip in the chat. Sits in the toolbar island, over the text pane.
 struct TextDocumentMenu: View {
   @ObservedObject var model: AppModel
   let project: Project
-  @State private var hovering = false
   @State private var open = false
 
   private var current: String? { model.projectDocument[project.id] }
+  private var noteCount: Int { model.projectNotes[project.id]?.count ?? 0 }
 
   var body: some View {
     Button { open.toggle() } label: {
-      HStack(spacing: 5) {
-        Image(systemName: current == nil ? "doc.text" : "doc.plaintext").font(.system(size: 9.5))
-        Text(title).lineLimit(1).truncationMode(.middle)
-        Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
+      HStack(spacing: 6) {
+        Image(systemName: current == nil ? "doc.text" : "doc.plaintext").font(.system(size: 11))
+          .foregroundStyle(Palette.inkSoft)
+        Text(title)
+          .font(.system(size: 12.5, weight: .medium)).foregroundStyle(Palette.ink)
+          .lineLimit(1).truncationMode(.middle)
+        if noteCount > 0 {
+          Text(L("· \(noteCount) 份笔记", "· " + plural(noteCount, "note", "notes")))
+            .font(.system(size: 11)).foregroundStyle(Palette.inkFaint).lineLimit(1)
+        }
+        Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .semibold))
+          .foregroundStyle(Palette.inkFaint)
       }
-      .font(.system(size: 11)).foregroundStyle(Palette.inkSoft)
-      .padding(.horizontal, 9).padding(.vertical, 4.5)
-      // the material is what keeps the label legible over text
-      .background(.regularMaterial, in: Capsule())
-      .overlay(Capsule().strokeBorder(Palette.rule.opacity(hovering || open ? 1 : 0.5)))
-      .contentShape(Capsule())
+      .padding(.horizontal, 9)
+      .frame(height: SidebarMetrics.toolbarControl)
+      .frame(maxWidth: 260, alignment: .leading)
     }
-    .buttonStyle(.plain)
-    .frame(maxWidth: 260, alignment: .trailing)
-    .fixedSize(horizontal: true, vertical: false)
-    .opacity(hovering || open ? 1 : 0.72)
-    .onHover { hovering = $0 }
-    .animation(.easeOut(duration: 0.15), value: hovering)
+    .buttonStyle(ToolbarButtonStyle())
+    .fixedSize(horizontal: false, vertical: true)
     .help(L("正文栏显示的文档", "Document shown in the text pane"))
     .accessibilityIdentifier("text-document-menu")
     .popover(isPresented: $open, arrowEdge: .bottom) {

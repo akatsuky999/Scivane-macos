@@ -147,6 +147,7 @@ final class AppModel: ObservableObject {
   /// headings of the document in the text pane; reported by MarkdownWebView
   let outline = DocumentOutline()
   let sidebar = SidebarState()
+  let split = SplitPosition()
 
   /// Show the text and scroll to one of its headings. A renderer that exists scrolls now; one about
   /// to be created (the text pane wasn't showing) scrolls once it has drawn the document.

@@ -64,6 +64,16 @@ struct ReadingSplit: Layout {
   static let initialFraction: CGFloat = 0.5
 }
 
+/// Where the divider between the panes was moved to, shared by the reading area and the toolbar, whose
+/// second zone starts right above it. An object of its own: a drag changes it on every frame, and only
+/// those two views watch it.
+final class SplitPosition: ObservableObject {
+  /// the source pane's share; nil until the divider is first moved
+  @Published var fraction: CGFloat?
+
+  var current: CGFloat { fraction ?? ReadingSplit.initialFraction }
+}
+
 extension Notification.Name {
   /// Around a drag of the divider between the panes. Like a window's live resize, it changes the
   /// panes' width on every frame, and views that are slow to re-lay out wait for the end.

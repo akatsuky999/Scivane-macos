@@ -9,7 +9,6 @@ struct ContentView: View {
   @State private var documentQuery = ""
   @State private var creatingProject = false
   @State private var newProjectTitle = ""
-  @State private var showReadingOptions = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
@@ -19,10 +18,9 @@ struct ContentView: View {
         ? SidebarMetrics.collapsedWidth : SidebarMetrics.width)
         .allowsHitTesting(false).accessibilityHidden(true)
       VStack(spacing: 0) {
-        header
-        Hairline()
+        ToolbarIsland(model: model, leading: toolbarLeading)
         ZStack {
-          ReaderView(model: model)
+          ReaderView(model: model, split: model.split)
           if isTargeted { DropHighlight() }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
       }.background(Palette.paper)
@@ -135,127 +133,13 @@ struct ContentView: View {
 
   // MARK: - Toolbar
   //
-  // One toolbar for back, title, pane, layout and more; the page number floats over the PDF.
-  // One-off actions such as Start OCR live in the empty text pane and the ... menu.
+  // The toolbar is an island of its own (ToolbarIsland); the page number floats over the PDF.
+  // One-off actions such as Start OCR live in the empty text pane and the More menu.
 
-  private var header: some View {
-    HStack(spacing: 12) {
-      if !sidebarVisible {
-        Button { sidebarVisible = true } label: {
-          Image(systemName: "sidebar.left")
-            .frame(width: SidebarMetrics.unfoldButton.width, height: SidebarMetrics.unfoldButton.height)
-        }
-        .help(L("展开侧栏（⌘B）", "Expand Sidebar (⌘B)"))
-        .accessibilityLabel(L("展开侧栏", "Expand Sidebar"))
-        .accessibilityIdentifier("sidebar-expand")
-      }
-      // A way back out of a project, without which the librarian could never be reached again.
-      if model.activeProject != nil {
-        Button { model.leaveProject() } label: { Image(systemName: "chevron.backward") }
-          .help(L("退出项目 · 回到全部项目", "Leave Project · Back to All Projects"))
-          .accessibilityLabel(L("退出项目", "Leave Project"))
-          .accessibilityIdentifier("leave-project")
-      }
-
-      Text(anchorTitle)
-        .font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.ink)
-        .lineLimit(1).truncationMode(.middle)
-        .help(anchorSubtitle)
-
-      Spacer(minLength: 16)
-
-      // no project yet for this document: show the main action
-      Group {
-        if let source = model.readingSource, model.canBuildProject(source) {
-          Button { Task { await model.buildProject(from: source) } } label: {
-            Label(L("构建项目", "Build Project"), systemImage: "square.stack.3d.up.fill")
-          }
-          .buttonStyle(StudioButtonStyle(primary: true)).disabled(model.projectBusy)
-          .help(L("复制原稿建立项目，自动识别并长期保存",
-                  "Copy the original into a project that's recognized and kept"))
-        }
-
-        SegmentedTabs(items: paneTabs, selection: $model.paneSelection)
-
-        // Single/dual layout stays on the toolbar, as a segmented control so both states are visible.
-        SegmentedTabs(items: layoutTabs, selection: layoutSelection, iconOnly: true)
-          .accessibilityIdentifier("toggle-dual-pane")
-      }
-
-      Menu {
-        if let source = model.readingSource, !source.isMarkdown, !source.status.isRunning,
-          source.status != .queued
-        {
-          Button(hasText(source) ? L("重新识别…", "Recognize Again…") : L("识别原稿…", "Recognize Original…")) {
-            model.requestRecognition(source)
-          }
-          Divider()
-        }
-        // Not disabled without a text pane: the dialog also sets the conversation text size.
-        Button(L("字号与间距…", "Text Size & Spacing…")) { showReadingOptions = true }
-        Toggle(L("原稿缩略图", "Page Thumbnails"), isOn: $model.showThumbnails)
-          .disabled(model.readingSource?.isPDF != true)
-        if model.readingDocument?.isMarkdown == true, model.readingSource?.hasResult == true {
-          Button(L("改用原稿的 OCR 结果", "Use the Original's OCR Result Instead")) { model.useOCRText() }
-        }
-        Divider()
-        Button(L("导出 Markdown…", "Export Markdown…")) {
-          if let job = model.readingDocument { model.exportOne(job) }
-        }
-          .disabled(model.readingDocument == nil)
-        Button(L("复制 Markdown", "Copy Markdown")) { model.copyMarkdown() }
-          .disabled(model.readingDocument == nil)
-      } label: {
-        Image(systemName: "ellipsis")
-      }
-      .menuStyle(.borderlessButton).fixedSize().help(L("更多", "More"))
-      .accessibilityLabel(L("更多选项", "More Options"))
-      .popover(isPresented: $showReadingOptions) { ReadingOptions() }
-
-      Button { model.importPanel() } label: { Image(systemName: "plus") }
-        .help(L("导入文档", "Import Document")).accessibilityLabel(L("导入文档", "Import Document"))
-    }
-    .buttonStyle(ToolButtonStyle()).foregroundStyle(Palette.inkSoft)
-    // the traffic lights live in the sidebar's island, which never goes away
-    .padding(.horizontal, SidebarMetrics.toolbarInset)
-    .padding(.leading, sidebarVisible
-      ? (sidebarOverlaysContent ? SidebarMetrics.panel : 0) : SidebarMetrics.crownOverflow)
-    .frame(height: SidebarMetrics.toolbarHeight)
+  /// Where the island starts: past the sidebar's island when it lies over the reading area, flush when
+  /// it pushes the reading area aside, past the rail's crown when folded. The traffic lights stay in
+  /// the sidebar's island, which never goes away.
+  private var toolbarLeading: CGFloat {
+    sidebarVisible ? (sidebarOverlaysContent ? SidebarMetrics.panel : 0) : SidebarMetrics.crownOverflow
   }
-
-  /// Recognised already, in this session or as its project's paper text.
-  private func hasText(_ source: DocumentJob) -> Bool {
-    source.hasResult || model.jobProjects[source.id].flatMap { id in
-      model.projects.first { $0.id == id }?.hasUsableContext } == true
-  }
-
-  /// The project name, not the on-disk file name (every source copy is called source.pdf).
-  private var anchorTitle: String {
-    if let project = model.activeProject { return project.title }
-    if let job = model.selected { return job.title }
-    return "Scivane"
-  }
-
-  private var anchorSubtitle: String {
-    model.activeProject?.sourceName ?? model.selected?.url.path ?? ""
-  }
-
-  private var layoutTabs: [SegmentedTabs.Item] {
-    [.init(id: "single", label: L("单栏", "Single Pane"), symbol: "rectangle"),
-     .init(id: "dual", label: L("双栏对照 · 原稿在左", "Side by Side · Original on the Left"),
-           symbol: "rectangle.split.2x1")]
-  }
-
-  private var layoutSelection: Binding<String> {
-    Binding(get: { model.dualPane ? "dual" : "single" },
-            set: { model.dualPane = $0 == "dual" })
-  }
-
-  private var paneTabs: [SegmentedTabs.Item] {
-    let text = SegmentedTabs.Item(id: "text", label: L("正文", "Text"), symbol: "text.alignleft")
-    let chat = SegmentedTabs.Item(id: "chat", label: "Agent", symbol: "sparkles")
-    if model.dualPane { return [text, chat] }
-    return [.init(id: "source", label: L("原稿", "Original"), symbol: "doc"), text, chat]
-  }
-
 }

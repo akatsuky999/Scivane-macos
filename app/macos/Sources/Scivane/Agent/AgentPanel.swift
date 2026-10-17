@@ -148,8 +148,7 @@ struct AgentPanel: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      // the librarian has no conversations
-      if !isDesk { ConversationBar(model: model) }
+      // the conversations are switched from the toolbar island (ConversationSwitcher)
       ZStack(alignment: .bottom) {
         if session.isEmpty {
           GeometryReader { geo in
@@ -273,10 +272,10 @@ struct AgentPanel: View {
 
   private func composer(_ session: AgentSession) -> some View {
     VStack(alignment: .leading, spacing: 8) {
-      contextRow(session)
       if !images.isEmpty { imageStrip }
       TextField(
-        placeholder, text: $draft, axis: .vertical
+        placeholder, text: $draft,
+        prompt: Text(placeholder).foregroundColor(Palette.inkFaint), axis: .vertical
       )
       .textFieldStyle(.plain).lineLimit(1...lineCap)
       .font(.system(size: 14)).foregroundStyle(Palette.ink)
@@ -298,7 +297,7 @@ struct AgentPanel: View {
       receive(urls)
       return true
     } isTargeted: { dropping = $0 }
-    .padding(.leading, 14).padding([.top, .trailing, .bottom], 10)
+    .padding(.leading, 16).padding(.top, 12).padding([.trailing, .bottom], 10)
     .composerSurface(focused: composing, targeted: dropping)
     .overlay(alignment: .top) { resizeGrabber }
     .padding(.horizontal, 20).padding(.bottom, 16).padding(.top, 4)
@@ -307,30 +306,19 @@ struct AgentPanel: View {
   }
 
   private func composerFooter(_ session: AgentSession) -> some View {
-    VStack(alignment: .leading, spacing: 6) {
-      HStack(spacing: 6) {
+    ComposerControlsLayout {
+      HStack(spacing: 2) {
         if !isDesk { attachButton }
-        ComposerStatusBar(model: model, locked: session.running || session.preparing)
-          .frame(maxWidth: 420, alignment: .leading)
+        paperReference(session)
         Spacer(minLength: 0)
-        ViewThatFits(in: .horizontal) {
-          if canAsk && hasSomethingToSend && !session.running && !session.preparing {
-            Text(L("⏎ 发送", "⏎ Send")).font(.system(size: 10.5))
-              .foregroundStyle(Palette.inkFaint).fixedSize()
-          }
-          Color.clear.frame(width: 0, height: 0)
-        }
-        sendButton(session)
       }
-      if !session.usage.isEmpty {
-        HStack(spacing: 8) {
-          Text(L("本轮", "This turn")).font(.system(size: 9.5))
-            .foregroundStyle(Palette.inkFaint)
-          UsageMeter(usage: session.usage)
-          Spacer(minLength: 0)
-        }
-        .padding(.leading, 2)
+      HStack(spacing: 2) {
+        ContextMeter(
+          report: isDesk ? nil : session.context, busy: session.running || session.preparing,
+          compact: true, usage: session.usage, onCompact: { model.compactAgentContext() })
+        ComposerStatusBar(model: model, locked: session.running || session.preparing)
       }
+      sendButton(session)
     }
   }
 
@@ -356,11 +344,11 @@ struct AgentPanel: View {
         .disabled(model.activeVision == false)
       Button(L("放进项目材料…", "Add to Project Files…")) { model.chooseProjectFiles() }
     } label: {
-      Image(systemName: "paperclip")
+      Image(systemName: "plus")
         .font(.system(size: 15))
         .foregroundStyle(Palette.inkSoft)
-        .frame(width: 32, height: 32)
-        .contentShape(Circle())
+        .frame(width: 28, height: 28)
+        .composerControl()
     }
     .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
     .help(model.activeVision == false
@@ -467,12 +455,10 @@ struct AgentPanel: View {
       Image(systemName: session.running ? "stop.fill" : "arrow.up")
         .font(.system(size: session.running ? 10 : 14, weight: .semibold))
         .foregroundStyle(session.running || live ? Palette.paper : Palette.inkFaint)
-        .frame(width: 34, height: 34)
+        .frame(width: 30, height: 30)
         .background(
-          session.running ? Palette.ink : (live ? Palette.accent : Palette.card),
-          in: Circle())
-        .overlay(Circle().strokeBorder(Palette.cardEdge, lineWidth: 1))
-        .shadow(color: live && !session.running ? Palette.accent.opacity(0.18) : .clear, radius: 5, y: 2)
+          session.running ? Palette.ink : (live ? Palette.accent : Palette.ink.opacity(0.055)),
+          in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
     .buttonStyle(.plain)
     // one cancel is enough; a button that stays live invites repeated clicks
@@ -485,35 +471,17 @@ struct AgentPanel: View {
     .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: session.running)
   }
 
-  /// The title is truncated at the tail on its own chip; a middle-truncated combined string was
-  /// unreadable.
   @ViewBuilder
-  private func contextRow(_ session: AgentSession) -> some View {
-    HStack(spacing: 8) {
-      switch contextState {
-      case .ready(let project), .empty(let project):
-        ContextChip(model: model, project: project, locked: session.running || session.preparing)
-      case .desk:
-        chip(icon: "books.vertical", title: L("书房 · 只见清单", "Library · list only"))
-      }
-      Spacer(minLength: 0)
-      ContextMeter(
-        report: isDesk ? nil : session.context, busy: session.running || session.preparing,
-        onCompact: { model.compactAgentContext() })
+  private func paperReference(_ session: AgentSession) -> some View {
+    switch contextState {
+    case .ready(let project), .empty(let project):
+      ComposerPaper(model: model, project: project, locked: session.running || session.preparing)
+    case .desk:
+      Label(L("书房 · 只见清单", "Library · list only"), systemImage: "books.vertical")
+        .font(.system(size: 11.5)).foregroundStyle(Palette.inkSoft)
+        .lineLimit(1).truncationMode(.tail)
+        .padding(.horizontal, 6).frame(height: 28)
     }
-    .frame(height: 26)
-  }
-
-  private func chip(icon: String, title: String) -> some View {
-    HStack(spacing: 6) {
-      Image(systemName: icon).font(.system(size: 11))
-      Text(title).lineLimit(1).truncationMode(.tail)
-    }
-    .font(.system(size: 11.5)).foregroundStyle(Palette.inkSoft)
-    .padding(.horizontal, 9).frame(height: 24)
-    .composerCapsule()
-    .frame(maxWidth: 360, alignment: .leading)
-    .help(title)
   }
 }
 
@@ -557,73 +525,6 @@ private struct SuggestionRow: View {
   }
 }
 
-
-/// The paper text in the composer, and the one place to change it: recognise the original again,
-/// or replace it with a Markdown file (a note from notes/, or any other).
-private struct ContextChip: View {
-  @ObservedObject var model: AppModel
-  let project: Project
-  /// while a turn runs: a new text would only reach the next turn
-  let locked: Bool
-
-  private var notes: [ProjectNote] { model.projectNotes[project.id] ?? [] }
-
-  var body: some View {
-    Menu {
-      if project.hasSource {
-        Button(project.hasUsableContext ? L("重新识别…", "Recognize Again…") : L("识别原稿…", "Recognize Original…")) {
-          model.reOCRActiveProject()
-        }
-      }
-      Menu(L("替换为 Markdown", "Replace with Markdown")) {
-        ForEach(notes) { note in
-          Button(note.folder.isEmpty ? note.title : "\(note.folder)/\(note.title)") {
-            let url = project.directoryURL.appendingPathComponent(note.path)
-            Task { await model.replaceProjectContext(with: url) }
-          }
-        }
-        if !notes.isEmpty { Divider() }
-        Button(L("其他文件…", "Other File…")) { model.chooseMarkdownToReplaceContext() }
-      }
-    } label: {
-      HStack(spacing: 6) {
-        Image(systemName: "doc").font(.system(size: 11))
-        Text(project.displayTitle).lineLimit(1).truncationMode(.tail)
-        Text(sizeLabel).foregroundStyle(Palette.inkFaint).monospacedDigit().fixedSize()
-        Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
-      }
-      .font(.system(size: 11.5)).foregroundStyle(Palette.inkSoft)
-      .padding(.leading, 8).padding(.trailing, 9).frame(height: 24)
-      .composerCapsule()
-      .contentShape(Capsule())
-    }
-    // A plain button-style menu draws the label as written. The native style keeps only the first
-    // image and text, drops the background, and never truncates, so a long title runs over its neighbours.
-    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
-    .frame(maxWidth: 360, alignment: .leading)
-    .disabled(locked || model.projectBusy)
-    .help(help)
-    .accessibilityElement(children: .combine)
-    .accessibilityLabel(L("论文正文：\(project.displayTitle)", "Paper text: \(project.displayTitle)"))
-    .accessibilityIdentifier("context-chip")
-  }
-
-  private var sizeLabel: String {
-    guard let context = project.context, project.hasUsableContext else {
-      return L("· 尚无正文", "· No text")
-    }
-    let tokens = context.tokens
-    let amount = tokens >= 1_000_000 ? String(format: "%.1fM", Double(tokens) / 1_000_000)
-      : (tokens >= 1_000 ? String(format: "%.1fK", Double(tokens) / 1_000) : "\(tokens)")
-    return "· \(amount)"
-  }
-
-  private var help: String {
-    guard let context = project.context, project.hasUsableContext else { return project.displayTitle }
-    return "\(project.displayTitle)\n" + L("正文来自：\(context.originLabel)", "Text from: \(context.originLabel)")
-      + "\n" + context.sizeLabel
-  }
-}
 
 /// An image waiting in the composer.
 private struct PendingImage: View {
@@ -708,106 +609,6 @@ private struct ResizeGrabber: View {
     guard active != cursorPushed else { return }
     if active { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
     cursorPushed = active
-  }
-}
-
-/// Conversation switcher: current conversation, switch, new. The only chrome in the panel, kept to
-/// one light row with the details in a menu.
-struct ConversationBar: View {
-  @ObservedObject var model: AppModel
-  @State private var renaming = false
-  @State private var draftTitle = ""
-
-  private var current: Conversation? {
-    guard let id = model.activeConversationID else { return nil }
-    return model.activeConversations.first { $0.id == id }
-  }
-
-  /// Never creates one here: the backend does on the first question, otherwise opening the pane
-  /// would leave an empty conversation on disk.
-  private var currentTitle: String { current?.displayTitle ?? L("新对话", "New Chat") }
-
-  var body: some View {
-    HStack(spacing: 6) {
-      Menu {
-        conversationList
-        Divider()
-        actions
-      } label: {
-        HStack(spacing: 4) {
-          Text(currentTitle).lineLimit(1).truncationMode(.tail)
-          Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-        }
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(Palette.ink)
-      }
-      .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-      .help(L("切换对话", "Switch Chat"))
-
-      if let count = countLabel {
-        Text(count).font(.system(size: 10)).foregroundStyle(Palette.inkFaint)
-      }
-      Spacer(minLength: 8)
-      Button {
-        Task { await model.newConversation() }
-      } label: {
-        Image(systemName: "square.and.pencil").font(.system(size: 11))
-      }
-      .buttonStyle(.plain).foregroundStyle(Palette.inkSoft)
-      .help(L("新对话", "New Chat")).accessibilityLabel(L("新对话", "New Chat"))
-    }
-    .padding(.horizontal, 14).padding(.vertical, 7)
-    .overlay(alignment: .bottom) { Hairline() }
-    .alert(L("重命名对话", "Rename Chat"), isPresented: $renaming) {
-      TextField(L("标题", "Title"), text: $draftTitle)
-      Button(L("保存", "Save")) {
-        let title = draftTitle
-        if let id = model.activeConversationID {
-          Task { await model.renameConversation(id, to: title) }
-        }
-      }
-      Button(L("取消", "Cancel"), role: .cancel) {}
-    } message: {
-      Text(L("默认用第一句提问当名字。", "By default it's named after the first question."))
-    }
-    .onChange(of: renaming) { _, active in
-      if active { draftTitle = current?.title ?? "" }
-    }
-  }
-
-  /// no count for a single conversation
-  private var countLabel: String? {
-    let total = model.activeConversations.count
-    return total > 1 ? L("\(total) 条", "\(total) chats") : nil
-  }
-
-  @ViewBuilder private var conversationList: some View {
-    if model.activeConversations.isEmpty {
-      Text(L("还没有对话", "No chats yet"))
-    } else {
-      ForEach(model.activeConversations) { conversation in
-        Button {
-          model.selectConversation(conversation.id)
-        } label: {
-          // checkmark: the menu has no other way to say "you are here"
-          Label(
-            conversation.displayTitle,
-            systemImage: conversation.id == model.activeConversationID ? "checkmark" : "")
-        }
-      }
-    }
-  }
-
-  @ViewBuilder private var actions: some View {
-    Button(L("新对话", "New Chat")) { Task { await model.newConversation() } }
-    if let id = model.activeConversationID {
-      Button(L("重命名…", "Rename…")) { renaming = true }
-      Button(L("导出为 JSON…", "Export as JSON…")) { Task { await model.exportConversation(id) } }
-      Divider()
-      Button(L("删除这条对话…", "Delete This Chat…"), role: .destructive) {
-        Task { await model.deleteConversation(id) }
-      }
-    }
   }
 }
 
