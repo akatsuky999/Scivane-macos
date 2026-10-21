@@ -38,6 +38,15 @@ enum AnnotationColor: String, CaseIterable, Identifiable {
     }
   }
 
+  /// For writing on the page: the marker colour a shade darker, so yellow and gray text still read on
+  /// white paper.
+  var text: NSColor {
+    switch self {
+    case .yellow, .orange, .gray: return color.blended(withFraction: 0.3, of: .black) ?? color
+    default: return color.blended(withFraction: 0.12, of: .black) ?? color
+    }
+  }
+
   var name: String {
     switch self {
     case .yellow: return L("黄色", "Yellow")
@@ -52,7 +61,8 @@ enum AnnotationColor: String, CaseIterable, Identifiable {
   }
 }
 
-/// One mark on a project's source PDF, as stored in .lumen/annotations.json.
+/// One mark on a project's source PDF, as stored in .lumen/annotations.json: a highlight or an
+/// underline of its text, a note written on a page, or pen strokes on a page.
 struct PaperAnnotation: Identifiable, Equatable {
   /// The part of a mark on one page: one rect per text line, in PDF page space.
   struct Span: Equatable {
@@ -60,15 +70,39 @@ struct PaperAnnotation: Identifiable, Equatable {
     var rects: [CGRect]
   }
 
+  /// Words written on the page, wrapped to the box's width. Page space, so it scales with the page.
+  struct Note: Equatable {
+    var page: Int
+    var rect: CGRect
+    var body: String
+    /// text size in page points
+    var size: CGFloat
+  }
+
+  /// Strokes of the pen on one page, each a line through points in page space.
+  struct Ink: Equatable {
+    var page: Int
+    var width: CGFloat
+    var strokes: [[CGPoint]]
+  }
+
+  /// stored kinds besides the two text styles (NOTE and INK in projects/annotations.py)
+  static let noteKind = "note"
+  static let inkKind = "ink"
+
   let id: String
   /// Kept as stored rather than as enums, so a mark written by a newer app survives a round trip.
   var kind: String
   var color: String
+  /// a mark on the text; empty for a note or a drawing
   let spans: [Span]
   let text: String
+  var note: Note?
+  var ink: Ink?
 
   var style: AnnotationKind { AnnotationKind(rawValue: kind) ?? .highlight }
   var tint: AnnotationColor { AnnotationColor(rawValue: color) ?? .yellow }
+  var isFreehand: Bool { note != nil || ink != nil }
 
   init(id: String = UUID().uuidString, kind: AnnotationKind, color: AnnotationColor,
        spans: [Span], text: String) {
@@ -79,28 +113,96 @@ struct PaperAnnotation: Identifiable, Equatable {
     self.text = text
   }
 
+  init(id: String = UUID().uuidString, color: AnnotationColor, note: Note) {
+    self.id = id
+    kind = Self.noteKind
+    self.color = color.rawValue
+    spans = []
+    text = ""
+    self.note = note
+  }
+
+  init(id: String = UUID().uuidString, color: AnnotationColor, ink: Ink) {
+    self.id = id
+    kind = Self.inkKind
+    self.color = color.rawValue
+    spans = []
+    text = ""
+    self.ink = ink
+  }
+
+  /// The pages it is on, from 0.
+  var pages: [Int] {
+    if let note { return [note.page] }
+    if let ink { return [ink.page] }
+    return spans.map(\.page)
+  }
+
   /// Request body for the backend.
   var payload: [String: Any] {
-    [
-      "id": id, "kind": kind, "color": color, "text": text,
-      "spans": spans.map { span in
-        ["page": span.page,
-         "rects": span.rects.map { [$0.origin.x, $0.origin.y, $0.width, $0.height] }] as [String: Any]
-      },
-    ]
+    var body = changes
+    body["id"] = id
+    body["kind"] = kind
+    if let page = note?.page ?? ink?.page {
+      body["page"] = page
+    } else {
+      body["text"] = text
+      body["spans"] = spans.map { span in
+        ["page": span.page, "rects": span.rects.map(Self.numbers)] as [String: Any]
+      }
+    }
+    return body
+  }
+
+  /// What a note or a drawing sends when it changes: all of what may change (the page doesn't).
+  var changes: [String: Any] {
+    if let note {
+      return ["color": color, "rect": Self.numbers(note.rect), "body": note.body, "size": Double(note.size)]
+    }
+    if let ink {
+      return ["color": color, "width": Double(ink.width),
+              "strokes": ink.strokes.map { $0.flatMap { [Double($0.x), Double($0.y)] } }]
+    }
+    return ["color": color]
+  }
+
+  private static func numbers(_ rect: CGRect) -> [Double] {
+    [rect.origin.x, rect.origin.y, rect.width, rect.height].map(Double.init)
   }
 }
 
 extension PaperAnnotation: Decodable {
-  private enum Keys: String, CodingKey { case id, kind, color, spans, text }
+  private enum Keys: String, CodingKey { case id, kind, color, spans, text, page, rect, body, size, width, strokes }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: Keys.self)
     id = try container.decode(String.self, forKey: .id)
     kind = try container.decode(String.self, forKey: .kind)
     color = try container.decode(String.self, forKey: .color)
-    spans = try container.decode([Span].self, forKey: .spans)
     text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+    switch kind {
+    case Self.noteKind:
+      spans = []
+      let rect = try container.decode([Double].self, forKey: .rect)
+      guard rect.count == 4 else {
+        throw DecodingError.dataCorruptedError(forKey: .rect, in: container, debugDescription: "a note's box is four numbers")
+      }
+      note = Note(page: try container.decode(Int.self, forKey: .page),
+                  rect: CGRect(x: rect[0], y: rect[1], width: rect[2], height: rect[3]),
+                  body: try container.decode(String.self, forKey: .body),
+                  size: try container.decode(Double.self, forKey: .size))
+    case Self.inkKind:
+      spans = []
+      let flat = try container.decode([[Double]].self, forKey: .strokes)
+      ink = Ink(page: try container.decode(Int.self, forKey: .page),
+                width: try container.decode(Double.self, forKey: .width),
+                strokes: flat.map { values in
+                  stride(from: 0, to: values.count - 1, by: 2).map { CGPoint(x: values[$0], y: values[$0 + 1]) }
+                })
+    default:
+      // a kind from a newer app without spans is kept, and drawn as nothing
+      spans = try container.decodeIfPresent([Span].self, forKey: .spans) ?? []
+    }
   }
 }
 
@@ -121,6 +223,8 @@ protocol AnnotationService {
   func annotations(_ projectID: String) async throws -> [PaperAnnotation]
   func addAnnotation(_ annotation: PaperAnnotation, to projectID: String) async throws
   func updateAnnotation(_ id: String, in projectID: String, kind: String?, color: String?) async throws
+  /// a note or a drawing, changed as a whole
+  func replaceAnnotation(_ annotation: PaperAnnotation, in projectID: String) async throws
   func removeAnnotation(_ id: String, from projectID: String) async throws
 }
 

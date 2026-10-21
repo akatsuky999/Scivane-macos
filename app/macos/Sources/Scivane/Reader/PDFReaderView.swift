@@ -47,11 +47,17 @@ struct PDFReaderView: NSViewRepresentable {
         context.coordinator.pdfView = pdfView
         context.coordinator.thumbWidth = thumbWidth
         context.coordinator.observe(pdfView)
-        context.coordinator.marks.attach(pdfView, in: container)
+        context.coordinator.marks.attach(pdfView, in: container, markup: model.markup)
+        context.coordinator.previews.attach(pdfView, in: container)
         context.coordinator.zoom.attach(pdfView)
+        pdfView.onHover = { [weak coordinator = context.coordinator] in coordinator?.previews.hover(at: $0) }
+        context.coordinator.previews.allowed = { [weak coordinator = context.coordinator] point in
+            coordinator?.marks.allowsPreview(at: point) ?? false
+        }
 
-        model.pdfGoToPage = { [weak coordinator = context.coordinator] page in
-            coordinator?.go(to: page)
+        model.navigation.attach(pdfView)
+        model.pdfGoToPage = { [weak coordinator = context.coordinator] page, jump in
+            coordinator?.go(to: page, jump: jump)
         }
         return container
     }
@@ -65,6 +71,7 @@ struct PDFReaderView: NSViewRepresentable {
 
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
         coordinator.marks.detach()
+        coordinator.previews.detach()
         coordinator.zoom.detach()
     }
 
@@ -73,9 +80,10 @@ struct PDFReaderView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         let model: AppModel
-        var pdfView: PDFView?
+        var pdfView: AnnotatingPDFView?
         var thumbWidth: NSLayoutConstraint?
         let marks = AnnotationController()
+        let previews = LinkPreviewController()
         let zoom = PDFZoom()
 
         private var shownJobID: DocumentJob.ID?
@@ -94,9 +102,11 @@ struct PDFReaderView: NSViewRepresentable {
             guard shownJobID != job.id else { return }
             shownJobID = job.id
             suppress = true
-            pdfView?.document = job.pdf
+            model.navigation.reset()
+            pdfView?.quietly { pdfView?.document = job.pdf }
             marks.documentChanged()
-            go(to: model.currentPage)
+            previews.documentChanged()
+            go(to: model.currentPage, jump: false)
         }
 
         func setThumbnails(visible: Bool) {
@@ -108,12 +118,12 @@ struct PDFReaderView: NSViewRepresentable {
             }
         }
 
-        func go(to page: Int) {
+        func go(to page: Int, jump: Bool) {
             guard let pdfView, let doc = pdfView.document,
                   page >= 1, page <= doc.pageCount,
                   let target = doc.page(at: page - 1) else { return }
             suppress = true
-            pdfView.go(to: target)
+            if jump { pdfView.go(to: target) } else { pdfView.quietly { pdfView.go(to: target) } }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.suppress = false }
         }
 

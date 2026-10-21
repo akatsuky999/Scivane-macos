@@ -127,6 +127,10 @@ final class AppModel: ObservableObject {
     set { if position.page != newValue { position.page = newValue } }
   }
   let position = ReadingPosition()
+  /// The source's back and forward, and the dock's tools: objects of their own, so a jump or a tool
+  /// change redraws the dock rather than every view that watches the model.
+  let navigation = SourceNavigation()
+  let markup = MarkupTools()
   @Published var syncScroll = true
   /// Off by default: it doesn't replace scrolling and permanently takes a column.
   @Published var showThumbnails = false
@@ -142,8 +146,8 @@ final class AppModel: ObservableObject {
 
   /// set by MarkdownWebView
   var renderBridge: ((String, [Any]) -> Void)?
-  /// set by PDFReaderView
-  var pdfGoToPage: ((Int) -> Void)?
+  /// Set by PDFReaderView: a page of the source; `jump` when it should be a step in its history.
+  var pdfGoToPage: ((_ page: Int, _ jump: Bool) -> Void)?
   /// headings of the document in the text pane; reported by MarkdownWebView
   let outline = DocumentOutline()
   let sidebar = SidebarState()
@@ -782,14 +786,16 @@ final class AppModel: ObservableObject {
     guard page != currentPage else { return }
     currentPage = page
     guard syncScroll && canSyncReading else { return }
-    pdfGoToPage?(page)
+    pdfGoToPage?(page, false)
   }
 
-  func goToPage(_ page: Int) {
+  /// `jump` for a page asked for by number, which can be stepped back from; the dock's previous and
+  /// next are steps through the paper, as scrolling is.
+  func goToPage(_ page: Int, jump: Bool = false) {
     guard let job = readingSource else { return }
     let target = min(max(1, page), max(1, job.pageCount))
     currentPage = target
-    pdfGoToPage?(target)
+    pdfGoToPage?(target, jump)
     if readingDocument?.isMarkdown != true { renderBridge?("scrollToPage", [target]) }
   }
 

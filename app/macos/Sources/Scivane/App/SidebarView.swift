@@ -35,6 +35,14 @@ enum SidebarMetrics {
   /// island edge to its controls, the border included; inner corners are the radius less this
   static let toolbarPadding: CGFloat = 4
   static var toolbarControl: CGFloat { toolbar - toolbarPadding * 2 }
+  /// The source's dock: the toolbar's glass, a size smaller since it floats over the page. Its inner
+  /// corners match the toolbar's, so the same groove and thumb fit both.
+  static let dock: CGFloat = 34
+  static let dockPadding: CGFloat = 3
+  static var dockRadius: CGFloat { toolbarRadius - toolbarPadding + dockPadding }
+  static var dockControl: CGFloat { dock - dockPadding * 2 }
+  /// between the dock and the bottom of the pane
+  static let dockMargin: CGFloat = 14
   static let tile = CGSize(width: 36, height: 44)
   static let tileGap: CGFloat = 8
   static let row: CGFloat = 28

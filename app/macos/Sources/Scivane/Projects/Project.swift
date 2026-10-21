@@ -339,6 +339,11 @@ struct ProjectClient {
     try await expectOK("projects/\(projectID)/annotations/\(id)", method: "PATCH", body: body)
   }
 
+  func replaceAnnotation(_ annotation: PaperAnnotation, in projectID: String) async throws {
+    try await expectOK("projects/\(projectID)/annotations/\(annotation.id)", method: "PATCH",
+                       body: annotation.changes)
+  }
+
   func removeAnnotation(_ id: String, from projectID: String) async throws {
     try await expectOK("projects/\(projectID)/annotations/\(id)", method: "DELETE")
   }

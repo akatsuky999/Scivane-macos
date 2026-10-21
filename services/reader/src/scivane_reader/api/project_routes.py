@@ -105,19 +105,34 @@ class ContextIn(BaseModel):
 
 
 class AnnotationIn(BaseModel):
-    """Shape only; ranges and the palette are checked in projects.annotations."""
+    """Shape only; what each kind needs, ranges and the palette are checked in projects.annotations."""
 
     #: chosen by the app, which shows the mark before this request returns
     id: str
     kind: str
     color: str
-    spans: list[dict[str, Any]]
+    #: a mark on the text
+    spans: list[dict[str, Any]] | None = None
     text: str = ""
+    #: a note or a drawing sits on one page
+    page: int | None = None
+    #: a note
+    rect: list[Any] | None = None
+    body: str | None = None
+    size: float | None = None
+    #: a drawing: each stroke's points flattened, x then y
+    width: float | None = None
+    strokes: list[list[Any]] | None = None
 
 
 class AnnotationPatchIn(BaseModel):
     kind: str | None = None
     color: str | None = None
+    body: str | None = None
+    rect: list[Any] | None = None
+    size: float | None = None
+    width: float | None = None
+    strokes: list[list[Any]] | None = None
 
 
 @router.get("")
@@ -336,7 +351,7 @@ async def remove_project_file(project_id: str, name: str):
     return {"removed": name, "existed": removed}
 
 
-# Highlights and underlines on the source PDF, stored in the control plane; the PDF is never modified.
+# The user's marks on the source PDF, stored in the control plane; the PDF is never modified.
 
 
 @router.get("/{project_id}/annotations")

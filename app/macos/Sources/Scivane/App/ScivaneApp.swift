@@ -73,6 +73,8 @@ struct ScivaneApp: App {
                     .keyboardShortcut("k", modifiers: .command)
                 Button(L("页面缩略图", "Page Thumbnails")) { model.showThumbnails.toggle() }
                     .keyboardShortcut("t", modifiers: [.command, .control])
+                SourceHistoryCommands(
+                    navigation: model.navigation, sourceShown: model.dualPane || model.singlePane == .source)
             }
             CommandGroup(replacing: .help) {
                 Button(L("重启识别引擎", "Restart Recognition Engine")) { backend.restart() }
@@ -86,6 +88,22 @@ struct ScivaneApp: App {
 }
 
 /// llama-server keeps 1.8 GB resident; quitting must take it down too.
+/// Back and forward through the source's jumps, as a browser's ⌘[ and ⌘]. A view of its own so the
+/// menu follows the history without the whole app watching it.
+private struct SourceHistoryCommands: View {
+    @ObservedObject var navigation: SourceNavigation
+    let sourceShown: Bool
+
+    var body: some View {
+        Button(L("后退", "Back")) { navigation.goBack() }
+            .keyboardShortcut("[", modifiers: .command)
+            .disabled(!sourceShown || navigation.backPage == nil)
+        Button(L("前进", "Forward")) { navigation.goForward() }
+            .keyboardShortcut("]", modifiers: .command)
+            .disabled(!sourceShown || navigation.forwardPage == nil)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var backend: BackendManager?
 private var pendingFiles: [URL] = []

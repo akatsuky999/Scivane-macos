@@ -1,7 +1,8 @@
 import PDFKit
 
-/// Draws marks as PDFKit annotations on the in-memory document and answers which mark is under a
-/// point. The document is never written back, so the source file stays untouched.
+/// Draws highlights and underlines as PDFKit annotations on the in-memory document and answers which
+/// one is under a point. The document is never written back, so the source file stays untouched. Notes
+/// and drawings are not annotations: they are drawn over the pages (FreehandCanvas).
 @MainActor
 final class AnnotationLayer {
   private struct Drawn {

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Reading workspace. No pane headers: identity, layout, mode and the right-hand pane's document or
-/// chat live in the toolbar island, and the page number floats over the PDF.
+/// chat live in the toolbar island; the page number, history and tools float over the PDF in its dock.
 struct ReaderView: View {
   @ObservedObject var model: AppModel
   /// Where the divider was moved to, kept across switches between single and dual mode; the toolbar
@@ -85,8 +85,15 @@ struct ReaderView: View {
           emptyPane(.source)
         }
       }
-      if let source = model.readingSource, source.isPDF, source.pageCount > 1 {
-        PageCapsule(model: model, position: model.position, pageCount: source.pageCount).padding(.bottom, 16)
+      if let source = model.readingSource, source.isPDF {
+        let markable = model.annotatableProject(for: source) != nil
+        if source.pageCount > 1 || markable {
+          SourceDock(
+            model: model, position: model.position, navigation: model.navigation, markup: model.markup,
+            pageCount: source.pageCount, markable: markable
+          )
+          .padding(.bottom, SidebarMetrics.dockMargin)
+        }
       }
     }
     .background(Palette.paper)
@@ -215,62 +222,6 @@ struct ReaderView: View {
   }
 }
 
-// MARK: - Floating page number
-//
-// Dim until hovered, as in Preview.
-
-private struct PageCapsule: View {
-  /// not observed: only the position changes while reading, and the model's other changes don't
-  /// concern the page number
-  let model: AppModel
-  @ObservedObject var position: ReadingPosition
-  let pageCount: Int
-  @State private var hovering = false
-  @State private var draft = ""
-  @FocusState private var editing: Bool
-
-  var body: some View {
-    HStack(spacing: 3) {
-      step("chevron.left", enabled: position.page > 1) { model.goToPage(position.page - 1) }
-      TextField("", text: $draft)
-        .textFieldStyle(.plain).multilineTextAlignment(.center).focused($editing)
-        .font(.system(size: 11, weight: .medium).monospacedDigit())
-        .frame(width: max(18, CGFloat("\(pageCount)".count) * 9))
-        .onSubmit {
-          model.goToPage(Int(draft) ?? position.page)
-          draft = String(position.page)
-          editing = false
-        }
-        .accessibilityLabel(L("跳转页码", "Go to Page"))
-      Text("/ \(pageCount)")
-        .font(.system(size: 11).monospacedDigit()).foregroundStyle(Palette.inkFaint)
-        .padding(.trailing, 2)
-      step("chevron.right", enabled: position.page < pageCount) { model.goToPage(position.page + 1) }
-    }
-    .padding(.horizontal, 7).padding(.vertical, 5)
-    .background(.regularMaterial, in: Capsule())
-    .overlay(Capsule().strokeBorder(Palette.rule.opacity(hovering ? 1 : 0.5)))
-    .shadow(color: .black.opacity(hovering ? 0.10 : 0.05), radius: hovering ? 9 : 4, y: 2)
-    .opacity(hovering || editing ? 1 : 0.62)
-    .onHover { hovering = $0 }
-    .animation(.easeOut(duration: 0.15), value: hovering)
-    .onAppear { draft = String(position.page) }
-    .onChange(of: position.page) { _, page in if !editing { draft = String(page) } }
-  }
-
-  private func step(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-    Button(action: action) {
-      Image(systemName: symbol)
-        .font(.system(size: 9, weight: .semibold))
-        .frame(width: 20, height: 18)
-        .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain).disabled(!enabled)
-    .foregroundStyle(enabled ? Palette.inkSoft : Palette.inkFaint.opacity(0.4))
-    .accessibilityLabel(symbol == "chevron.left" ? L("上一页", "Previous Page") : L("下一页", "Next Page"))
-  }
-}
-
 // MARK: - Segmented control
 //
 // The highlight slides: matchedGeometryEffect only animates inside withAnimation. A spring, for
@@ -303,7 +254,7 @@ struct SegmentedTabs: View {
           withAnimation(Self.glideCurve) { selection = item.id }
         } label: {
           HStack(spacing: 5) {
-            Image(systemName: item.symbol).font(.system(size: iconOnly ? 11.5 : 10))
+            if !item.symbol.isEmpty { Image(systemName: item.symbol).font(.system(size: iconOnly ? 11.5 : 10)) }
             if !iconOnly { Text(item.label) }
           }
           .font(.system(size: 11, weight: active ? .semibold : .regular))

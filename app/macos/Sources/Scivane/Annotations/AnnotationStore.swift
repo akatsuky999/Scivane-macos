@@ -123,6 +123,21 @@ final class AnnotationStore: ObservableObject {
     }
   }
 
+  /// A note or a drawing changed as a whole: moved, rewritten, recoloured, or partly erased.
+  func replace(_ updated: PaperAnnotation, undo: UndoManager?) {
+    guard let projectID, let index = annotations.firstIndex(where: { $0.id == updated.id }) else { return }
+    let before = annotations[index]
+    guard updated != before else { return }
+    annotations[index] = updated
+    revision += 1
+    register(undo, L("修改标注", "Change Mark")) { [weak undo] in $0.replace(before, undo: undo) }
+    write(projectID, { try await $0.replaceAnnotation(updated, in: projectID) }) { store in
+      if let i = store.annotations.firstIndex(where: { $0.id == updated.id }), store.annotations[i] == updated {
+        store.annotations[i] = before
+      }
+    }
+  }
+
   func remove(_ id: String, undo: UndoManager?) {
     guard let projectID, let index = annotations.firstIndex(where: { $0.id == id }) else { return }
     let removed = annotations.remove(at: index)

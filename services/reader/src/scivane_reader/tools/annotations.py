@@ -3,6 +3,9 @@
 The marks live in the control plane, which the agent can't open, so this reads them on the host and
 returns a view instead of the file: no geometry or ids, pages counted from 1, reading order, and each
 mark located in md/context.md so it ties to the paper text already in context. Read-only.
+
+Notes written on the page and pen strokes are kept in the same file but are the user's own: they are
+left out of the view, as if they weren't there.
 """
 
 from __future__ import annotations
@@ -200,7 +203,7 @@ def _view(root: Path, query: _Query) -> ToolOutcome:
         records = book.AnnotationBook(book.path_in(root)).list()
     except book.AnnotationError as exc:
         raise ToolError(_BOOK_ERRORS.get(exc.code, "读不出标注"), exc.code) from exc
-    every = [_Mark.read(record) for record in records]
+    every = [_Mark.read(record) for record in records if record.get("kind") not in book.FREEHAND]
     if not every:
         return ToolOutcome("原稿上还没有标注。", detail=_detail(every, [], []))
 

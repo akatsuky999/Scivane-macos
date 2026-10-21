@@ -1,12 +1,12 @@
 import SwiftUI
 
 /// The toolbar's island: the sidebar's glass with tighter corners and a lighter shadow, since it sits
-/// over the paper rather than floating across the page.
+/// over the paper rather than floating across the page. The source's dock is the same glass.
 private struct ToolbarSurface: ViewModifier {
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   @Environment(\.colorScheme) private var colorScheme
 
-  private let shape = RoundedRectangle(cornerRadius: SidebarMetrics.toolbarRadius, style: .continuous)
+  let shape: RoundedRectangle
   private let highlight = Color(light: .white.opacity(0.9), dark: .white.opacity(0.06))
 
   func body(content: Content) -> some View {
@@ -144,5 +144,7 @@ struct ToolbarIconButton: View {
 }
 
 extension View {
-  func toolbarSurface() -> some View { modifier(ToolbarSurface()) }
+  func toolbarSurface(radius: CGFloat = SidebarMetrics.toolbarRadius) -> some View {
+    modifier(ToolbarSurface(shape: RoundedRectangle(cornerRadius: radius, style: .continuous)))
+  }
 }
