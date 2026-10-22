@@ -4,8 +4,8 @@
 # (make distclean). For a symlink: SCIVANE_APP_INSTALL=link bash scripts/build_app.sh
 #
 # Signed ad-hoc unless SCIVANE_SIGN_IDENTITY names a code-signing certificate in your keychain. An
-# ad-hoc signature is new on every build, so the keychain asks again for each saved API key; a
-# certificate of your own (even self-signed) keeps "Always Allow" across rebuilds.
+# ad-hoc signature is new on every build, so the keychain asks again for each saved API key; an Apple
+# Development or Developer ID certificate with a Team ID can keep "Always Allow" across rebuilds.
 #
 # The bundle carries its own backend (Contents/Resources/backend/, see build_backend.sh), so the
 # light backend needs nothing outside it. Local OCR is optional; the app installs it into
