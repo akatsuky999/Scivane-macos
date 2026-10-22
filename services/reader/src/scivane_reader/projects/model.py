@@ -147,6 +147,10 @@ class ProjectEvent:
     #: in the log, and the history sent to the model is derived from it (session.derive_history).
     #: Data: summary, turns, kept, trigger, provider, model, before/after (estimated tokens), usage.
     CONVERSATION_COMPACTED = "conversation/compacted"
+    #: The user edited an earlier question and asked it again. Data: keep, the number of turns that
+    #: stay. Append-only like compaction: the dropped turns remain in the log, and every projection
+    #: reads the log through conversations.active_events, so none of them sees those turns again.
+    CONVERSATION_REWOUND = "conversation/rewound"
 
     #: Messages and tools. Anything that ever went into a model request must be rebuildable from
     #: here: research conclusions need to show which grep line or bash output they came from.

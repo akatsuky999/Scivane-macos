@@ -29,10 +29,17 @@ final class AgentSession: ObservableObject {
   @Published private(set) var firstNetworkHost: String?
   private(set) var restored = false
 
-  /// Whether this turn showed anything at all (text, reasoning, tools, approvals, failures). The last
-  /// safety net: a turn that ends with nothing must still say something, or it looks broken. An
-  /// expired key once ended up exactly here.
+  /// Whether this turn showed anything at all (text, tools, approvals, failures; reasoning is never
+  /// shown). The last safety net: a turn that ends with nothing must still say something, or it looks
+  /// broken. An expired key once ended up exactly here.
   private var produced = false
+  /// This turn asks an edited question again. When the backend never took it (refused, cut off
+  /// before its first frame) the transcript, already cut at that question, reloads from the log.
+  private var replacing = false
+  /// The cut may also have passed a question the backend never numbered, whose turn the log may
+  /// still hold: reload after the turn rather than guess.
+  private var reloadAfterTurn = false
+  private var base: URL?
   private var terminalEventSeen = false
   /// Published so the button reacts at once: the backend still fills in synthetic results before
   /// closing the stream, and a second of stillness reads as a broken button.
@@ -74,11 +81,11 @@ final class AgentSession: ObservableObject {
     if items.contains(where: { $0.kind == .approval && $0.decision == nil }) {
       return L("等你的决定", "Waiting for your decision")
     }
-    // Thinking vs. writing is decided by spoken text in this turn only. Checking streamingIndex said
-    // "answering" as soon as the first reasoning chunk landed, and searching the whole transcript
-    // found the previous turn's answer before this turn's first byte.
+    // Writing only while this turn's last row is its words: after a call finishes the model is
+    // thinking again, even if it spoke before the call. Searching the whole transcript found the
+    // previous turn's answer before this turn's first byte.
     let thisTurn = items.lastIndex(where: { $0.kind == .user }).map { items[($0 + 1)...] } ?? items[...]
-    if let latest = thisTurn.last(where: { $0.kind == .assistant }), !latest.text.isEmpty {
+    if let latest = thisTurn.last, latest.kind == .assistant, !latest.text.isEmpty {
       return L("正在作答", "Answering")
     }
     return L("正在思考", "Thinking")
@@ -111,8 +118,12 @@ final class AgentSession: ObservableObject {
 
   /// Uses the backend's /agent/transcript projection rather than parsing here: filling in results
   /// for calls without one must have a single implementation.
+  ///
+  /// A project session without a conversation is a new chat and restores nothing. Asked without one,
+  /// the backend answers with the most recent conversation; that transcript would stay in this
+  /// session and come back under "New Chat" once the conversation is deleted.
   func restore(base: URL) async {
-    guard let projectID, !restored else { return }
+    guard let projectID, let conversationID, !restored else { return }
     restored = true
     let raw = await AgentClient(base: base)
       .transcript(projectID: projectID, conversation: conversationID)
@@ -140,7 +151,8 @@ final class AgentSession: ObservableObject {
   /// Manual compaction (POST .../agent/compact). Same receiving path as asking: job id, cancel,
   /// watchdog and wrap-up all apply, and a cancelled compaction leaves nothing in the log.
   func compact(base: URL, provider: String) {
-    guard let projectID, !running, !preparing else { return }
+    // a new chat has nothing to compact; without a conversation the backend would pick another one
+    guard let projectID, conversationID != nil, !running, !preparing else { return }
     preparing = true
     running = true
     compacting = true
@@ -209,10 +221,26 @@ final class AgentSession: ObservableObject {
 
   // MARK: - Asking
 
+  /// `replacing` is a question asked earlier, edited: it and everything after it leave the
+  /// transcript, and the backend drops the same turns from the conversation (its log keeps them).
   func ask(
-    _ question: String, base: URL, provider: String, images: [ComposerImage] = []
+    _ question: String, base: URL, provider: String, images: [ComposerImage] = [],
+    replacing original: UUID? = nil
   ) {
     guard !running, !preparing else { return }
+    var rewind: Int?
+    replacing = false
+    reloadAfterTurn = false
+    if let original {
+      guard let index = items.firstIndex(where: { $0.id == original && $0.kind == .user }) else { return }
+      // the librarian keeps no history, so cutting the transcript is all an edit needs there
+      if projectID != nil {
+        rewind = keptTurns(before: original)
+        replacing = true
+        reloadAfterTurn = items[..<index].contains { $0.kind == .user && $0.turn == nil }
+      }
+      items.removeSubrange(index...)
+    }
     preparing = true
     running = true
     produced = false
@@ -220,6 +248,7 @@ final class AgentSession: ObservableObject {
     cancelRequested = false
     usage = AgentUsage()
     askedAt = Date()
+    self.base = base
     pacer.reset()
     items.append(.user(question, images: images.map(TranscriptImage.init(composed:))))
     streamingIndex = nil
@@ -238,7 +267,7 @@ final class AgentSession: ObservableObject {
       projectID.map {
         client.chat(
           projectID: $0, question: question, provider: provider,
-          conversation: conversationID, images: images)
+          conversation: conversationID, images: images, rewind: rewind)
       } ?? client.deskChat(question: question, provider: provider)
 
     task = Task { [weak self] in
@@ -292,6 +321,30 @@ final class AgentSession: ObservableObject {
   /// the backend normally answers in milliseconds; past this something is really wrong
   static let stopGrace: Double = 8
 
+  /// Whether the question in this row can be edited and asked again right now.
+  var canEdit: Bool { !running && !preparing }
+
+  /// How many turns the backend keeps when the question `id` is asked again: all before it. Its own
+  /// number says so; a question the backend never numbered (refused) counts the numbered ones above
+  /// it. nil when `id` isn't a question here.
+  func keptTurns(before id: UUID) -> Int? {
+    guard let index = items.firstIndex(where: { $0.id == id && $0.kind == .user }) else { return nil }
+    if let turn = items[index].turn { return turn - 1 }
+    return items[..<index].last { $0.kind == .user && $0.turn != nil }?.turn ?? 0
+  }
+
+  /// Replace the transcript with the log's projection, keeping what this turn said about itself (a
+  /// refusal or failure). An empty answer is a failed fetch: the conversation itself is never empty
+  /// here, so the transcript stays as it is.
+  private func reload(keeping notes: [TranscriptItem]) {
+    guard let projectID, let conversationID, let base else { return }
+    Task { [weak self] in
+      let raw = await AgentClient(base: base).transcript(projectID: projectID, conversation: conversationID)
+      guard let self, !raw.isEmpty, !self.running else { return }
+      self.items = raw.compactMap(TranscriptItem.init(restored:)) + notes
+    }
+  }
+
   func answer(_ approved: Bool, reason: String = "") {
     guard let pending, let jobID else { return }
     let client = self.client
@@ -327,7 +380,7 @@ final class AgentSession: ObservableObject {
   private func absorb(_ event: AgentClient.Event) {
     timing?.handled(event.name)
     switch event {
-    case .text, .thinking, .toolCall, .approvalRequest, .failed:
+    case .text, .toolCall, .approvalRequest, .failed:
       produced = true
     default:
       break
@@ -342,19 +395,25 @@ final class AgentSession: ObservableObject {
       flushStream()
     }
     switch event {
-    case .messageStart(let id, _, _):
+    case .messageStart(let id, _, _, let turn):
       if let id { jobID = id }
+      // The question is in the log now; its number is what editing it sends back. Only the first
+      // frame carries one.
+      if let turn, let index = items.lastIndex(where: { $0.kind == .user }) {
+        items[index].turn = turn
+        replacing = false
+      }
       // new step: the previous assistant message is final
       streamingIndex = nil
       pulse.settled()
 
     case .text(let chunk):
       pulse.heard()
-      stream(chunk, thinking: false)
+      stream(chunk)
 
-    case .thinking(let chunk):
+    case .thinking:
+      // Never shown: it only proves the model is alive. The status line says "thinking".
       pulse.heard()
-      stream(chunk, thinking: true)
 
     case .toolInput(_, let name, let chars):
       pulse.drafting(name, chars: chars)
@@ -458,37 +517,27 @@ final class AgentSession: ObservableObject {
     switch code {
     case "SILENT_CUT":
       let seconds = Int((quiet ?? 0).rounded())
-      return UIText("模型 \(seconds) 秒没有输出，被网关断开，这一步作废。已让它分节写，接着做。",
-                    "The model sent nothing for \(seconds)s and the gateway cut it off; that step was lost. "
+      return UIText("模型 \(seconds) 秒没有输出，连接断开，没写完的部分作废。已让它分节写，接着做。",
+                    "The model sent nothing for \(seconds)s and the connection was cut; the unfinished part was lost. "
                       + "It was asked to write in sections and is carrying on.")
     default:
       return UIText("这一轮中途出了状况（\(code)），已接着做。", "Something happened mid-turn (\(code)); it carried on.")
     }
   }
 
-  /// Text and reasoning chunks. The transcript is touched only for the first chunk; after that
-  /// growth goes to the pacer. Updating items every 50 ms recomputed the whole panel and still
-  /// stuttered. The first chunk is structural: grouping and the thinking/writing state depend on
-  /// whether there is text.
-  private func stream(_ chunk: String, thinking: Bool) {
+  /// Text chunks. The transcript is touched only for the first chunk; after that growth goes to the
+  /// pacer. Updating items every 50 ms recomputed the whole panel and still stuttered. The first
+  /// chunk is structural: grouping and the thinking/writing state depend on whether there is text.
+  private func stream(_ chunk: String) {
     guard !chunk.isEmpty else { return }
     if let index = streamingIndex, items.indices.contains(index) {
-      if thinking, items[index].thinking.isEmpty {
-        items[index].thinking = chunk
-      } else if !thinking, items[index].text.isEmpty {
-        items[index].text = chunk
-      }
+      if items[index].text.isEmpty { items[index].text = chunk }
     } else {
-      var line = TranscriptItem.assistant("")
-      if thinking { line.thinking = chunk } else { line.text = chunk }
-      // the activity card reports elapsed time, and pure reasoning has no tool to borrow it from
-      line.startedAt = Date()
-      line.finishedAt = Date()
       pacer.reset()
-      items.append(line)
+      items.append(.assistant(chunk))
       streamingIndex = items.count - 1
     }
-    pacer.receive(chunk, thinking: thinking)
+    pacer.receive(chunk)
   }
 
   /// Finalise the streaming message: the screen catches up and the full text goes into the
@@ -496,10 +545,8 @@ final class AgentSession: ObservableObject {
   private func flushStream() {
     guard let index = streamingIndex, items.indices.contains(index) else { return }
     let full = pacer.finish()
-    guard items[index].text != full.text || items[index].thinking != full.thinking else { return }
+    guard items[index].text != full.text else { return }
     items[index].text = full.text
-    items[index].thinking = full.thinking
-    items[index].finishedAt = Date()
   }
 
   private func update(callID: String, _ change: (inout TranscriptItem) -> Void) {
@@ -518,6 +565,16 @@ final class AgentSession: ObservableObject {
   private func finish() {
     // finalise first, or the last words are lost
     flushStream()
+    // An edit the backend never took left the transcript cut where the log isn't: show the log
+    // again, with the refusal under it. One it took is in the log, failures included.
+    if replacing {
+      let since = items.lastIndex { $0.kind == .user }.map { items.index(after: $0) } ?? items.endIndex
+      reload(keeping: items[since...].filter { $0.kind == .failure || $0.kind == .notice })
+    } else if reloadAfterTurn {
+      reload(keeping: [])
+    }
+    replacing = false
+    reloadAfterTurn = false
     if let timing {
       timing.mark("finished")
       timing.write(meta: [
@@ -570,6 +627,80 @@ struct TranscriptImage: Identifiable, Hashable {
     if let data { return NSImage(data: data) }
     return path.flatMap { NSImage(contentsOfFile: $0) }
   }
+
+  /// The image as an edited question carries it again. Already fitted, so preparing passes the same
+  /// bytes through and the backend stores it once.
+  var composed: ComposerImage? {
+    if let data { return ComposerImage.prepare(data: data) }
+    return path.flatMap { ComposerImage.prepare(url: URL(fileURLWithPath: $0)) }
+  }
+}
+
+/// What a tool call acted on, read once from its arguments, so the process line can name files and
+/// count work without parsing the backend's summary (which follows the UI language).
+struct ToolSubject: Equatable {
+  /// read, write, edit
+  var path = ""
+  /// grep and glob patterns, the anchor cite looks for, the repository fetch_repo clones
+  var query = ""
+  /// bash and python: the call's own one-line description
+  var label = ""
+  /// write and edit: the first Markdown heading of the new text, so a row of a long document says
+  /// which section it wrote
+  var heading = ""
+  /// plan: steps done and in all
+  var done = 0
+  var total = 0
+
+  init() {}
+
+  /// Arguments are the model's and unchecked; anything malformed leaves its field empty.
+  init(tool: String, arguments: [String: Any]) {
+    func string(_ key: String) -> String {
+      (arguments[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+    switch tool {
+    case "read":
+      path = string("path")
+    case "write", "edit":
+      path = string("path")
+      heading = Self.heading(in: arguments[tool == "write" ? "content" : "new_text"] as? String ?? "")
+    case "grep", "glob":
+      query = string("pattern")
+    case "cite":
+      query = string("anchor")
+    case "fetch_repo":
+      query = string("url")
+    case "bash", "python":
+      label = string("description")
+    case "plan":
+      let steps = (arguments["items"] as? [[String: Any]]) ?? []
+      total = steps.count
+      done = steps.filter { $0["status"] as? String == "done" }.count
+    default:
+      break
+    }
+  }
+
+  var fileName: String { (path as NSString).lastPathComponent }
+
+  /// The repository's name, as fetch_repo names its folder.
+  var repository: String {
+    let last = query.split(separator: "/").last.map(String.init) ?? query
+    return last.hasSuffix(".git") ? String(last.dropLast(4)) : last
+  }
+
+  /// The first heading near the start. Looking further would cost time on every long write, and a
+  /// section written in pieces starts with its heading.
+  static func heading(in text: String) -> String {
+    for line in text.prefix(4_000).split(separator: "\n").prefix(60) {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      guard trimmed.hasPrefix("#") else { continue }
+      let title = trimmed.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
+      if !title.isEmpty { return String(title.prefix(80)) }
+    }
+    return ""
+  }
 }
 
 /// A struct with a kind rather than an enum: streaming updates edit in place (appended text,
@@ -603,13 +734,16 @@ struct TranscriptItem: Identifiable {
   var text = ""
   /// user messages: the images sent with the question
   var images: [TranscriptImage] = []
-  /// collapsed by default: useful to judge understanding, but it would push the answer down
-  var thinking = ""
+  /// user messages: the question's number among the conversation's turns, given by the backend once
+  /// it is logged. A refused question never gets one. Editing sends back how many turns to keep.
+  var turn: Int?
 
   // tool / approval
   var callID = ""
   var toolName = ""
   var summary = ""
+  /// tool calls: what the call acted on
+  var subject = ToolSubject()
   var preview = ""
   var truncated = false
   var isError = false
@@ -623,6 +757,7 @@ struct TranscriptItem: Identifiable {
   /// `host -> reason`; shown prominently, since the agent tried to go somewhere it shouldn't
   var blockedHosts: [(host: String, reason: String)] = []
   var decision: Decision?
+  /// user messages: when the question was sent
   var startedAt: Date?
   var finishedAt: Date?
   var expiresAt: Date?
@@ -648,6 +783,7 @@ struct TranscriptItem: Identifiable {
     var item = TranscriptItem(kind: .user)
     item.text = text
     item.images = images
+    item.startedAt = Date()
     return item
   }
   static func assistant(_ text: String) -> TranscriptItem {
@@ -671,6 +807,7 @@ struct TranscriptItem: Identifiable {
     item.callID = call.callID
     item.toolName = call.name
     item.summary = call.summary.isEmpty ? call.name : call.summary
+    item.subject = ToolSubject(tool: call.name, arguments: call.arguments)
     item.startedAt = Date()
     item.awaitingResult = true
     return item
@@ -698,23 +835,12 @@ struct TranscriptItem: Identifiable {
     awaitingResult = false
   }
 
-  /// The reasoning half, for the collapsed card. Keeps the original id: a new UUID per render makes
-  /// ForEach treat it as a new card every frame, resetting expansion. Row.id prefixes activity rows
-  /// with `run:`, so the halves don't collide.
-  func reasoningOnly() -> TranscriptItem {
-    var copy = self
-    copy.text = ""
-    return copy
-  }
-
-  /// The spoken half, for the message flow. Keeps the original id so it still matches
-  /// session.streamingID.
-  func spokenOnly() -> TranscriptItem {
-    guard !thinking.isEmpty, !text.isEmpty else { return self }
-    var copy = self
-    copy.thinking = ""
-    return copy
-  }
+  /// The log's timestamps: UTC with milliseconds (store.now()).
+  private static let logTime: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
 
   /// Field names follow derive_transcript() in projects/session.py.
   init?(restored raw: [String: Any]) {
@@ -752,12 +878,15 @@ struct TranscriptItem: Identifiable {
     if kind == .user {
       // field names follow ImageRecord.as_dict(); the backend adds where the file is
       images = (raw["images"] as? [[String: Any]] ?? []).compactMap(TranscriptImage.init(restored:))
+      turn = raw["turn"] as? Int
+      startedAt = (raw["at"] as? String).flatMap(Self.logTime.date(from:))
     }
     if kind == .tool {
       callID = raw["call_id"] as? String ?? ""
       toolName = raw["name"] as? String ?? "?"
       // computed by the backend's summarise_call(), the same function the live stream uses
       summary = raw["summary"] as? String ?? toolName
+      subject = ToolSubject(tool: toolName, arguments: raw["arguments"] as? [String: Any] ?? [:])
       preview = raw["preview"] as? String ?? ""
       isError = raw["is_error"] as? Bool ?? false
       synthetic = raw["synthetic"] as? Bool ?? false

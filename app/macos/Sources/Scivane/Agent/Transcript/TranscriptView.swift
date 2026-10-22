@@ -1,18 +1,20 @@
 import SwiftUI
 
-/// The transcript. Answers have no container; a stretch of process (reasoning and tool calls)
-/// collapses into one ActivityCard.
+/// The transcript. What the agent says has no container; each stretch of its work between two things
+/// it says reads as one process line. Reasoning is never shown.
 struct AgentTranscript: View {
   @ObservedObject var session: AgentSession
   let onApprove: (Bool, String) -> Void
+  /// Asks an edited question in place of the one with this id; false when it couldn't be sent. nil:
+  /// questions can't be edited (offscreen checks).
+  var onEdit: ((UUID, String) -> Bool)? = nil
 
-  /// A plain item or a whole stretch of process.
+  /// A plain item or a stretch of tool calls.
   enum Row: Identifiable {
     case single(TranscriptItem)
     case activity([TranscriptItem])
 
-    /// Activity rows can't reuse the first item's id: an assistant message with both reasoning and text
-    /// is split into two halves sharing one UUID, and ForEach would silently drop one.
+    /// A stretch is named after its first call, prefixed so it can never collide with a single row.
     var id: String {
       switch self {
       case .single(let item): return item.id.uuidString
@@ -38,41 +40,30 @@ struct AgentTranscript: View {
 
   /// Static so checks can pin it.
   ///
-  /// Spoken text always goes to the message flow; reasoning and tools always go into the collapsed
-  /// card. Earlier versions had to decide whether a sentence was narration or the answer, which
-  /// depends on what comes next, and re-deciding later made text jump in and out of the card. The
-  /// price is one short narration line per step.
+  /// Spoken text always goes to the message flow; tool calls always go into a process line, file
+  /// changes included (their size shows on the line, the change itself one click away). Earlier
+  /// versions had to decide whether a sentence was narration or the answer, which depends on what
+  /// comes next, and re-deciding later made text jump in and out of the card. The price is one
+  /// short narration line per step.
   ///
-  /// Approvals, failures and diffs are never merged in: they need action or must be seen.
+  /// A step that only reasoned draws nothing, and doesn't split the calls around it. Approvals,
+  /// failures and notices are never merged in: they need action or must be seen.
   static func group(_ items: [TranscriptItem], running: Bool = false) -> [Row] {
-    func isProcess(_ index: Int) -> Bool {
-      let item = items[index]
-      // A file change is a result, not process: it must be seen and checked.
-      if item.diff != nil { return false }
-      if item.kind == .tool { return true }
-      guard item.kind == .assistant else { return false }
-      // Reasoning only: process. Any text: message flow, regardless of what follows.
-      return item.text.isEmpty
-    }
-
     var rows: [Row] = []
-    var pending: [TranscriptItem] = []
+    var calls: [TranscriptItem] = []
     func flush() {
-      if !pending.isEmpty { rows.append(.activity(pending)); pending.removeAll() }
+      if !calls.isEmpty { rows.append(.activity(calls)); calls.removeAll() }
     }
-    for index in items.indices {
-      let item = items[index]
-      if isProcess(index) {
-        pending.append(item)
+    for item in items {
+      switch item.kind {
+      case .tool:
+        calls.append(item)
+      case .assistant where item.text.isEmpty:
         continue
+      default:
+        flush()
+        rows.append(.single(item))
       }
-      // Reasoning and text of one message go to different places, or every narration line carries its
-      // own reasoning toggle.
-      if item.kind == .assistant, !item.thinking.isEmpty, !item.text.isEmpty {
-        pending.append(item.reasoningOnly())
-      }
-      flush()
-      rows.append(.single(item.spokenOnly()))
     }
     flush()
     return rows
@@ -100,8 +91,8 @@ struct AgentTranscript: View {
       ScrollView {
         // Rows of their own, outside this closure: it runs again on every change of the viewport, and
         // rows built in here were all rebuilt and re-laid out on every frame of a resize.
-        TranscriptRows(session: session, onApprove: onApprove, density: density).equatable()
-        // Bound to `running` so the end of a turn (status removed, card finalised) animates as one
+        TranscriptRows(session: session, onApprove: onApprove, onEdit: onEdit, density: density).equatable()
+        // Bound to `running` so the end of a turn (status removed, line finalised) animates as one
         // change, without catching per-chunk growth.
         .padding(.horizontal, 22).padding(.top, 20)
         // one frame either way: switching modifiers would rebuild every row
@@ -125,8 +116,12 @@ struct AgentTranscript: View {
 private struct TranscriptRows: View, Equatable {
   @ObservedObject var session: AgentSession
   let onApprove: (Bool, String) -> Void
+  let onEdit: ((UUID, String) -> Bool)?
   let density: ReadingDensity
   @State private var expandedRows: Set<String> = []
+  /// The question being edited in place. The rows after it dim: sending replaces them.
+  @State private var editing: UUID?
+  @AppStorage(TypeScale.chat.sizeKey) private var base = TypeScale.chat.standardSize
 
   static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.session === rhs.session && lhs.density == rhs.density
@@ -138,38 +133,54 @@ private struct TranscriptRows: View, Equatable {
     })
   }
 
-  /// consecutive process items merge into one card
+  /// consecutive calls merge into one process line
   private var rows: [AgentTranscript.Row] { AgentTranscript.group(session.items, running: session.running) }
 
-  /// the running stretch, for the status block
-  private var liveRun: [TranscriptItem] {
-    guard session.running, case .activity(let items)? = rows.last else { return [] }
-    return items
+  private var showsStatus: Bool { session.running && session.pending == nil }
+
+  private func status(for run: [TranscriptItem]) -> LiveStatus {
+    LiveStatus(run: run, fallback: session.activity, stopping: session.cancelRequested,
+               since: session.askedAt, pulse: session.pulse, size: ProcessLine.size(for: base))
   }
 
   var body: some View {
+    let rows = self.rows
+    // the stretch the turn is in says what is happening now, in place of a separate status line
+    let live = showsStatus && rows.last.map { if case .activity = $0 { return true } else { return false } } == true
+    let edited = editing.flatMap { id in
+      rows.firstIndex { if case .single(let item) = $0 { return item.id == id } else { return false } }
+    }
     // Not a LazyVStack: row heights vary widely and lazy containers estimate unrealised rows, which
     // showed as blank space at the bottom and jumping layout. There are few rows anyway, since
     // grouping turns a turn into three or four.
     VStack(alignment: .leading, spacing: 2) {
-      ForEach(rows) { row in
-        view(for: row).id(row.id)
+      ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+        let replaced = edited.map { index > $0 } ?? false
+        view(for: row, live: live && index == rows.count - 1)
+          .id(row.id)
+          .opacity(replaced ? 0.35 : 1)
+          .allowsHitTesting(!replaced)
       }
-      // The only progress indicator while running, always in the same place for the whole turn.
-      if session.running && session.pending == nil {
-        LiveStatus(run: liveRun, fallback: session.activity,
-                   stopping: session.cancelRequested, since: session.askedAt, pulse: session.pulse)
-          .padding(.top, 8)
+      // The only progress indicator while running, always at the end of the turn: here while the model
+      // thinks or answers, on the process line while it works.
+      if showsStatus && !live {
+        status(for: [])
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.top, 6 * density.space)
           .transition(.opacity)
       }
       // Must be a Spacer: VStack hands spare height from the minHeight container to flexible children,
       // and a two-row table got stretched to half the screen.
       Spacer(minLength: 10)
     }
+    .animation(.easeOut(duration: 0.18), value: edited)
+    .onChange(of: session.running) { _, running in
+      if running { editing = nil }
+    }
   }
 
   @ViewBuilder
-  private func view(for row: AgentTranscript.Row) -> some View {
+  private func view(for row: AgentTranscript.Row, live: Bool) -> some View {
     switch row {
     case .single(let item):
       // Only user rows animate in: every other kind is edited in place, and RiseIn's @State replays
@@ -180,12 +191,10 @@ private struct TranscriptRows: View, Equatable {
         // the answer appears in one piece; fading in is gentler
         self.row(item).padding(.top, topGap(for: item)).transition(.opacity)
       }
-    case .activity(let items):
-      // expansion owned by the parent; the card is rebuilt on every chunk
-      ActivityCard(
-        items: items, expansion: expansion(for: row.id),
-        streaming: session.streamingID, live: session.pacer
-      ).padding(.top, 6)
+    case .activity(let calls):
+      // expansion owned by the parent; the line is rebuilt on every chunk
+      ProcessLine(calls: calls, expansion: expansion(for: row.id), live: live ? status(for: calls) : nil)
+        .padding(.top, 6 * density.space)
     }
   }
 
@@ -206,12 +215,12 @@ private struct TranscriptRows: View, Equatable {
   @ViewBuilder
   private func row(_ item: TranscriptItem) -> some View {
     switch item.kind {
-    case .user: UserLine(text: item.text, images: item.images)
+    case .user:
+      UserLine(text: item.text, images: item.images, sentAt: item.startedAt, edit: edit(for: item))
     case .assistant:
-      AssistantLine(item: item, streaming: item.id == session.streamingID,
-                    live: session.pacer, showThinking: expansion(for: item.id.uuidString))
-    // Expanded by default: the point of lifting it out of the fold is to check the change.
-    case .tool: ToolCard(item: item)
+      AssistantLine(item: item, streaming: item.id == session.streamingID, live: session.pacer)
+    // grouping puts every call in a process line; a call on its own is drawn the same way
+    case .tool: ProcessLine(calls: [item], expansion: expansion(for: item.id.uuidString))
     case .approval: ApprovalCard(item: item, onAnswer: onApprove)
     case .failure: FailureCard(code: item.code, message: item.displayText)
     case .notice: NoticeLine(text: item.displayText)
@@ -219,21 +228,16 @@ private struct TranscriptRows: View, Equatable {
     case .compaction: CompactionCard(item: item, expanded: expansion(for: item.id.uuidString))
     }
   }
-}
 
-/// Long reasoning scrolls in its own area; the collapse button stays outside.
-struct ThinkingContent: View {
-  let text: String
-  private var prose: some View {
-    Text(text).font(.system(size: 11.5)).foregroundStyle(Palette.inkFaint)
-      .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-      .frame(maxWidth: .infinity, alignment: .leading)
-  }
-  var body: some View {
-    if text.count > 900 {
-      ScrollView { prose }.frame(height: 220)
-    } else {
-      prose
-    }
+  private func edit(for item: TranscriptItem) -> MessageEdit? {
+    guard let onEdit else { return nil }
+    return MessageEdit(
+      editing: Binding(get: { editing == item.id }, set: { editing = $0 ? item.id : nil }),
+      enabled: session.canEdit,
+      send: { text in
+        guard onEdit(item.id, text) else { return false }
+        editing = nil
+        return true
+      })
   }
 }

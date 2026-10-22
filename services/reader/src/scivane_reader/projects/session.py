@@ -19,6 +19,7 @@ from ..llm.types import (
 )
 from .annotations import COLOR_NAMES, KIND_NAMES
 from .attachments import ImageRecord
+from .conversations import active_events, opens_turn
 from .model import ProjectEvent
 
 #: Turns an image named in the log into what the model sees (attachments.AttachmentStore.block).
@@ -227,7 +228,8 @@ def derive_history(
     Malformed events are skipped; a compaction claiming more turns than existed when it was
     written is clamped. Images in user messages are named by hash; `images` turns them back into
     blocks (without it, they become a fixed note, which is all a projection that sends nothing
-    needs).
+    needs). Turns a rewind dropped are gone before any of this (conversations.active_events);
+    a stopped turn's note waits again for the question that replaces the dropped one.
     """
     turns: list[list[Message]] = [[]]
     steps = _Steps()
@@ -242,15 +244,15 @@ def derive_history(
         turns[-1] = steps.into(turns[-1])
         steps = _Steps()
 
-    for event in events:
-        if not isinstance(event, dict):
-            continue
+    for event in active_events(events):
         kind = event.get("type")
         data = event.get("data")
         if not isinstance(data, dict):
             data = {}
 
         if kind == ProjectEvent.USER_MESSAGE:
+            if not opens_turn(data):
+                continue
             flush()
             text = data.get("text")
             text = text if isinstance(text, str) else ""
@@ -259,8 +261,7 @@ def derive_history(
                 images(record) if images is not None else TextBlock(f"[image {record.sha256[:12]}]")
                 for record in records), note=pending)
             pending = ""
-            if blocks:
-                turns.append([Message("user", blocks)])
+            turns.append([Message("user", blocks)])
 
         elif kind == ProjectEvent.TURN_INTERRUPTED:
             # Not a message of the stopped turn: appended there it would leave two user messages
@@ -411,7 +412,8 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     model saw. Differences: tool/decision is included, results are previews, the synthetic flag
     is kept, and compaction hides no turns (it appears as a record where it happened). A step's
     words go before its tool cards, as they streamed, although the log holds the calls first.
-    A step's failure code and a resumed turn come back as their own items.
+    A step's failure code and a resumed turn come back as their own items. Each question carries
+    its turn number, which is what the app sends back to edit it; dropped turns never appear.
     """
     items: list[dict[str, Any]] = []
     pending: dict[str, dict[str, Any]] = {}  # call_id -> its tool item, until the result arrives
@@ -419,21 +421,22 @@ def derive_transcript(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     unclaimed: list[dict[str, Any]] = []
     claims_after = False
     decisions: dict[str, dict[str, Any]] = {}
+    turn = 0
 
-    for event in events:
-        if not isinstance(event, dict):
-            continue
+    for event in active_events(events):
         kind = event.get("type")
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
         at = event.get("at", "")
 
         if kind == ProjectEvent.USER_MESSAGE:
             unclaimed, claims_after = [], False
-            text = data.get("text")
-            text = text if isinstance(text, str) else ""
-            records = [r for r in map(ImageRecord.from_dict, data.get("images") or []) if r is not None]
-            if text or records:
-                item: dict[str, Any] = {"kind": "user", "text": text, "at": at}
+            if opens_turn(data):
+                turn += 1
+                text = data.get("text")
+                item: dict[str, Any] = {
+                    "kind": "user", "text": text if isinstance(text, str) else "", "at": at, "turn": turn,
+                }
+                records = [r for r in map(ImageRecord.from_dict, data.get("images") or []) if r is not None]
                 if records:
                     item["images"] = [record.as_dict() for record in records]
                 items.append(item)

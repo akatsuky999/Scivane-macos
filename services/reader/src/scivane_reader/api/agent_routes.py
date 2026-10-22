@@ -33,6 +33,7 @@ from ..projects.compaction import Compactor, CompactionError, auto_threshold, oc
 from ..projects.compaction import release as release_conversation
 from ..projects.context import paper_message
 from ..projects.meter import calibration, measure
+from ..projects.model import ProjectEvent
 from ..projects.session import INTERRUPTED_NOTE, derive_history, derive_transcript, summarise_call
 from ..tools import AgentLoop, StoreJournal, librarian, reader
 from ..tools.approval import APPROVAL_TIMEOUT, approvals
@@ -59,6 +60,8 @@ class ChatIn(BaseModel):
     #: Conversation to continue; defaults to the most recent one (or a new one).
     conversation: str | None = None
     images: list[ImageIn] = Field(default_factory=list, max_length=config.CHAT_IMAGES_PER_MESSAGE)
+    #: An edited question: keep this many turns and ask in place of the ones after them.
+    rewind: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _something_to_ask(self) -> "ChatIn":
@@ -314,6 +317,12 @@ def _busy() -> HTTPException:
         "This conversation is still busy with a previous turn or a compaction — wait for it to finish."))
 
 
+def _rewind_out_of_range() -> HTTPException:
+    return _refused("REWIND_OUT_OF_RANGE", ui(
+        "要改的那条提问已经不在这条对话里了 —— 重新打开这条对话再改。",
+        "The question you edited is no longer in this conversation — reopen it and edit again."))
+
+
 def _network_watcher(emitter: Emitter):
     """Map an audit record to a NETWORK event: host, port and method only."""
     def watch(entry) -> None:
@@ -504,6 +513,14 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
     # Never keep a second copy.
     events = list(projects.events(project_id, conversation=conversation))
     past = derive_history(events, images=attachments.block)
+    # An edit is projected with its rewind already in the log, so this request is exactly what a
+    # replay of the log will rebuild. Keeping every turn is a plain question.
+    if body.rewind is not None and body.rewind > past.count:
+        raise _rewind_out_of_range()
+    rewind = body.rewind if body.rewind is not None and body.rewind < past.count else None
+    if rewind is not None:
+        events.append({"type": ProjectEvent.CONVERSATION_REWOUND, "data": {"keep": rewind}})
+        past = derive_history(events, images=attachments.block)
     history = list(past.visible())
 
     # Fix the job id first so the reader's context carries the cancel signal; only reader()
@@ -550,6 +567,10 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
         journal = StreamingJournal(
             StoreJournal(projects, project_id, conversation), emitter, meter=compactor
         )
+        # Written only now, as the writer: a refused or busy request leaves the log untouched.
+        if rewind is not None:
+            projects.append_event(project_id, ProjectEvent.CONVERSATION_REWOUND, {"keep": rewind},
+                                  conversation=conversation)
         journal.user_message(body.question, [record.as_dict() for record in records])
 
         # No proxy means no network: tools get no credentials and the sandbox stays offline.
@@ -589,10 +610,12 @@ async def project_chat(project_id: str, body: ChatIn, http: Request):
         raise
 
     async def stream() -> AsyncIterator[str]:
-        # Echo the chosen conversation as a field on an existing event, not a new event name.
+        # Echo the chosen conversation, and the number this question has among its turns (what the
+        # app sends back to edit it), as fields on an existing event, not a new event name.
         first = encode(AgentEvent.MESSAGE_START, {"job_id": job_id, "step": 0,
                                                   "provider": body.provider, "model": model,
-                                                  "conversation": conversation})
+                                                  "conversation": conversation,
+                                                  "turn": past.count + 1})
         if clock is not None:
             clock.frame(AgentEvent.MESSAGE_START, len(first))
         yield first

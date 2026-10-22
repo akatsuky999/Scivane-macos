@@ -159,7 +159,7 @@ struct AgentPanel: View {
             }
           }
         } else {
-          TranscriptPane(session: session).equatable()
+          TranscriptPane(session: session, edit: model.resend).equatable()
             .environment(\.composerInset, composerFootprint)
         }
         composer(session)
@@ -490,13 +490,16 @@ struct AgentPanel: View {
 /// transcript was regrouped and its rows rebuilt each time, at a cost that grows with the history.
 private struct TranscriptPane: View, Equatable {
   let session: AgentSession
+  /// asks an edited question in place of an earlier one (AppModel.resend)
+  let edit: (UUID, String) -> Bool
 
   static func == (lhs: Self, rhs: Self) -> Bool { lhs.session === rhs.session }
 
   var body: some View {
-    AgentTranscript(session: session) { approved, reason in
-      session.answer(approved, reason: reason)
-    }
+    AgentTranscript(
+      session: session,
+      onApprove: { approved, reason in session.answer(approved, reason: reason) },
+      onEdit: edit)
   }
 }
 

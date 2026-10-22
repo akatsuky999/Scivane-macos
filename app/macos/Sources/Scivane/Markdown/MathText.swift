@@ -299,6 +299,8 @@ struct MathInlineText: View {
   var weight: Font.Weight = .regular
   /// the streaming paragraph: an unclosed trailing formula is held back (MathTeX.spans)
   var live = false
+  /// its place in a passage, filled in here piece by piece
+  var passage: PassageText? = nil
   /// Bumped when the typesetter returns, to redraw just this paragraph. Observing the global
   /// typesetter instead would redraw every paragraph with math whenever any formula finished.
   @State private var settled = 0
@@ -307,12 +309,7 @@ struct MathInlineText: View {
     let spans = MathTeX.spans(text, holdingOpenTail: live)
     let keys = MathTeX.keys(spans)
     let _ = settled
-    spans.reduce(Text("")) { acc, span in
-      switch span {
-      case .text(let plain): return acc + Text(MarkdownInline.attributed(plain, size: size))
-      case .math(let latex): return acc + Self.formula(latex, size: size)
-      }
-    }
+    composed(spans)
     .font(.system(size: size, weight: weight))
     .foregroundStyle(tint)
     .task(id: keys) {
@@ -323,21 +320,41 @@ struct MathInlineText: View {
     }
   }
 
-  /// Typeset: an image. Rejected by KaTeX: the source. Not yet typeset: the draft.
-  static func formula(_ latex: String, size: CGFloat) -> Text {
+  /// The spans as one Text, tagged with what each of its characters copies as.
+  private func composed(_ spans: [InlineSpan]) -> Text {
+    var tag = passage
+    let text = spans.reduce(Text("")) { acc, span in
+      switch span {
+      case .text(let plain):
+        let string = MarkdownInline.attributed(plain, size: size)
+        tag?.append(string)
+        return acc + Text(string)
+      case .math(let latex):
+        let formula = Self.formula(latex, size: size)
+        tag?.appendFormula(latex, length: formula.length)
+        return acc + formula.text
+      }
+    }
+    return text.passage(tag)
+  }
+
+  /// Typeset: an image. Rejected by KaTeX: the source. Not yet typeset: the draft. `length` is how
+  /// many characters it occupies in the paragraph, so a selection can tell where it is.
+  static func formula(_ latex: String, size: CGFloat) -> (text: Text, length: Int) {
     let key = MathTeX.inlineKey(latex)
     let renderer = MathRenderer.shared
     if let typeset = renderer.image(key, em: size * MathTeX.inlineScale) {
       // images sit on the baseline; the formula's own baseline is `descent` above the image bottom
-      return Text(Image(nsImage: typeset.image).renderingMode(.template))
-        .baselineOffset(-typeset.descent)
+      return (Text(Image(nsImage: typeset.image).renderingMode(.template))
+        .baselineOffset(-typeset.descent), 1)
     }
     if case .failed? = renderer.outcome(key) {
-      return Text(latex)
+      return (Text(latex)
         .font(.system(size: size * 0.9, design: .monospaced))
-        .foregroundStyle(Palette.inkSoft)
+        .foregroundStyle(Palette.inkSoft), latex.utf16.count)
     }
-    return MathTeX.draft(latex, size: size)
+    return (MathTeX.draft(latex, size: size),
+            MathTeX.runs(latex).reduce(0) { $0 + $1.text.utf16.count })
   }
 }
 
@@ -350,6 +367,8 @@ struct MathDisplayBlock: View {
   var open = false
   /// the conversation's gap scale (type size and density)
   var spacing: CGFloat = 1
+  /// its place in a passage, which takes it whole
+  var passage: PassageOrder? = nil
   @State private var settled = 0
 
   var body: some View {
@@ -358,6 +377,7 @@ struct MathDisplayBlock: View {
     let _ = settled
     content(display)
       .frame(maxWidth: .infinity)
+      .passageAtom(passage, copy: "$$\(latex)$$")
       .padding(.vertical, 9 * spacing)
       .contextMenu {
         Button(L("复制 LaTeX", "Copy LaTeX")) {

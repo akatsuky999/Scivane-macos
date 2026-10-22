@@ -58,7 +58,7 @@ struct ContextMeter: View {
     var ring: Color {
       switch self {
       case .normal: return Palette.accent
-      case .near: return ActivityCard.amber
+      case .near: return Palette.caution
       case .full: return Palette.danger
       }
     }

@@ -14,7 +14,7 @@ __all__ = [
     "VAR_DIR", "LOGS_DIR", "JOBS_DIR", "RUN_DIR", "PID_FILE",
     "PIPELINE_VERSION", "LAYOUT_DEVICE", "VL_BACKEND",
     "VL_MAX_CONCURRENCY", "LLAMA_CTX_SIZE",
-    "LLM_PROVIDERS_PATH", "LLM_CONNECT_TIMEOUT", "LLM_FIRST_TOKEN_TIMEOUT",
+    "LLM_PROVIDERS_PATH", "LLM_CONNECT_TIMEOUT", "LLM_STREAM_IDLE_TIMEOUT",
     "LLM_TOTAL_TIMEOUT", "LLM_MAX_RETRIES", "LLM_CONCURRENCY", "LLM_KEEPALIVE",
     "VISION_CACHE_PATH", "TRANSCRIBE_LONG_EDGE", "TRANSCRIBE_CONCURRENCY",
     "CHAT_IMAGE_MAX_BYTES", "CHAT_IMAGES_PER_MESSAGE",
@@ -63,9 +63,10 @@ LLM_PROVIDERS_PATH = Path(
     os.environ.get("SCIVANE_LLM_PROVIDERS_PATH", "~/.scivane/providers.json")
 ).expanduser()
 
-# Split timeouts so a DNS failure fails fast while long answers still fit.
+# Split timeouts so a DNS failure fails fast while long answers still fit. The idle limit is the
+# longest silence between two reads of a stream (see llm/retry.py Timeouts.idle for why it is long).
 LLM_CONNECT_TIMEOUT = float(os.environ.get("SCIVANE_LLM_CONNECT_TIMEOUT", "10"))
-LLM_FIRST_TOKEN_TIMEOUT = float(os.environ.get("SCIVANE_LLM_FIRST_TOKEN_TIMEOUT", "120"))
+LLM_STREAM_IDLE_TIMEOUT = float(os.environ.get("SCIVANE_LLM_STREAM_IDLE_TIMEOUT", "300"))
 LLM_TOTAL_TIMEOUT = float(os.environ.get("SCIVANE_LLM_TOTAL_TIMEOUT", "1800"))
 
 LLM_MAX_RETRIES = int(os.environ.get("SCIVANE_LLM_MAX_RETRIES", "5"))

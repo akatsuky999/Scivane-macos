@@ -26,8 +26,8 @@ final class AgentTiming: @unchecked Sendable {
   private var received: [(Double, String, Int, Int)] = []
   /// time, event
   private var handled: [(Double, String)] = []
-  /// time, visible text bytes, visible reasoning bytes
-  private var shown: [(Double, Int, Int)] = []
+  /// time, visible text bytes (reasoning is never shown)
+  private var shown: [(Double, Int)] = []
 
   private static func now() -> Double { Date().timeIntervalSince1970 }
 
@@ -50,10 +50,10 @@ final class AgentTiming: @unchecked Sendable {
     handled.append((t, event))
   }
 
-  func shown(text: Int, thinking: Int) {
+  func shown(text: Int) {
     let t = Self.now()
     lock.lock(); defer { lock.unlock() }
-    shown.append((t, text, thinking))
+    shown.append((t, text))
   }
 
   /// Best effort: timing must never fail a turn.
@@ -64,7 +64,7 @@ final class AgentTiming: @unchecked Sendable {
     for (key, value) in marks { record[key] = value }
     record["received"] = received.map { [round4($0.0), $0.1, $0.2, $0.3] as [Any] }
     record["handled"] = handled.map { [round4($0.0), $0.1] as [Any] }
-    record["shown"] = shown.map { [round4($0.0), $0.1, $0.2] as [Any] }
+    record["shown"] = shown.map { [round4($0.0), $0.1] as [Any] }
     lock.unlock()
     guard let data = try? JSONSerialization.data(withJSONObject: record) else { return }
     let url = Self.log

@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
 
     llm_registry.timeouts = Timeouts(
         connect=config.LLM_CONNECT_TIMEOUT,
-        first_token=config.LLM_FIRST_TOKEN_TIMEOUT,
+        idle=config.LLM_STREAM_IDLE_TIMEOUT,
         total=config.LLM_TOTAL_TIMEOUT,
     )
     llm_registry.policy = RetryPolicy(max_retries=config.LLM_MAX_RETRIES)

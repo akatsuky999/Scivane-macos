@@ -35,7 +35,8 @@ from ..llm.types import (
     append_user_text,
 )
 from ..jobs import INTERRUPTED as _INTERRUPTED, interruptible
-from ..llm.errors import CONTEXT_WINDOW_EXCEEDED, TIMEOUT, TRANSPORT
+from ..llm.errors import CONTEXT_WINDOW_EXCEEDED, TRANSPORT
+from ..llm.retry import LONG_SILENCE, is_long_silence
 from .definition import ToolContext
 from .files import SECTION_CHARS
 from .journal import Journal, NullJournal
@@ -68,22 +69,24 @@ async def _abandon(started: list[object]) -> None:
 #: the UI instead of failing silently.
 MAX_STEPS = 200
 
-#: A TIMEOUT after at least this much silence is a gateway giving up on an upstream that stopped
-#: sending, not a network fault. OpenRouter cuts at about two minutes; a model that is writing
-#: visibly is never this quiet.
-SILENT_CUT_SECONDS = 45.0
+#: A TIMEOUT after at least this much silence is the connection giving up on a model that was busy
+#: (a gateway's own cut, or ours), not a network fault. The same number keeps the transport layer
+#: from retrying it; a module name of its own so tests can shorten it.
+SILENT_CUT_SECONDS = LONG_SILENCE
 
 #: What the model reads after a silent cut. Written to the log verbatim with the turn/resumed
 #: event, so replays stay byte-identical if this wording changes. English and fixed, like every
-#: instruction to the model.
+#: instruction to the model. True whether or not the step had said something first: those words
+#: stay in the history right above this note.
 RESUME_NOTE = (
-    "[Scivane] Your previous response was lost: the provider closed the stream after {quiet} "
-    "seconds without sending anything, so none of it reached the user or the project. This "
-    "usually happens while one tool call carries a very long argument, such as a whole document "
-    "in one `write`: the argument is generated in full before anything is sent, and the gateway "
-    "gives up on the silence. Continue the task, keeping each tool call's arguments under about "
-    "{section} characters: write a long file in parts, the first with `write` and each next one "
-    "with `write` and `append: true`. A part is a size, not a section of the paper."
+    "[Scivane] Your previous response was cut off: the connection closed after {quiet} seconds "
+    "in which nothing arrived, so whatever you were generating then was lost and no tool call "
+    "from it ran. This usually happens while one tool call carries a very long argument, such as "
+    "a whole document in one `write`: the argument is generated in full before anything is sent, "
+    "and the connection gives up on the silence. Continue the task without repeating what you "
+    "already said, keeping each tool call's arguments under about {section} characters: write a "
+    "long file in parts, the first with `write` and each next one with `write` and "
+    "`append: true`. A part is a size, not a section of the paper."
 )
 
 
@@ -151,10 +154,7 @@ def _assistant(said: str, calls: list[ToolCall]) -> Message:
 
 
 def _silent_cut(failure: LlmFailure | None) -> bool:
-    return (
-        failure is not None and failure.code == TIMEOUT
-        and failure.quiet is not None and failure.quiet >= SILENT_CUT_SECONDS
-    )
+    return is_long_silence(failure, SILENT_CUT_SECONDS)
 
 
 def _failure_record(failure: LlmFailure | None) -> dict | None:
@@ -290,13 +290,18 @@ class AgentLoop:
             failure = finish.failure if stop == "error" else None
             self.journal.assistant_message(said, stop=stop, failure=_failure_record(failure))
 
-            if stop == "error" and may_resume and not said and not calls and _silent_cut(failure):
-                # The provider went quiet and the gateway cut it, most likely while the model wrote one
-                # very long tool argument. Retrying unchanged would hit the same wall, so the model is
+            if stop == "error" and may_resume and not calls and _silent_cut(failure):
+                # The provider went quiet and the connection was cut, most likely while the model wrote
+                # one very long tool argument. Retrying unchanged would hit the same wall, so the model is
                 # told why and how to split the work; the note goes into the log so replays match.
+                # Words said before the silence are already on screen and in the log: they stay in the
+                # history as this step's message (the projection replays them the same way), and the
+                # note follows as a user message of its own, so the model goes on instead of repeating.
                 note = RESUME_NOTE.format(quiet=round(failure.quiet or 0), section=SECTION_CHARS)  # type: ignore[union-attr]
                 self.journal.turn_resumed(
                     note, reason="silent_cut", failure=_failure_record(failure) or {})
+                if said:
+                    messages.append(_assistant(said, []))
                 messages = append_user_text(messages, note)
                 may_resume = False
                 continue

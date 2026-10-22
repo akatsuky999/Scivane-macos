@@ -1,7 +1,8 @@
 """Timeouts, retries and backoff.
 
 Retrying is only safe before any content was emitted; otherwise the user sees duplicated
-text. That is why is_retryable() requires `emitted_content`.
+text. That is why is_retryable() requires `emitted_content`. A stream cut after a long
+silence is not retried either: see LONG_SILENCE.
 """
 
 from __future__ import annotations
@@ -28,13 +29,22 @@ class Timeouts:
     """
 
     connect: float = 10.0
-    #: providers may queue before the first token
-    first_token: float = 120.0
+    #: The longest wait between two reads, the first one included. Generous on purpose: a model
+    #: writing one long tool argument sends nothing until it is done, and on an endpoint that
+    #: doesn't stream arguments that is minutes of silence from a healthy stream. Gateways cut
+    #: such silences themselves (about two minutes); this limit must not be the first wall.
+    idle: float = 300.0
     #: upper bound for one stream
     total: float = 1800.0
 
 
 DEFAULT_TIMEOUTS: Final = Timeouts()
+
+#: A TIMEOUT after at least this much silence on an open stream means the model was busy (most
+#: often writing one long tool argument), not that the connection failed. Sending the same request
+#: again would regenerate the same output into the same wall, so it is left to the agent loop,
+#: which says why and asks for smaller pieces. A model writing visibly is never this quiet.
+LONG_SILENCE: Final = 45.0
 
 
 #: Failures where sending the same request again may succeed.
@@ -59,6 +69,7 @@ class RetryPolicy:
         default_factory=lambda: BACKGROUND_RETRYABLE
     )
     background_max_retries: int = 1
+    long_silence: float = LONG_SILENCE
 
     def budget(self, purpose: Purpose) -> int:
         return (
@@ -84,12 +95,23 @@ def is_retryable(
     policy: RetryPolicy = DEFAULT_POLICY,
     purpose: Purpose = "foreground",
 ) -> bool:
-    """Whether to retry this failure. Never once content has been emitted."""
+    """Whether to retry this failure. Never once content has been emitted, nor after a long silence."""
     if emitted_content:
+        return False
+    if is_long_silence(failure, policy.long_silence):
         return False
     if attempt > policy.budget(purpose):
         return False
     return failure.code in policy.eligible_codes(purpose)
+
+
+def is_long_silence(failure: LlmFailure | None, threshold: float = LONG_SILENCE) -> bool:
+    """A timeout on a stream that had been open and silent for `threshold` seconds or more.
+    A timeout before any response has no measured silence and stays an ordinary failure."""
+    return (
+        failure is not None and failure.code == TIMEOUT
+        and failure.quiet is not None and failure.quiet >= threshold
+    )
 
 
 def compute_delay(

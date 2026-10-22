@@ -25,9 +25,12 @@ extension EnvironmentValues {
   }
 }
 
-/// Selection for a Text, when the row it is in allows it.
+/// Selection for a Text, when the row it is in allows it. Inside a passage (PassageSelection) the
+/// passage selects across its Texts instead, except for those that keep a field of their own.
 private struct SelectableText: ViewModifier {
+  let standalone: Bool
   @Environment(\.textSelectable) private var selectable
+  @Environment(\.passageText) private var passage
 
   func body(content: Content) -> some View {
     selectable(content)
@@ -35,7 +38,7 @@ private struct SelectableText: ViewModifier {
 
   @ViewBuilder
   private func selectable(_ content: Content) -> some View {
-    if selectable {
+    if selectable && (standalone || !passage) {
       content.textSelection(.enabled)
     } else {
       content
@@ -44,7 +47,11 @@ private struct SelectableText: ViewModifier {
 }
 
 extension View {
-  func selectableText() -> some View { modifier(SelectableText()) }
+  /// - Parameter standalone: selected on its own even inside a passage, for text the passage takes
+  ///   whole (code, tables that scroll sideways)
+  func selectableText(standalone: Bool = false) -> some View {
+    modifier(SelectableText(standalone: standalone))
+  }
 }
 
 /// A transcript row: its text turns selectable under the pointer and after a click, and the content

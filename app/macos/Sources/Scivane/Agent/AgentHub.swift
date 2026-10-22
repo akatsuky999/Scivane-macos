@@ -439,6 +439,26 @@ extension AppModel {
     }
   }
 
+  /// Ask an earlier question again, edited, in place of it and every turn after it. Its images go
+  /// along unchanged. Returns whether it was sent, so the editor stays open when it wasn't.
+  @discardableResult
+  func resend(_ original: UUID, as question: String) -> Bool {
+    let session = agentSession
+    let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard canAskAgent, session.canEdit,
+      let asked = session.items.first(where: { $0.id == original && $0.kind == .user })
+    else { return false }
+    let images = activeProjectID == nil ? [] : asked.images.compactMap(\.composed)
+    guard !trimmed.isEmpty || !images.isEmpty else { return false }
+    let provider = activeProviderID
+    Task {
+      guard await awaitBackend() else { return }
+      await injectCredentials()
+      session.ask(trimmed, base: backend.apiBase, provider: provider, images: images, replacing: original)
+    }
+    return true
+  }
+
   /// The conversation a question with none selected goes to: the most recent one, as the backend
   /// would pick, or a new one. It becomes the current one unless the user picked another meanwhile.
   private func startConversation(_ projectID: String) async -> String? {

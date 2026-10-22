@@ -487,7 +487,7 @@ struct MarkdownText: View {
       // drop one. Indices of earlier blocks are stable while streaming.
       ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
         MarkdownBlockView(
-          block: block, base: TypeScale.chat.clamp(base), density: density,
+          block: block, index: index, base: TypeScale.chat.clamp(base), density: density,
           live: streaming && index == blocks.count - 1
         )
         .equatable()
@@ -500,6 +500,8 @@ struct MarkdownText: View {
 /// are skipped at `.equatable()` without re-parsing their inline Markdown and formulas.
 private struct MarkdownBlockView: View, Equatable {
   let block: MarkdownBlock
+  /// its place in the answer: reading order for selecting across blocks (PassageSelection)
+  let index: Int
   /// read from preferences by MarkdownText
   let base: Double
   let density: ReadingDensity
@@ -518,14 +520,15 @@ private struct MarkdownBlockView: View, Equatable {
     switch block {
     case .heading(let level, let text):
       // heading sizes are ratios of the base, so they move together
-      prose(text, size: base * [0, 1.26, 1.13, 1.03, 1.0, 1.0, 1.0][min(level, 6)], weight: .semibold)
+      prose(text, size: base * [0, 1.26, 1.13, 1.03, 1.0, 1.0, 1.0][min(level, 6)], weight: .semibold,
+            passage: PassageText(order: PassageOrder(block: index)))
         .selectableText()
         .fixedSize(horizontal: false, vertical: true)
         .padding(.top, gap(level <= 2 ? 15 : 12)).padding(.bottom, gap(4))
 
     case .paragraph(let text):
       HStack(alignment: .bottom, spacing: 3) {
-        prose(text, size: base, live: live)
+        prose(text, size: base, live: live, passage: PassageText(order: PassageOrder(block: index)))
           .lineSpacing(base * density.leading).selectableText()
           .fixedSize(horizontal: false, vertical: true)
         if live { StreamingCaret().padding(.bottom, 2) }
@@ -537,7 +540,9 @@ private struct MarkdownBlockView: View, Equatable {
         ForEach(Array(items.enumerated()), id: \.offset) { index, item in
           HStack(alignment: .firstTextBaseline, spacing: 8) {
             ListMarker(marker: item.marker, depth: item.depth, size: base)
-            prose(item.text, size: base, live: live && index == items.count - 1)
+            prose(item.text, size: base, live: live && index == items.count - 1,
+                  passage: PassageText(order: PassageOrder(block: self.index, slot: index), joint: .item,
+                                       prefix: item.copiedMarker))
               .lineSpacing(base * density.leading * 0.3 / 0.37).selectableText()
               .fixedSize(horizontal: false, vertical: true)
           }
@@ -548,7 +553,8 @@ private struct MarkdownBlockView: View, Equatable {
     case .quote(let lines):
       // The rule is an overlay sized by the text. As an HStack sibling a shape takes whatever height
       // is offered, and a transcript shorter than the window offers it the spare height.
-      prose(lines.joined(separator: "\n"), size: base - 0.5, tint: Palette.inkSoft, live: live)
+      prose(lines.joined(separator: "\n"), size: base - 0.5, tint: Palette.inkSoft, live: live,
+            passage: PassageText(order: PassageOrder(block: index)))
         .lineSpacing(base * density.leading * 0.33 / 0.37).selectableText()
         .fixedSize(horizontal: false, vertical: true)
         .padding(.leading, 12)
@@ -558,15 +564,18 @@ private struct MarkdownBlockView: View, Equatable {
         .padding(.vertical, gap(7))
 
     case .code(let language, let body):
-      CodeBlock(language: language, code: body, size: base - 2).padding(.vertical, gap(7))
+      CodeBlock(language: language, code: body, size: base - 2)
+        .passageAtom(PassageOrder(block: index), copy: body)
+        .padding(.vertical, gap(7))
 
     case .table(let header, let alignments, let rows):
       MarkdownTable(header: header, alignments: alignments, rows: rows, size: base - 1.5,
-                    density: density)
+                    density: density, block: index)
         .padding(.vertical, gap(8))
 
     case .math(let latex, let open):
-      MathDisplayBlock(latex: latex, size: base, open: open, spacing: spacing)
+      MathDisplayBlock(latex: latex, size: base, open: open, spacing: spacing,
+                       passage: PassageOrder(block: index))
 
     case .rule:
       Hairline().padding(.vertical, gap(11))
@@ -577,14 +586,28 @@ private struct MarkdownBlockView: View, Equatable {
   @ViewBuilder
   private func prose(
     _ text: String, size: CGFloat, tint: Color = Palette.ink, weight: Font.Weight = .regular,
-    live: Bool = false
+    live: Bool = false, passage: PassageText
   ) -> some View {
     if MathTeX.hasMath(text, live: live) {
-      MathInlineText(text: text, size: size, tint: tint, weight: weight, live: live)
+      MathInlineText(text: text, size: size, tint: tint, weight: weight, live: live, passage: passage)
     } else {
-      Text(MarkdownInline.attributed(text, size: size))
+      let string = MarkdownInline.attributed(text, size: size)
+      Text(string)
+        .passage(PassageText(string, order: passage.order, joint: passage.joint, prefix: passage.prefix))
         .font(.system(size: size, weight: weight))
         .foregroundStyle(tint)
+    }
+  }
+}
+
+private extension MarkdownListItem {
+  /// The marker as copied text, indented by depth: copying a list keeps it a list.
+  var copiedMarker: String {
+    let indent = String(repeating: "  ", count: depth)
+    switch marker {
+    case .bullet: return indent + "- "
+    case .number(let number): return indent + "\(number). "
+    case .task(let done): return indent + (done ? "- [x] " : "- [ ] ")
     }
   }
 }
@@ -640,7 +663,7 @@ private struct CodeBlock: View {
           .font(.system(size: size, design: .monospaced))
           .foregroundStyle(Palette.ink.opacity(0.88))
           .lineSpacing(3.5)
-          .selectableText()
+          .selectableText(standalone: true)
           .padding(.horizontal, 13)
           .padding(.top, language.isEmpty ? 11 : 6).padding(.bottom, 11)
       }
@@ -685,6 +708,8 @@ private struct MarkdownTable: View {
   let rows: [[String]]
   var size: CGFloat = 12
   var density: ReadingDensity = .standard
+  /// the table's block in the answer
+  var block = 0
 
   /// beyond this many columns, wrapping leaves two or three characters per line; scroll instead
   private static let wrapLimit = 4
@@ -697,9 +722,11 @@ private struct MarkdownTable: View {
       if wraps {
         grid
       } else {
-        // horizontally scrolling containers are greedy vertically; pin them
+        // horizontally scrolling containers are greedy vertically; pin them. Its cells can't be
+        // placed while it scrolls, so a passage takes it whole.
         ScrollView(.horizontal, showsIndicators: false) { grid }
           .fixedSize(horizontal: false, vertical: true)
+          .passageAtom(PassageOrder(block: block), copy: tabSeparated)
       }
     }
   }
@@ -709,7 +736,7 @@ private struct MarkdownTable: View {
       // Cells align on the first baseline, not the top: a cell with a formula has a taller first line
       // and would otherwise sit half a line low.
       GridRow(alignment: .firstTextBaseline) {
-        ForEach(0..<columns, id: \.self) { cell(header, $0, isHeader: true) }
+        ForEach(0..<columns, id: \.self) { cell(header, $0, row: 0) }
       }
       // views placed directly in the Grid span the row; gridCellUnsizedAxes keeps the divider's
       // infinite width out of the column sizing
@@ -719,7 +746,7 @@ private struct MarkdownTable: View {
           Divider().overlay(Palette.ruleSoft).gridCellUnsizedAxes(.horizontal)
         }
         GridRow(alignment: .firstTextBaseline) {
-          ForEach(0..<columns, id: \.self) { cell(cells, $0, isHeader: false) }
+          ForEach(0..<columns, id: \.self) { cell(cells, $0, row: offset + 1) }
         }
       }
     }
@@ -728,24 +755,41 @@ private struct MarkdownTable: View {
     .overlay(alignment: .bottom) { Hairline() }
   }
 
-  private func cell(_ cells: [String], _ index: Int, isHeader: Bool) -> some View {
+  /// The table as tab-separated rows: what a passage copies when it takes the table whole.
+  private var tabSeparated: String {
+    ([header] + rows).map { cells in
+      (0..<columns).map { index in
+        index < cells.count ? String(MarkdownInline.attributed(cells[index], size: size).characters) : ""
+      }.joined(separator: "\t")
+    }.joined(separator: "\n")
+  }
+
+  /// - Parameter row: 0 for the header, then 1, 2, ... for the body
+  private func cell(_ cells: [String], _ index: Int, row: Int) -> some View {
+    let isHeader = row == 0
     let text = index < cells.count ? cells[index] : ""
     let alignment = index < alignments.count ? alignments[index] : .leading
     let tint = isHeader ? Palette.inkSoft : Palette.ink
     let weight: Font.Weight = isHeader ? .semibold : .regular
     let cellSize = isHeader ? size - 0.5 : size
+    // a wrapping table is part of the passage cell by cell; one that scrolls is taken whole
+    let passage = wraps
+      ? PassageText(order: PassageOrder(block: block, slot: row * columns + index), joint: .cell(row: row))
+      : nil
     return Group {
       if MathTeX.hasMath(text) {
-        MathInlineText(text: text, size: cellSize, tint: tint, weight: weight)
+        MathInlineText(text: text, size: cellSize, tint: tint, weight: weight, passage: passage)
       } else {
-        Text(MarkdownInline.attributed(text, size: cellSize))
+        let string = MarkdownInline.attributed(text, size: cellSize)
+        Text(string)
+          .passage(passage.map { PassageText(string, order: $0.order, joint: $0.joint) })
           .font(.system(size: cellSize, weight: weight))
           .foregroundStyle(tint)
       }
     }
     .multilineTextAlignment(alignment.text)
     .lineSpacing(2.5)
-    .selectableText()
+    .selectableText(standalone: !wraps)
     .fixedSize(horizontal: false, vertical: true)
     .frame(minWidth: 52, maxWidth: wraps ? .infinity : 230, alignment: alignment.frame)
     // 11 and 7 pt at the standard 12 pt

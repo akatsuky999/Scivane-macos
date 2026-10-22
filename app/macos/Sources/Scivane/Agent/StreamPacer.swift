@@ -18,13 +18,14 @@ import SwiftUI
 /// Structural events (tool calls, approvals, a new step, the end) call finish(): the screen
 /// catches up at once and the full text goes into the transcript, so narration stays ahead of
 /// the tool call that follows it.
+///
+/// Only the answer is paced. Reasoning is never shown, and pacing it would spend a frame clock on
+/// text nobody sees.
 @MainActor
 final class StreamPacer: NSObject, ObservableObject {
 
-  /// Text and reasoning published as one value, so a frame where both move redraws once.
   struct Shown: Equatable {
     var text = ""
-    var thinking = ""
   }
 
   @Published private(set) var shown = Shown()
@@ -37,17 +38,16 @@ final class StreamPacer: NSObject, ObservableObject {
   var timing: AgentTiming?
 
   private var text = Channel()
-  private var thinking = Channel()
   private var link: CADisplayLink?
   private var timer: Timer?
   private var lastTick: CFTimeInterval?
 
-  /// both channels; for checks and benchmarks
-  var backlog: Int { text.backlog + thinking.backlog }
+  /// for checks and benchmarks
+  var backlog: Int { text.backlog }
 
-  func receive(_ chunk: String, thinking isThinking: Bool) {
+  func receive(_ chunk: String) {
     guard !chunk.isEmpty else { return }
-    if isThinking { thinking.append(chunk) } else { text.append(chunk) }
+    text.append(chunk)
     startTicking()
   }
 
@@ -55,17 +55,15 @@ final class StreamPacer: NSObject, ObservableObject {
   @discardableResult
   func finish() -> Shown {
     text.revealAll()
-    thinking.revealAll()
     stopTicking()
-    publish(text: true, thinking: true)
-    return Shown(text: text.target, thinking: thinking.target)
+    publish()
+    return Shown(text: text.target)
   }
 
   /// new message: clear
   func reset() {
     stopTicking()
     text = Channel()
-    thinking = Channel()
     if shown != Shown() { shown = Shown() }
   }
 
@@ -75,19 +73,15 @@ final class StreamPacer: NSObject, ObservableObject {
     // second of backlog in one frame
     let dt = lastTick.map { min(max(now - $0, 1.0 / 240), 0.1) } ?? (1.0 / 60)
     lastTick = now
-    let movedText = text.advance(dt: dt, tau: Self.catchUp)
-    let movedThinking = thinking.advance(dt: dt, tau: Self.catchUp)
-    if movedText || movedThinking { publish(text: movedText, thinking: movedThinking) }
+    if text.advance(dt: dt, tau: Self.catchUp) { publish() }
     if backlog == 0 { stopTicking() }
   }
 
-  private func publish(text movedText: Bool, thinking movedThinking: Bool) {
-    var next = shown
-    if movedText { next.text = text.visible }
-    if movedThinking { next.thinking = thinking.visible }
+  private func publish() {
+    let next = Shown(text: text.visible)
     if next != shown {
       shown = next
-      timing?.shown(text: next.text.utf8.count, thinking: next.thinking.utf8.count)
+      timing?.shown(text: next.text.utf8.count)
     }
   }
 

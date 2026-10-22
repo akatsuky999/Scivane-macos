@@ -11,8 +11,9 @@ import Foundation
 final class AgentClient: NSObject, @unchecked Sendable {
 
   enum Event {
-    /// First frame carries the job_id, needed to cancel and to approve.
-    case messageStart(jobID: String?, step: Int, model: String)
+    /// First frame carries the job_id, needed to cancel and to approve, and in a project the number
+    /// the question just asked has among the conversation's turns (needed to edit it later).
+    case messageStart(jobID: String?, step: Int, model: String, turn: Int? = nil)
     case text(String)
     case thinking(String)
     case toolCall(ToolCallEvent)
@@ -173,12 +174,14 @@ final class AgentClient: NSObject, @unchecked Sendable {
 
   /// Chat inside a project (the reader).
   /// - Parameter conversation: nil means the most recent one.
+  /// `rewind`: an edited question, asked in place of every turn after the first `rewind`.
   func chat(
     projectID: String, question: String, provider: String,
-    conversation: String? = nil, images: [ComposerImage] = []
+    conversation: String? = nil, images: [ComposerImage] = [], rewind: Int? = nil
   ) -> AsyncThrowingStream<Event, Error> {
     var body: [String: Any] = ["question": question, "provider": provider]
     if let conversation { body["conversation"] = conversation }
+    if let rewind { body["rewind"] = rewind }
     if !images.isEmpty {
       // the backend reads the type from the bytes; only the data goes
       body["images"] = images.map { ["data": $0.data.base64EncodedString()] }
@@ -336,7 +339,7 @@ final class AgentClient: NSObject, @unchecked Sendable {
     case "message_start":
       return .messageStart(
         jobID: d["job_id"] as? String, step: d["step"] as? Int ?? 0,
-        model: d["model"] as? String ?? "")
+        model: d["model"] as? String ?? "", turn: d["turn"] as? Int)
     case "text":
       return .text(d["text"] as? String ?? "")
     case "thinking":

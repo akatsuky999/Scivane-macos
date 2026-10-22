@@ -11,6 +11,8 @@ enum Palette {
     static let ruleSoft = Color(light: .black.opacity(0.065), dark: .white.opacity(0.07))
     static let panel = Color(light: .white.opacity(0.72), dark: .white.opacity(0.045))
     static let danger = Color(light: Color(red: 0.67, green: 0.28, blue: 0.20), dark: Color(red: 0.94, green: 0.58, blue: 0.44))
+    /// Worth a look but not a failure: a call the sandbox stopped, a context close to its limit.
+    static let caution = Color(light: Color(red: 0.72, green: 0.48, blue: 0.13), dark: Color(red: 0.93, green: 0.75, blue: 0.42))
     static let sidebar = Color(light: Color(red: 0.91, green: 0.935, blue: 0.905), dark: Color(red: 0.075, green: 0.12, blue: 0.10))
     static let selectedRow = Color(light: .white.opacity(0.75), dark: .white.opacity(0.085))
     // Diff colours. Not accent or danger: a removed line is neither branding nor an error. Kept below

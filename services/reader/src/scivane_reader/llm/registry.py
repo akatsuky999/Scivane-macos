@@ -362,7 +362,7 @@ class LlmRegistry:
             timeout=httpx.Timeout(
                 connect=self.timeouts.connect,
                 # read is the gap between reads: covers both the first-token wait and a stream that stalls midway
-                read=self.timeouts.first_token,
+                read=self.timeouts.idle,
                 write=self.timeouts.connect,
                 pool=self.timeouts.connect,
             ),

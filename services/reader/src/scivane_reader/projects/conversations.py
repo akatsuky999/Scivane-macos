@@ -18,11 +18,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from .attachments import ImageRecord
 from .model import ProjectEvent
 
 __all__ = [
     "CONVERSATIONS_DIR", "CONVERSATION_EVENTS", "TITLE_CHARS",
-    "new_id", "is_valid_id", "derive_title", "summarise",
+    "new_id", "is_valid_id", "derive_title", "summarise", "opens_turn", "active_events",
 ]
 
 #: under .lumen/, the control plane the agent can't see
@@ -63,14 +64,66 @@ def is_valid_id(conversation_id: str) -> bool:
     return bool(conversation_id) and _ID.fullmatch(conversation_id) is not None
 
 
+#: Facts about the conversation rather than turn content. A rewind keeps them, so a rename or a
+#: model switch made after the edited question still holds.
+_KEPT_ON_REWIND = frozenset({
+    ProjectEvent.CONVERSATION_CREATED,
+    ProjectEvent.CONVERSATION_RENAMED,
+    ProjectEvent.CONVERSATION_PROVIDER,
+})
+
+
+def opens_turn(data: dict[str, Any]) -> bool:
+    """Whether a user/message starts a turn: it carries words or at least one image.
+
+    The one definition behind the model history, the transcript and rewinds, so turn n is the same
+    question in all three.
+    """
+    text = data.get("text")
+    if isinstance(text, str) and text:
+        return True
+    images = data.get("images")
+    return isinstance(images, list) and any(ImageRecord.from_dict(raw) is not None for raw in images)
+
+
+def active_events(events: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The log as it stands after its rewinds.
+
+    A conversation/rewound keeps the first `keep` turns and drops everything logged after the next
+    question began: answers, tool calls, compactions, stop notes. Conversation facts survive, and the
+    rewind events themselves are consumed. One that would keep every turn, or is malformed, changes
+    nothing. Projections read the log through here, so none of them handles rewinds itself.
+    """
+    kept: list[dict[str, Any]] = []
+    #: index in `kept` of each turn's question
+    starts: list[int] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if kind == ProjectEvent.CONVERSATION_REWOUND:
+            keep = data.get("keep")
+            if type(keep) is int and 0 <= keep < len(starts):
+                cut = starts[keep]
+                kept = kept[:cut] + [e for e in kept[cut:] if e.get("type") in _KEPT_ON_REWIND]
+                del starts[keep:]
+            continue
+        if kind == ProjectEvent.USER_MESSAGE and opens_turn(data):
+            starts.append(len(kept))
+        kept.append(event)
+    return kept
+
+
 def derive_title(events: Iterable[dict[str, Any]]) -> str:
     """Conversation title: the first question by default; the latest rename wins.
 
-    Renames are events rather than edits to the file header, keeping the log append-only.
+    Renames are events rather than edits to the file header, keeping the log append-only. An edited
+    first question retitles a conversation that was never renamed.
     """
     renamed = ""
     first_question = ""
-    for event in events:
+    for event in active_events(events):
         if not isinstance(event, dict):
             continue
         data = event.get("data")
@@ -95,14 +148,12 @@ def derive_title(events: Iterable[dict[str, Any]]) -> str:
 
 
 def summarise(conversation_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
-    """How a conversation looks in the list. `messages` counts user and assistant messages,
-    not tool calls.
+    """How a conversation looks in the list. `messages` counts the user and assistant messages
+    still in the conversation, not tool calls or turns dropped by a rewind; the times cover every
+    event, the rewind included.
     """
-    messages = 0
     created_at = ""
     updated_at = ""
-    #: None when never chosen; the UI falls back to the default, so old conversations need no migration.
-    provider: str | None = None
     for event in events:
         if not isinstance(event, dict):
             continue
@@ -111,6 +162,11 @@ def summarise(conversation_id: str, events: list[dict[str, Any]]) -> dict[str, A
             if not created_at:
                 created_at = at
             updated_at = at
+    messages = 0
+    #: None when never chosen; the UI falls back to the default, so old conversations need no migration.
+    provider: str | None = None
+    active = active_events(events)
+    for event in active:
         if event.get("type") in (ProjectEvent.USER_MESSAGE, ProjectEvent.ASSISTANT_MESSAGE):
             messages += 1
         if event.get("type") == ProjectEvent.CONVERSATION_PROVIDER:
@@ -119,7 +175,8 @@ def summarise(conversation_id: str, events: list[dict[str, Any]]) -> dict[str, A
                 provider = chosen.strip()
     return {
         "id": conversation_id,
-        "title": derive_title(events),
+        # already rewound; applying the rewinds again is a no-op
+        "title": derive_title(active),
         "messages": messages,
         "created_at": created_at,
         "updated_at": updated_at,
