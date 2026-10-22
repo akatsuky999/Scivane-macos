@@ -284,12 +284,15 @@ printf 'Scivane %s, build %s, revision %s\nStarted %s\n' \
 
 WHERE="$(home_relative "$TARGET")"
 [ "$INSTALL_MODE" = "copy" ] || WHERE="$WHERE (symlink)"
+# the certificate's kind, "Apple Development" rather than its full name with the account in it
+SIGNED_WITH="ad-hoc"
+[ "$SIGN_IDENTITY" = "-" ] || SIGNED_WITH="${SIGN_IDENTITY%%:*}"
 
 step Compiling  "Scivane $VERSION (release)" compile
 step Assembling "Python backend"             assemble_backend
 step Rendering  "app icon"                   render_icon
 step Bundling   "Scivane.app"                bundle
-step Signing    "Scivane.app (ad-hoc)"       sign
+step Signing    "Scivane.app ($SIGNED_WITH)" sign
 step Installing "$WHERE"                     install_app
 
 SIZE="$(du -sk "$STAGE" | awk '{ printf "%d MB", $1 / 1024 + 0.5 }')"
