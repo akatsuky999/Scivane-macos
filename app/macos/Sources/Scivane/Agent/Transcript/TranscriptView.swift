@@ -211,7 +211,7 @@ private struct TranscriptRows: View, Equatable {
       AssistantLine(item: item, streaming: item.id == session.streamingID,
                     live: session.pacer, showThinking: expansion(for: item.id.uuidString))
     // Expanded by default: the point of lifting it out of the fold is to check the change.
-    case .tool: ToolCard(item: item, startExpanded: item.diff != nil)
+    case .tool: ToolCard(item: item)
     case .approval: ApprovalCard(item: item, onAnswer: onApprove)
     case .failure: FailureCard(code: item.code, message: item.displayText)
     case .notice: NoticeLine(text: item.displayText)

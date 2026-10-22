@@ -68,7 +68,7 @@ private struct SidebarSurface: ViewModifier {
           if reduceTransparency { shape.fill(Palette.sidebar) }
           else {
             WindowGlassBackdrop().clipShape(shape)
-            shape.fill(Palette.glassTint.opacity(colorScheme == .light ? 0.38 : 0.65))
+            shape.fill(Palette.glassTint.opacity(colorScheme == .light ? 0.30 : 0.52))
           }
         }
         .shadow(color: Palette.glassShadow, radius: 18, y: 8)

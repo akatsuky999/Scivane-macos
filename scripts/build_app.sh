@@ -3,6 +3,10 @@
 # copy on the Desktop. A copy rather than a symlink, since var/ may be deleted at any time
 # (make distclean). For a symlink: SCIVANE_APP_INSTALL=link bash scripts/build_app.sh
 #
+# Signed ad-hoc unless SCIVANE_SIGN_IDENTITY names a code-signing certificate in your keychain. An
+# ad-hoc signature is new on every build, so the keychain asks again for each saved API key; a
+# certificate of your own (even self-signed) keeps "Always Allow" across rebuilds.
+#
 # The bundle carries its own backend (Contents/Resources/backend/, see build_backend.sh), so the
 # light backend needs nothing outside it. Local OCR is optional; the app installs it into
 # ~/.scivane/runtime/ocr.
@@ -19,6 +23,7 @@ STAGE="$APPOUT/Scivane.app"
 DEST="${1:-$HOME/Desktop}"
 TARGET="$DEST/Scivane.app"
 INSTALL_MODE="${SCIVANE_APP_INSTALL:-copy}"
+SIGN_IDENTITY="${SCIVANE_SIGN_IDENTITY:--}"
 LOG="$BUILD/make-app.log"
 TIMES="$BUILD/.make-app.time"
 VERSION="0.1.1"
@@ -242,11 +247,11 @@ PLIST
 }
 
 sign() {
-  # Ad-hoc signing. No --deep (deprecated; nothing sits in nested code locations). The interpreter
+  # Ad-hoc, or the identity given. No --deep (deprecated; nothing sits in nested code locations). The interpreter
   # and .so files in backend/ keep their linker signatures and are sealed as resources, so
   # `codesign --verify` fails if anything in the bundle changes at run time. Notarisation would
   # need those Mach-O files re-signed inside out.
-  codesign --force --sign - "$STAGE"
+  codesign --force --sign "$SIGN_IDENTITY" "$STAGE"
   codesign --verify --strict "$STAGE"
   # locally built output shouldn't carry quarantine attributes
   xattr -cr "$STAGE" 2>/dev/null || true

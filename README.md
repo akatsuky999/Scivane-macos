@@ -48,6 +48,14 @@ cd Scivane-macos
 make app
 ```
 
+If you have your own code-signing certificate, use it for stable Keychain access across rebuilds:
+
+```bash
+SCIVANE_SIGN_IDENTITY="My Certificate" make app
+```
+
+Without this variable, the build uses the default ad-hoc signature.
+
 When you see `Finished Scivane …`, the app is on your Desktop.
 
 ![Example build output](./pic/readme-build.png)

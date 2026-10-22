@@ -56,6 +56,14 @@ cd Scivane-macos
 make app
 ```
 
+如果这台 Mac 有自己的代码签名证书，可以指定它，让反复编译时钥匙串保持稳定：
+
+```bash
+SCIVANE_SIGN_IDENTITY="My Certificate" make app
+```
+
+不设置这个变量时，仍使用默认的 ad-hoc 签名。
+
 看到 `Finished Scivane …` 就成功了，App 在桌面上。
 
 ![编译完成后的终端输出示例](./pic/readme-build.png)
