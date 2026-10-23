@@ -281,7 +281,7 @@ struct AgentPanel: View {
       )
       .textFieldStyle(.plain).lineLimit(1...lineCap)
       .font(.system(size: 14)).foregroundStyle(Palette.ink)
-      .focused($composing).disabled(!canAsk || session.running || session.preparing)
+      .focused($composing).disabled(!canAsk || session.locked)
       .padding(.horizontal, 2).padding(.top, 2)
       .frame(
         minHeight: max(26, composerHeight),
@@ -317,9 +317,9 @@ struct AgentPanel: View {
       }
       HStack(spacing: 2) {
         ContextMeter(
-          report: isDesk ? nil : session.context, busy: session.running || session.preparing,
+          report: isDesk ? nil : session.context, busy: session.locked,
           compact: true, usage: session.usage, onCompact: { model.compactAgentContext() })
-        ComposerStatusBar(model: model, locked: session.running || session.preparing)
+        ComposerStatusBar(model: model, locked: session.locked)
       }
       sendButton(session)
     }
@@ -424,7 +424,7 @@ struct AgentPanel: View {
   }
 
   private func send(_ session: AgentSession) {
-    guard canAsk, !session.running, !session.preparing, hasSomethingToSend else { return }
+    guard canAsk, !session.locked, hasSomethingToSend else { return }
     let question = draft
     let attached = images
     draft = ""
@@ -465,7 +465,7 @@ struct AgentPanel: View {
     }
     .buttonStyle(.plain)
     // one cancel is enough; a button that stays live invites repeated clicks
-    .disabled(session.cancelRequested || (!session.running && !live))
+    .disabled(session.cancelRequested || session.backendBusy || (!session.running && !live))
     .help(session.running
           ? (session.cancelRequested ? L("正在停下…", "Stopping…") : L("停下这一轮", "Stop this turn"))
           : L("发送（⏎）", "Send (⏎)"))
@@ -478,7 +478,7 @@ struct AgentPanel: View {
   private func paperReference(_ session: AgentSession) -> some View {
     switch contextState {
     case .ready(let project), .empty(let project):
-      ComposerPaper(model: model, project: project, locked: session.running || session.preparing)
+      ComposerPaper(model: model, project: project, locked: session.locked)
     case .desk:
       Label(L("书房 · 只见清单", "Library · list only"), systemImage: "books.vertical")
         .font(.system(size: 11.5)).foregroundStyle(Palette.inkSoft)

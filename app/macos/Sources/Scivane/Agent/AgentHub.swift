@@ -562,6 +562,9 @@ extension AppModel {
     guard await awaitBackend(quiet: true) else { return false }
     guard let found = try? await projectClient.conversations(projectID) else { return false }
     if conversations[projectID] != found { conversations[projectID] = found }
+    // The list is the only read-only place that reports the backend's write lock; the composer is
+    // locked and unlocked on it, so pass it on before anything else uses the list.
+    noteConversationLocks(projectID, found)
     // the selection was deleted (or never made): back to the most recent
     if let current = activeConversation[projectID],
       found.contains(where: { $0.id == current })

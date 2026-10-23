@@ -94,11 +94,17 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable {
   /// Model card chosen for this conversation; nil falls back to the global default. Older
   /// conversations decode as nil, so no migration is needed.
   var provider: String?
+  /// Whether a turn or a compaction holds this conversation in the backend right now. This moment's
+  /// state, not something logged: the write lock follows the turn's own life, not the stream the UI
+  /// happens to be holding. nil from a backend that doesn't report it.
+  var running: Bool?
 
   /// The backend returns an empty title before the first message; the UI names it.
   var displayTitle: String { title.isEmpty ? L("新对话", "New Chat") : title }
 
   var isEmpty: Bool { messages == 0 }
+
+  var isRunning: Bool { running ?? false }
 }
 
 /// A file the user added to files/: material for the agent. Markdown goes to notes/ instead.

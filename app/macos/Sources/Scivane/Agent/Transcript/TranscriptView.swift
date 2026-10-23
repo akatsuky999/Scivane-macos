@@ -136,7 +136,9 @@ private struct TranscriptRows: View, Equatable {
   /// consecutive calls merge into one process line
   private var rows: [AgentTranscript.Row] { AgentTranscript.group(session.items, running: session.running) }
 
-  private var showsStatus: Bool { session.running && session.pending == nil }
+  /// Also while the backend holds the conversation after our stream ended: that turn is still the
+  /// one in progress, and its answer is on its way into the log.
+  private var showsStatus: Bool { (session.running || session.backendBusy) && session.pending == nil }
 
   private func status(for run: [TranscriptItem]) -> LiveStatus {
     LiveStatus(run: run, fallback: session.activity, stopping: session.cancelRequested,

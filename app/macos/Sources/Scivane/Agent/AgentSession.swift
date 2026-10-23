@@ -17,6 +17,10 @@ final class AgentSession: ObservableObject {
   @Published private(set) var running = false
   /// locks sending before the job id arrives, so a double click can't start two overlapping requests
   @Published private(set) var preparing = false
+  /// The backend still holds this conversation although our own stream ended: the write lock
+  /// follows the turn's own life, not whoever listens to it, so the turn runs on and its answer
+  /// lands in the log. Keeps the composer locked instead of letting a question be refused.
+  @Published private(set) var backendBusy = false
   @Published private(set) var usage = AgentUsage()
   /// Window occupancy of one request, not the turn's total (`usage`). Updated by `context` events
   /// while running; when idle, fetched with refreshContext.
@@ -41,6 +45,8 @@ final class AgentSession: ObservableObject {
   private var reloadAfterTurn = false
   private var base: URL?
   private var terminalEventSeen = false
+  /// This turn was refused as CONVERSATION_BUSY: the previous one still holds the conversation.
+  private var heldByBackend = false
   /// Published so the button reacts at once: the backend still fills in synthetic results before
   /// closing the stream, and a second of stillness reads as a broken button.
   @Published private(set) var cancelRequested = false
@@ -69,6 +75,11 @@ final class AgentSession: ObservableObject {
 
   /// Shown in the waiting line. "Thinking" and "reading md/context.md" are different waits.
   var activity: String {
+    // Not ours any more, but still running: say so, or the status line would look idle while the
+    // answer is on its way into the log.
+    if backendBusy && !running {
+      return L("上一轮还在后台跑", "The previous turn is still running")
+    }
     if let last = items.last, last.kind == .compaction, last.compaction?.state == .running {
       return L("正在压缩上下文", "Compacting context")
     }
@@ -152,7 +163,7 @@ final class AgentSession: ObservableObject {
   /// watchdog and wrap-up all apply, and a cancelled compaction leaves nothing in the log.
   func compact(base: URL, provider: String) {
     // a new chat has nothing to compact; without a conversation the backend would pick another one
-    guard let projectID, conversationID != nil, !running, !preparing else { return }
+    guard let projectID, conversationID != nil, !locked else { return }
     preparing = true
     running = true
     compacting = true
@@ -227,7 +238,7 @@ final class AgentSession: ObservableObject {
     _ question: String, base: URL, provider: String, images: [ComposerImage] = [],
     replacing original: UUID? = nil
   ) {
-    guard !running, !preparing else { return }
+    guard !locked else { return }
     var rewind: Int?
     replacing = false
     reloadAfterTurn = false
@@ -322,7 +333,18 @@ final class AgentSession: ObservableObject {
   static let stopGrace: Double = 8
 
   /// Whether the question in this row can be edited and asked again right now.
-  var canEdit: Bool { !running && !preparing }
+  var canEdit: Bool { !locked }
+
+  /// Everything that must keep the composer locked, in one place.
+  var locked: Bool { running || preparing || backendBusy }
+
+  /// What the conversation list says about this conversation; it is the only read-only place that
+  /// reports the write lock. A turn of our own always wins: it is the same fact, first hand.
+  func backend(running: Bool) {
+    let busy = running && !self.running && !preparing
+    guard backendBusy != busy else { return }
+    backendBusy = busy
+  }
 
   /// How many turns the backend keeps when the question `id` is asked again: all before it. Its own
   /// number says so; a question the backend never numbered (refused) counts the numbered ones above
@@ -500,6 +522,9 @@ final class AgentSession: ObservableObject {
     case .failed(let code, let message):
       terminalEventSeen = true
       // the backend's wording is in a single language (the UI language at request time)
+      // Refused because the previous turn still holds this conversation: first-hand news that it
+      // is running on, so lock the composer again instead of letting the next question be refused too.
+      if code == "CONVERSATION_BUSY" { heldByBackend = true }
       if compacting {
         // a failed manual compaction isn't a failed turn: it lands on the card, or as a notice
         endCompaction(.verbatim(message))
@@ -588,6 +613,11 @@ final class AgentSession: ObservableObject {
     pulse.reset()
     stopWatchdog?.cancel()
     stopWatchdog = nil
+    // Our stream ended without the backend saying the turn did (it broke, or we let go of a stop
+    // before it closed): assume the turn runs on and stay locked until the conversation list says
+    // otherwise. A turn that ended with done / error needs none of this.
+    backendBusy = heldByBackend || (!terminalEventSeen && projectID != nil)
+    heldByBackend = false
     preparing = false
     running = false
     compacting = false

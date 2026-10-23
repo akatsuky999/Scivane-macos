@@ -171,6 +171,8 @@ final class AppModel: ObservableObject {
   /// write would mutate state during a view update. Views observe the session objects directly
   /// (AgentPane).
   private var agentSessions: [String: AgentSession] = [:]
+  /// Per project, the task re-reading the conversation list while the backend holds one of them.
+  private var lockWatchers: [String: Task<Void, Never>] = [:]
   /// Projects whose first question is waiting for its conversation; a second send would make two.
   var conversationsStarting: Set<String> = []
   /// metadata only, never credentials
@@ -236,6 +238,37 @@ final class AppModel: ObservableObject {
     return conversation.map { "\(projectID)/\($0)" } ?? projectID
   }
 
+  /// Passes on what the conversation list says about the backend's write lock. Only to sessions
+  /// that already exist: creating one per listed conversation would materialise a session (and a
+  /// transcript) for every conversation in the project.
+  func noteConversationLocks(_ projectID: String, _ found: [Conversation]) {
+    for conversation in found {
+      agentSessions[Self.sessionKey(projectID, conversation.id)]?
+        .backend(running: conversation.isRunning)
+    }
+    if found.contains(where: \.isRunning) {
+      watchConversationLocks(projectID)
+    } else {
+      lockWatchers.removeValue(forKey: projectID)?.cancel()
+    }
+  }
+
+  /// `running` is this moment's state, so only another read can clear it: while the backend still
+  /// holds one of this project's conversations, keep asking until it lets go. One watcher per
+  /// project, and it is the only thing that unlocks a composer locked on the backend's word.
+  private func watchConversationLocks(_ projectID: String) {
+    guard lockWatchers[projectID] == nil else { return }
+    lockWatchers[projectID] = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .milliseconds(1200))
+        guard !Task.isCancelled, let self else { return }
+        guard await self.refreshConversations(projectID),
+          self.conversations[projectID]?.contains(where: \.isRunning) == true
+        else { return }
+      }
+    }
+  }
+
   /// Call after deleting a conversation, or a reused id would get a stale transcript.
   func forgetSession(projectID: String, conversation: String) {
     agentSessions.removeValue(forKey: Self.sessionKey(projectID, conversation))
@@ -291,7 +324,9 @@ final class AppModel: ObservableObject {
   // a working agent after five minutes.
   var hasBackendWork: Bool {
     isBusy || ocrInstaller.isRunning || annotations.hasPendingWrites
-      || agentSessions.values.contains { $0.running || $0.preparing }
+      // backendBusy too: a turn whose stream we lost is still running there, and stopping the
+      // backend under it would throw the answer away
+      || agentSessions.values.contains { $0.locked }
   }
 
   var finishedCount: Int { jobs.filter(\.status.isFinished).count }

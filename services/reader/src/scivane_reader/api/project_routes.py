@@ -16,6 +16,7 @@ from .. import config
 from ..i18n import ui
 from ..projects import ProjectError, projects
 from ..projects.annotations import AnnotationError
+from ..projects.compaction import occupied
 
 logger = logging.getLogger("scivane.api.projects")
 
@@ -250,7 +251,12 @@ async def list_conversations(project_id: str):
         projects.get(project_id)
     except ProjectError as exc:
         raise _fail(exc) from exc
-    return {"conversations": projects.list_conversations(project_id)}
+    rows = projects.list_conversations(project_id)
+    for row in rows:
+        # Live state of this process, not a projection of the log: the client asks before it
+        # unlocks its composer, so a question isn't sent into a refusal.
+        row["running"] = occupied(project_id, row["id"])
+    return {"conversations": rows}
 
 
 @router.post("/{project_id}/conversations")

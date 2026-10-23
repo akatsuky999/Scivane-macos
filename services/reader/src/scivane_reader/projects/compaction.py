@@ -264,6 +264,16 @@ def release(project_id: str, conversation: str) -> None:
     _busy.discard((project_id, conversation))
 
 
+def occupied(project_id: str, conversation: str) -> bool:
+    """Whether a turn or a compaction holds this conversation right now.
+
+    Read-only, so a client can ask before it offers to send: the lock follows the turn's own life,
+    not whoever is still listening to its stream, and a turn outlives a client that went away.
+    Without this the only way to learn it is to be refused.
+    """
+    return (project_id, conversation) in _busy
+
+
 @dataclass
 class Compactor:
     """Context management for one conversation: measure, compact when needed, swap in the new messages.
