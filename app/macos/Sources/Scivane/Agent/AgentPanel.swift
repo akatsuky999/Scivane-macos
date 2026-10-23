@@ -101,6 +101,8 @@ struct AgentPanel: View {
   @State private var images: [ComposerImage] = []
   @State private var pasteMonitor = ImagePasteMonitor()
   @FocusState private var composing: Bool
+  /// what to select in the composer once a starter's text is in it
+  @State private var composerSelection: FocusedTextSelection.Request?
   @State private var dropping = false
   @State private var composerFootprint: CGFloat = 142
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -185,46 +187,47 @@ struct AgentPanel: View {
   private var welcome: some View {
     VStack(spacing: 0) {
       Spacer(minLength: 24)
-      VStack(spacing: 11) {
-        Image(systemName: isDesk ? "books.vertical" : "sparkles")
-          .font(.system(size: 26, weight: .ultraLight))
-          .foregroundStyle(Palette.accent.opacity(0.8))
-        Text(headline)
-          .font(.system(size: 20, weight: .regular, design: .serif))
-          .foregroundStyle(Palette.ink)
-        Text(subhead)
-          .font(.system(size: 12)).foregroundStyle(Palette.inkFaint)
-          .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-      }
-      if canAsk {
-        VStack(spacing: 1) {
-          ForEach(starters, id: \.self) { SuggestionRow(text: $0) { draft = $0; composing = true } }
+      if canAsk, case .ready(let project) = contextState {
+        // the paper is the headline; nothing here explains the agent
+        PaperWelcome(project: project, use: use)
+      } else {
+        VStack(spacing: 11) {
+          Image(systemName: isDesk ? "books.vertical" : "sparkles")
+            .font(.system(size: 26, weight: .ultraLight))
+            .foregroundStyle(Palette.accent.opacity(0.8))
+          Text(headline)
+            .font(.system(size: 20, weight: .regular, design: .serif))
+            .foregroundStyle(Palette.ink)
+          Text(subhead)
+            .font(.system(size: 12)).foregroundStyle(Palette.inkFaint)
+            .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.top, 24).frame(maxWidth: 340)
-      } else if let action = recoveryAction {
-        Button(action.title, action: action.run)
-          .buttonStyle(StudioButtonStyle(primary: true)).padding(.top, 20)
+        if canAsk {
+          StarterLedger(starters: Starter.library, use: use).padding(.top, 24).frame(maxWidth: 380)
+        } else if let action = recoveryAction {
+          Button(action.title, action: action.run)
+            .buttonStyle(StudioButtonStyle(primary: true)).padding(.top, 20)
+        }
       }
       Spacer(minLength: 24)
     }.frame(maxWidth: .infinity)
   }
 
-  /// The librarian can't read any text, so its starters differ (matching its prompt). Starters
-  /// follow the UI language, and the agent answers in the language it is asked in.
-  private var starters: [String] {
-    isDesk
-      ? [L("我都有哪些论文", "What papers do I have?"),
-         L("找一篇讲对比学习的", "Find one about contrastive learning"),
-         L("这些项目里哪些还没有正文", "Which of these projects have no text yet?")]
-      : [L("概括这篇论文的核心贡献", "Summarize this paper's core contributions"),
-         L("把结果表格画成一张图", "Plot the results table as a chart"),
-         L("找出实验里最有说服力的证据", "Find the most convincing evidence in the experiments")]
+  /// A starter only fills the composer: the user reads it, changes it, and sends it. Its blank (the
+  /// language to translate into) comes selected, to be typed over; otherwise the caret goes to the end,
+  /// since a field taking focus selects all its text.
+  private func use(_ starter: Starter) {
+    draft = starter.prompt
+    composing = true
+    composerSelection = .selecting(starter.blank, in: starter.prompt)
   }
 
+  /// Shown when there's nothing to ask yet, or in the librarian. A ready paper is its own headline
+  /// (PaperWelcome).
   private var headline: String {
     if model.agentProvider.isEmpty { return L("还没有配置模型", "No model set up yet") }
     switch contextState {
-    case .ready: return L("和这篇论文对话", "Chat with this paper")
+    case .ready: return ""
     case .empty: return L("这个项目还没有正文", "This project has no text yet")
     case .desk: return L("书房", "Library")
     }
@@ -237,8 +240,7 @@ struct AgentPanel: View {
     }
     switch contextState {
     case .ready:
-      return L("它能读正文、跑脚本、取论文代码 —— 全部落在这个项目目录里。",
-               "It can read the text, run scripts and fetch the paper's code — all inside this project's folder.")
+      return ""
     case .empty:
       return L("识别原稿，或在下面的正文标签里换成一份 Markdown。",
                "Recognize the original, or use a Markdown file from the text chip below.")
@@ -285,6 +287,7 @@ struct AgentPanel: View {
         minHeight: max(26, composerHeight),
         alignment: .topLeading)
       .onSubmit { send(session) }
+      .background(FocusedTextSelection(request: composerSelection))
       .accessibilityIdentifier("agent-composer-input")
 
       if !model.activeProjectFiles.isEmpty { attachments }
@@ -502,32 +505,6 @@ private struct TranscriptPane: View, Equatable {
       onEdit: edit)
   }
 }
-
-/// A quiet row that lights up on hover, so the suggestions don't outweigh the composer.
-private struct SuggestionRow: View {
-  let text: String
-  let pick: (String) -> Void
-  @State private var hovering = false
-
-  var body: some View {
-    Button { pick(text) } label: {
-      HStack(spacing: 8) {
-        Text(text).font(.system(size: 12)).foregroundStyle(hovering ? Palette.ink : Palette.inkSoft)
-        Spacer(minLength: 8)
-        Image(systemName: "arrow.up.right")
-          .font(.system(size: 9)).foregroundStyle(Palette.accent)
-          .opacity(hovering ? 1 : 0)
-      }
-      .padding(.horizontal, 12).padding(.vertical, 9)
-      .background(hovering ? Palette.sunk : .clear, in: RoundedRectangle(cornerRadius: 8))
-      .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
-    .onHover { hovering = $0 }
-    .animation(.easeOut(duration: 0.12), value: hovering)
-  }
-}
-
 
 /// An image waiting in the composer.
 private struct PendingImage: View {

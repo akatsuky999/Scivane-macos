@@ -15,15 +15,6 @@ enum MarkupTool: String, CaseIterable, Identifiable {
     case .eraser: return L("橡皮", "Eraser")
     }
   }
-
-  var symbol: String {
-    switch self {
-    case .select: return "cursorarrow"
-    case .note: return "character.textbox"
-    case .ink: return "pencil"
-    case .eraser: return "eraser"
-    }
-  }
 }
 
 /// Pen widths, in page points so a stroke scales with the page. Raw values are stored preferences.

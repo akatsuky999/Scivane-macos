@@ -25,6 +25,10 @@ struct UserLine: View {
   var edit: MessageEdit? = nil
   /// the question follows the conversation's type size, or compact answers sit under 13 pt questions
   @AppStorage(TypeScale.chat.sizeKey) private var base = TypeScale.chat.standardSize
+  /// The actions outlast the hover a little, so a pointer heading for a button that slips off the
+  /// row still finds it there.
+  @State private var showsActions = false
+  static let linger: Duration = .milliseconds(900)
 
   private var size: CGFloat { TypeScale.chat.clamp(base) - 0.5 }
 
@@ -58,11 +62,25 @@ struct UserLine: View {
               }
             }
             MessageActions(text: text, sentAt: sentAt, edit: edit)
-              .opacity(hovering ? 1 : 0)
-              .animation(.easeOut(duration: 0.12), value: hovering)
+              .opacity(showsActions ? 1 : 0)
+              .animation(.easeOut(duration: 0.15), value: showsActions)
           }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
+        // The whole band is the hover area. Without it the gap under the bubble and the actions
+        // themselves, invisible until shown, don't count: on the way to a button the hover ended and
+        // the actions vanished from under the pointer.
+        .contentShape(Rectangle())
+        .task(id: hovering) {
+          if hovering {
+            showsActions = true
+            return
+          }
+          try? await Task.sleep(for: Self.linger)
+          // try? swallows the cancellation too: the pointer coming back cancels this wait
+          guard !Task.isCancelled else { return }
+          showsActions = false
+        }
       }
     }
   }
@@ -95,7 +113,7 @@ struct MessageActions: View {
       }
       if !text.isEmpty {
         MessageActionButton(
-          symbol: copied ? "checkmark" : "doc.on.doc", help: L("复制", "Copy"), active: copied
+          symbol: copied ? "checkmark" : "square.on.square", help: L("复制", "Copy"), active: copied
         ) {
           NSPasteboard.general.clearContents()
           NSPasteboard.general.setString(text, forType: .string)
@@ -104,16 +122,17 @@ struct MessageActions: View {
         }
       }
       if let edit {
-        MessageActionButton(symbol: "pencil", help: L("编辑消息", "Edit Message")) {
+        MessageActionButton(symbol: "pencil.line", help: L("编辑消息", "Edit Message")) {
           edit.editing.wrappedValue = true
         }
         .disabled(!edit.enabled)
       }
     }
-    .frame(height: 22)
+    .frame(height: 24)
   }
 }
 
+/// One glyph size and weight for every action, so copy and edit read as a pair.
 private struct MessageActionButton: View {
   let symbol: String
   let help: String
@@ -125,12 +144,13 @@ private struct MessageActionButton: View {
   var body: some View {
     Button(action: action) {
       Image(systemName: symbol)
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(active ? Palette.accent : (hovering && enabled ? Palette.inkSoft : Palette.inkFaint))
-        .frame(width: 24, height: 22)
+        .font(.system(size: 12, weight: .regular))
+        .imageScale(.medium)
+        .foregroundStyle(active ? Palette.accent : (hovering && enabled ? Palette.ink : Palette.inkSoft))
+        .frame(width: 26, height: 24)
         .background(
-          Palette.ink.opacity(hovering && enabled ? 0.06 : 0),
-          in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+          Palette.ink.opacity(hovering && enabled ? 0.07 : 0),
+          in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
@@ -149,6 +169,8 @@ private struct MessageEditor: View {
   let edit: MessageEdit
   @State private var draft: String
   @FocusState private var focused: Bool
+  /// the caret at the end once the field has focus; taking focus would select the whole question
+  @State private var caret: FocusedTextSelection.Request?
 
   init(original: String, images: [TranscriptImage], size: CGFloat, edit: MessageEdit) {
     self.images = images
@@ -193,8 +215,11 @@ private struct MessageEditor: View {
     }
     .padding(.leading, 44)
     .frame(maxWidth: .infinity, alignment: .trailing)
-    .background(CaretAtEnd(armed: focused))
-    .onAppear { focused = true }
+    .background(FocusedTextSelection(request: caret))
+    .onAppear {
+      focused = true
+      caret = .end(of: draft)
+    }
   }
 
   private func cancel() { edit.editing.wrappedValue = false }
@@ -202,28 +227,6 @@ private struct MessageEditor: View {
   private func send() {
     guard canSend else { return }
     _ = edit.send(draft)
-  }
-}
-
-/// Puts the caret at the end of the text that just took focus in this window. Taking focus selects
-/// all of a field's text, and the first key typed would replace the whole question. Reads this view's
-/// own window rather than the key window, which may not be this one yet.
-private struct CaretAtEnd: NSViewRepresentable {
-  let armed: Bool
-
-  final class Coordinator { var placed = false }
-
-  func makeCoordinator() -> Coordinator { Coordinator() }
-  func makeNSView(context: Context) -> NSView { NSView() }
-
-  func updateNSView(_ view: NSView, context: Context) {
-    guard armed, !context.coordinator.placed else { return }
-    // after this pass, once focus has reached the text view and its select-all has happened
-    DispatchQueue.main.async {
-      guard let text = view.window?.firstResponder as? NSTextView else { return }
-      text.setSelectedRange(NSRange(location: (text.string as NSString).length, length: 0))
-      context.coordinator.placed = true
-    }
   }
 }
 

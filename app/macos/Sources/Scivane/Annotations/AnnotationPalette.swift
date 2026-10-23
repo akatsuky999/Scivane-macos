@@ -133,8 +133,8 @@ struct NoteSizeControl<Style: ButtonStyle>: View {
   private func step(up: Bool) -> some View {
     let label = up ? L("增大字号", "Bigger") : L("减小字号", "Smaller")
     return Button { change(NoteText.step(size, up: up)) } label: {
-      Image(systemName: up ? "textformat.size.larger" : "textformat.size.smaller")
-        .font(.system(size: 11.5))
+      SizeGlyph(larger: up).stroke(style: .glyph)
+        .frame(width: 15, height: 15)
         .frame(width: 26, height: 24)
         .contentShape(Rectangle())
     }
