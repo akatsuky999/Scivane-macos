@@ -630,7 +630,15 @@ final class AppModel: ObservableObject {
     }
     // It may have been stopped after idling; make sure it is up. A model card needs no OCR engine,
     // so the light backend is enough.
-    backend.ensureRunning(mode: provider == nil ? .full : .lite)
+    guard backend.ensureRunning(mode: provider == nil ? .full : .lite) else {
+      // Only the light -> full upgrade gets here: it restarts the backend, which would throw away
+      // the turn that is running. Say so instead of taking the answer down with it.
+      job.status = .failed(UIText(
+        "对话还在跑 —— 识别要换成完整引擎（会重启服务），等这一轮结束再开始。",
+        "A turn is still running — recognition needs the full engine, which restarts the service. "
+          + "Start it once that turn ends."))
+      return
+    }
     while !backend.state.isReady {
       if case .failed(let message) = backend.state {
         job.status = .failed(message)

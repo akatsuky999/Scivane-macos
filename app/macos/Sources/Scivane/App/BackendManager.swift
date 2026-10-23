@@ -139,17 +139,33 @@ final class BackendManager: ObservableObject {
 
     // MARK: - Start
 
+    /// Whether `ensureRunning` may go ahead right now.
+    ///
+    /// Upgrading light -> full restarts the backend, and a restart kills whatever it is doing: an
+    /// agent turn loses its stream, and the answer it was about to write is thrown away. So the
+    /// upgrade is refused while the backend is busy, the same thing the idle stop checks. Nothing
+    /// to restart, or no restart needed, is always fine.
+    static func mayEnsure(running: Mode?, requested: Mode, busy: Bool) -> Bool {
+        guard let running, running != .full, requested == .full else { return true }
+        return !busy
+    }
+
     /// Call before use. Does nothing if already running at a sufficient level.
     ///
     /// A running light backend is restarted in full mode when OCR is needed: both levels are one
     /// process tree. This only happens when the user starts OCR, which takes seconds anyway.
-    func ensureRunning(mode requested: Mode = .full) {
+    /// Returns false when that restart would have killed work in progress; the caller says so.
+    @discardableResult
+    func ensureRunning(mode requested: Mode = .full) -> Bool {
         noteActivity()
         if let process, process.isRunning {
-            if runningMode == .full || requested == .lite { return }
+            guard Self.mayEnsure(running: runningMode, requested: requested, busy: isBusy())
+            else { return false }
+            if runningMode == .full || requested == .lite { return true }
             stop()
         }
         start(mode: requested)
+        return true
     }
 
     /// Changes on every backend launch. Credentials live in the backend's memory and are lost on

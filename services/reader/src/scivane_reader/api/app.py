@@ -19,6 +19,36 @@ from .transcribe_routes import router as transcribe_router
 
 logger = logging.getLogger("scivane.api")
 
+#: Local time, no timezone: this log is read next to the conversation logs of the same machine.
+_LOG_TIME = "%Y-%m-%d %H:%M:%S"
+
+
+def stamp_logs() -> None:
+    """Put a timestamp in front of every line of the server log.
+
+    Without one the log cannot be lined up with anything else -- which turn a request belongs to,
+    when a client went away, when the process was stopped. uvicorn installs its handlers before it
+    imports this module, so its formatters are rewrapped here instead of through a log config file,
+    and anything we log ourselves gets a handler of the same shape.
+    """
+    for name in ("uvicorn", "uvicorn.access"):
+        for handler in logging.getLogger(name).handlers:
+            formatter = handler.formatter
+            fmt = getattr(formatter, "_fmt", None)
+            # already stamped, or a formatter we don't recognise: leave it alone
+            if not fmt or "asctime" in fmt:
+                continue
+            handler.setFormatter(type(formatter)(fmt=f"%(asctime)s {fmt}", datefmt=_LOG_TIME))
+    ours = logging.getLogger("scivane")
+    if not ours.handlers:
+        # Without a handler of its own these fall through to logging.lastResort, which prints the
+        # bare message with no level and no time.
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s",
+                                               datefmt=_LOG_TIME))
+        ours.addHandler(handler)
+        ours.setLevel(logging.INFO)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -89,6 +119,7 @@ class UILanguage:
 
 
 def create_app() -> FastAPI:
+    stamp_logs()
     app = FastAPI(title="Scivane Reader", version="0.1.1", lifespan=lifespan)
     app.add_middleware(UILanguage)
     app.include_router(router)

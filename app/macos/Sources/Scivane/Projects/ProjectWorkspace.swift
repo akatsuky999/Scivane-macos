@@ -18,7 +18,14 @@ extension AppModel {
   ///   the runtime would only be annoyed by a startup error.
   @discardableResult
   func awaitBackend(mode: BackendManager.Mode = .lite, quiet: Bool = false) async -> Bool {
-    backend.ensureRunning(mode: mode)
+    guard backend.ensureRunning(mode: mode) else {
+      // Only an upgrade to the full engine can be refused, and only while work is in progress.
+      if !quiet {
+        notifyProject(L("对话还在跑 —— 等这一轮结束再试。",
+                        "A turn is still running — try again once it ends."))
+      }
+      return false
+    }
     while !backend.state.isReady {
       if case .failed(let message) = backend.state {
         if !quiet { notifyProject(L("本地服务启动失败：", "The local service failed to start: ") + message.text) }
