@@ -45,6 +45,11 @@ final class BackendManager: ObservableObject {
     /// set by AppModel: don't idle-stop while work is running
     var isBusy: () -> Bool = { false }
 
+    /// set by AppModel: an agent turn is in flight. Narrower than `isBusy` on purpose -- the
+    /// recognition job that asks for the full engine is itself "work", and would refuse its own
+    /// upgrade if the two were the same question.
+    var hasRunningTurn: () -> Bool = { false }
+
     /// 0 disables the idle stop
     var idleTimeout: TimeInterval {
         get {
@@ -159,7 +164,7 @@ final class BackendManager: ObservableObject {
     func ensureRunning(mode requested: Mode = .full) -> Bool {
         noteActivity()
         if let process, process.isRunning {
-            guard Self.mayEnsure(running: runningMode, requested: requested, busy: isBusy())
+            guard Self.mayEnsure(running: runningMode, requested: requested, busy: hasRunningTurn())
             else { return false }
             if runningMode == .full || requested == .lite { return true }
             stop()

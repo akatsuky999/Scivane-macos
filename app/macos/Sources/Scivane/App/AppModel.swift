@@ -295,6 +295,9 @@ final class AppModel: ObservableObject {
     self.annotations = AnnotationStore(service: { ProjectClient(base: backend.apiBase) })
     // don't auto-stop the backend while work is running
     backend.isBusy = { [weak self] in self?.hasBackendWork ?? false }
+    // Only a turn blocks the upgrade to the full engine. Recognition is the thing asking for it,
+    // so it must not count itself as work in progress and refuse its own job.
+    backend.hasRunningTurn = { [weak self] in self?.hasRunningTurn ?? false }
     ocrInstaller.onInstalled = { [weak self] in self?.resumeAfterOCRInstall() }
     annotations.ready = { [weak self] in await self?.awaitBackend(quiet: true) ?? false }
     annotations.onError = { [weak self] in self?.notifyProject($0) }
@@ -322,6 +325,10 @@ final class AppModel: ObservableObject {
 
   // Conversations and pending approvals count too; looking only at OCR would stop the backend under
   // a working agent after five minutes.
+  /// An agent turn in flight, here or in a conversation we are not looking at. Restarting the
+  /// backend under one throws its answer away; OCR jobs are not this.
+  var hasRunningTurn: Bool { agentSessions.values.contains { $0.locked } }
+
   var hasBackendWork: Bool {
     isBusy || ocrInstaller.isRunning || annotations.hasPendingWrites
       // backendBusy too: a turn whose stream we lost is still running there, and stopping the
