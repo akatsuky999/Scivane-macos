@@ -130,6 +130,20 @@ def looks_like_no_vision(text: str) -> bool:
     return bool(_NO_VISION.search(text))
 
 
+#: The server takes a reasoning budget but not the value we sent. Every vendor spells its own
+#: scale: OpenAI and OpenRouter take low/medium/high, xAI only low/high, and self-hosted gateways
+#: add their own words or an integer range. Rather than keep a table of who accepts what -- which
+#: is wrong the day a gateway changes -- the value is dropped once and the server's default is used.
+_REASONING_REJECTED = re.compile(
+    r"reasoning[_ ]?(effort|budget)|effort.{0,40}(not supported|unsupported|invalid)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_reasoning_rejected(text: str) -> bool:
+    return bool(_REASONING_REJECTED.search(text))
+
+
 def looks_like_quota_exhausted(text: str) -> bool:
     return bool(_QUOTA.search(text))
 

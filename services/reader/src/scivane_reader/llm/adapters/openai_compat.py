@@ -413,6 +413,14 @@ class OpenAiCompatAdapter(ProtocolAdapter):
         return super().classify(status, detail)
 
 
+def drop_reasoning(body: dict[str, object]) -> bool:
+    """Take the reasoning budget back out, leaving the server its own default.
+
+    Both shapes _apply_reasoning can write; returns whether anything was there to remove.
+    """
+    return any(body.pop(key, None) is not None for key in ("reasoning_effort", "reasoning"))
+
+
 def _apply_reasoning(body: dict[str, object], level: str | None) -> None:
     """Translate the neutral reasoning level.
 

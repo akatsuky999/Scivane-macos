@@ -22,10 +22,15 @@ import httpx
 from ..i18n import ui
 from . import timing, vision as vision_probe
 from .adapters import PROTOCOLS, ProtocolAdapter
+from .adapters.openai_compat import drop_reasoning
 from .adapters.base import aiter_sse
 from .cache import prefix_fingerprint
 from .credentials import CredentialStore, credentials as default_credentials
 from .types import REASONING_DEFAULT
+
+#: (endpoint, model) whose server refused the reasoning budget we send. One process, so a set
+#: suffices; a restart asks once more, which is what we want if the server was reconfigured.
+_no_reasoning: set[tuple[str, str]] = set()
 from .errors import (
     INVALID_ARGS,
     NO_ADAPTER,
@@ -36,6 +41,7 @@ from .errors import (
     LlmError,
     LlmFailure,
     looks_like_no_vision,
+    looks_like_reasoning_rejected,
 )
 from .retry import (
     DEFAULT_POLICY,
@@ -406,6 +412,9 @@ class LlmRegistry:
         headers = adapter.headers(api_key)
         # Send only the model name from settings; routing is the gateway's business.
         payload = adapter.payload(request)
+        # This endpoint already refused the budget we send; don't pay a round trip to hear it again.
+        if (url, request.model) in _no_reasoning:
+            drop_reasoning(payload)
 
         logger.info(
             "llm 请求 provider=%s protocol=%s model=%s 缓存前缀=%s 指纹=%s",
@@ -514,6 +523,18 @@ class LlmRegistry:
                 # the silence still running when it broke counts too (a read timeout is nothing else)
                 longest = max(longest, time.monotonic() - heard)
                 failure = replace(failure, quiet=round(longest, 1))
+
+            # The server takes a reasoning budget but not our word for it (xAI has no "medium";
+            # self-hosted gateways invent their own scale). Drop it and send the same request
+            # again at once -- the server's own default beats failing the turn -- and remember,
+            # so the next call doesn't pay for the same round trip. Not counted as an attempt.
+            if (failure.code == INVALID_ARGS and not emitted
+                    and looks_like_reasoning_rejected(failure.message)
+                    and drop_reasoning(payload)):
+                _no_reasoning.add((url, request.model))
+                logger.info("接入点不收 reasoning 档位（%s），去掉这个字段重发一次", request.model)
+                attempt -= 1
+                continue
 
             if is_retryable(
                 failure,
