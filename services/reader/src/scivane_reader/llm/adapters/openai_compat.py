@@ -421,6 +421,12 @@ def drop_reasoning(body: dict[str, object]) -> bool:
     return any(body.pop(key, None) is not None for key in ("reasoning_effort", "reasoning"))
 
 
+def set_reasoning(body: dict[str, object], value: str | int) -> None:
+    """Put the endpoint's own word (or number) in, replacing whatever we translated to."""
+    drop_reasoning(body)
+    body["reasoning_effort"] = value
+
+
 def _apply_reasoning(body: dict[str, object], level: str | None) -> None:
     """Translate the neutral reasoning level.
 

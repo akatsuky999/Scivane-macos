@@ -16,7 +16,7 @@ __all__ = [
     "VL_MAX_CONCURRENCY", "LLAMA_CTX_SIZE",
     "LLM_PROVIDERS_PATH", "LLM_CONNECT_TIMEOUT", "LLM_STREAM_IDLE_TIMEOUT",
     "LLM_TOTAL_TIMEOUT", "LLM_MAX_RETRIES", "LLM_CONCURRENCY", "LLM_KEEPALIVE",
-    "VISION_CACHE_PATH", "TRANSCRIBE_LONG_EDGE", "TRANSCRIBE_CONCURRENCY",
+    "VISION_CACHE_PATH", "REASONING_CACHE_PATH", "TRANSCRIBE_LONG_EDGE", "TRANSCRIBE_CONCURRENCY",
     "CHAT_IMAGE_MAX_BYTES", "CHAT_IMAGES_PER_MESSAGE",
     "TIMING", "TIMING_LOG",
     "PROJECTS_DIR",
@@ -78,6 +78,8 @@ LLM_KEEPALIVE = float(os.environ.get("SCIVANE_LLM_KEEPALIVE", "300"))
 # Whether each card's model reads images, as last probed. Disposable: a missing file costs one
 # small request per card.
 VISION_CACHE_PATH = VAR_DIR / "vision.json"
+#: What each endpoint accepts as a reasoning budget, learned from its own refusal.
+REASONING_CACHE_PATH = VAR_DIR / "reasoning.json"
 
 # Cloud transcription renders each page at this long edge (pixels). Dense two-column pages need
 # about this much for subscripts; providers downscale anything larger anyway.

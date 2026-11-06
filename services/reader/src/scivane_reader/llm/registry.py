@@ -22,15 +22,13 @@ import httpx
 from ..i18n import ui
 from . import timing, vision as vision_probe
 from .adapters import PROTOCOLS, ProtocolAdapter
-from .adapters.openai_compat import drop_reasoning
+from .adapters.openai_compat import drop_reasoning, set_reasoning
 from .adapters.base import aiter_sse
 from .cache import prefix_fingerprint
 from .credentials import CredentialStore, credentials as default_credentials
+from .reasoning import Vocabulary, choose as choose_effort, parse_vocabulary
+from .reasoning import TTL as REASONING_TTL
 from .types import REASONING_DEFAULT
-
-#: (endpoint, model) whose server refused the reasoning budget we send. One process, so a set
-#: suffices; a restart asks once more, which is what we want if the server was reconfigured.
-_no_reasoning: set[tuple[str, str]] = set()
 from .errors import (
     INVALID_ARGS,
     NO_ADAPTER,
@@ -148,6 +146,9 @@ class LlmRegistry:
     #: Where vision verdicts persist; None keeps them in memory only. A cache: deleting it costs
     #: one small request per card.
     vision_store: Path | None = None
+    #: Where learned reasoning vocabularies persist; None keeps them in memory only. A cache:
+    #: deleting it costs one refused request per endpoint.
+    reasoning_store: Path | None = None
 
     _providers: dict[str, ProviderConfig] = field(default_factory=dict, init=False)
     _gate: asyncio.Semaphore | None = field(default=None, init=False)
@@ -159,6 +160,8 @@ class LlmRegistry:
     #: Vision verdicts, same key; loaded from vision_store on first use. Wall-clock times, since
     #: they are persisted.
     _vision: dict[tuple[str, str, str], tuple[bool, float]] | None = field(default=None, init=False)
+    #: What each endpoint accepts as a reasoning budget, same key, loaded from reasoning_store.
+    _reasoning: dict[tuple[str, str, str], tuple[Vocabulary, float]] | None = field(default=None, init=False)
 
     def register(self, config: ProviderConfig) -> None:
         self._providers[config.id] = config
@@ -347,6 +350,64 @@ class LlmRegistry:
             # a cache: failing to write it only costs another probe later
             logger.info("看图检测结果没存下：%s", exc.__class__.__name__)
 
+    # -- Reasoning vocabularies ------------------------------------------------------------
+    #
+    # Same shape as the vision verdicts above: keyed by (protocol, base URL, model) so editing a
+    # card never reuses a stale answer, persisted because the backend stops when idle and we do
+    # not want to pay a refused request again on every wake-up.
+
+    def _reasoning_table(self) -> dict[tuple[str, str, str], tuple[Vocabulary, float]]:
+        if self._reasoning is None:
+            self._reasoning = {}
+            if self.reasoning_store is not None:
+                try:
+                    raw = json.loads(self.reasoning_store.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    raw = []
+                for entry in raw if isinstance(raw, list) else []:
+                    try:
+                        key = (str(entry["protocol"]), str(entry["base_url"]), str(entry["model"]))
+                        vocab = Vocabulary.from_dict(entry.get("accepts"))
+                        if vocab is not None:
+                            self._reasoning[key] = (vocab, float(entry["at"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+        return self._reasoning
+
+    def _known_reasoning(self, config: ProviderConfig) -> Vocabulary | None:
+        """What this endpoint accepts, or None while we have never been told."""
+        stored = self._reasoning_table().get(self._model_key(config))
+        if stored is None or time.time() - stored[1] > REASONING_TTL:
+            return None
+        return stored[0]
+
+    def _remember_reasoning(self, config: ProviderConfig, vocab: Vocabulary) -> None:
+        self._reasoning_table()[self._model_key(config)] = (vocab, time.time())
+        if self.reasoning_store is None:
+            return
+        entries = [
+            {"protocol": key[0], "base_url": key[1], "model": key[2],
+             "accepts": value.as_dict(), "at": at}
+            for key, (value, at) in self._reasoning_table().items()
+        ]
+        try:
+            self.reasoning_store.parent.mkdir(parents=True, exist_ok=True)
+            staging = self.reasoning_store.with_suffix(self.reasoning_store.suffix + ".writing")
+            staging.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+            staging.replace(self.reasoning_store)
+        except OSError as exc:
+            # a cache: failing to write it only costs another refused request later
+            logger.info("推理档位词表没存下：%s", exc.__class__.__name__)
+
+    @staticmethod
+    def _speak_reasoning(payload: dict[str, object], level: str | None, vocab: Vocabulary) -> None:
+        """Say our level in this endpoint's own words, or say nothing if it takes none."""
+        value = choose_effort(level, vocab)
+        if value is None:
+            drop_reasoning(payload)
+        else:
+            set_reasoning(payload, value)
+
     def _semaphore(self) -> asyncio.Semaphore:
         # created lazily: a Semaphore binds to the event loop it was created on
         if self._gate is None:
@@ -412,9 +473,11 @@ class LlmRegistry:
         headers = adapter.headers(api_key)
         # Send only the model name from settings; routing is the gateway's business.
         payload = adapter.payload(request)
-        # This endpoint already refused the budget we send; don't pay a round trip to hear it again.
-        if (url, request.model) in _no_reasoning:
-            drop_reasoning(payload)
+        # Already been told what this endpoint accepts; say it that way instead of paying a
+        # refused round trip to be told again.
+        known = self._known_reasoning(config)
+        if known is not None:
+            self._speak_reasoning(payload, request.reasoning, known)
 
         logger.info(
             "llm 请求 provider=%s protocol=%s model=%s 缓存前缀=%s 指纹=%s",
@@ -426,7 +489,7 @@ class LlmRegistry:
             # aclosing: a consumer that stops early closes this generator, and the response inside
             # must close with it rather than whenever the abandoned inner one is collected
             async with aclosing(self._attempts(
-                await self._client(), adapter, url, headers, payload, request
+                await self._client(), adapter, url, headers, payload, request, config
             )) as attempts:
                 async for chunk in attempts:
                     yield chunk
@@ -439,8 +502,11 @@ class LlmRegistry:
         headers: dict[str, str],
         payload: dict[str, object],
         request: CallRequest,
+        config: ProviderConfig,
     ) -> AsyncIterator[StreamChunk]:
         attempt = 0
+        #: the budget is renegotiated at most once per call, however the server words its refusal
+        renegotiated = False
         clock = timing.current()
         while True:
             attempt += 1
@@ -525,16 +591,27 @@ class LlmRegistry:
                 failure = replace(failure, quiet=round(longest, 1))
 
             # The server takes a reasoning budget but not our word for it (xAI has no "medium";
-            # self-hosted gateways invent their own scale). Drop it and send the same request
-            # again at once -- the server's own default beats failing the turn -- and remember,
-            # so the next call doesn't pay for the same round trip. Not counted as an attempt.
-            if (failure.code == INVALID_ARGS and not emitted
-                    and looks_like_reasoning_rejected(failure.message)
-                    and drop_reasoning(payload)):
-                _no_reasoning.add((url, request.model))
-                logger.info("接入点不收 reasoning 档位（%s），去掉这个字段重发一次", request.model)
-                attempt -= 1
-                continue
+            # self-hosted gateways invent their own scale). It says what it would have accepted,
+            # so that sentence is the declaration: read it, say our level that way, and send the
+            # same request again at once. Unreadable means send no budget and let the server use
+            # its default -- either beats failing the turn. Remembered, and not an attempt.
+            if (failure.code == INVALID_ARGS and not emitted and not renegotiated
+                    and looks_like_reasoning_rejected(failure.message)):
+                renegotiated = True
+                vocab = parse_vocabulary(failure.message)
+                spoken = choose_effort(request.reasoning, vocab) if vocab.known else None
+                if spoken is None or spoken == payload.get("reasoning_effort"):
+                    # nothing legible, or it would send the very value just refused
+                    vocab = Vocabulary(takes_budget=False)
+                    spoken = None
+                if spoken is None and not drop_reasoning(payload):
+                    pass           # no budget in the body: this 400 was about something else
+                else:
+                    self._speak_reasoning(payload, request.reasoning, vocab)
+                    self._remember_reasoning(config, vocab)
+                    logger.info("接入点的推理档位词表：%s → 发 %r，重发一次", vocab.as_dict(), spoken)
+                    attempt -= 1
+                    continue
 
             if is_retryable(
                 failure,

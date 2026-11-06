@@ -69,6 +69,7 @@ async def lifespan(app: FastAPI):
     llm_registry.max_concurrency = config.LLM_CONCURRENCY
     llm_registry.keepalive = config.LLM_KEEPALIVE
     llm_registry.vision_store = config.VISION_CACHE_PATH
+    llm_registry.reasoning_store = config.REASONING_CACHE_PATH
     loaded = load_providers(config.LLM_PROVIDERS_PATH)
     logger.info(
         "大模型 provider 已加载 %d 个（配置：%s）", loaded, config.LLM_PROVIDERS_PATH
