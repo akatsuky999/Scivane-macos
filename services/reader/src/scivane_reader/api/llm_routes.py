@@ -82,7 +82,7 @@ class ProviderIn(BaseModel):
     label: str = ""
     #: hand-filled window; otherwise the endpoint is asked. Never guessed.
     context_window: int | None = Field(default=None, gt=0)
-    reasoning: str | None = Field(default=None, pattern="^(none|low|medium|high)$")
+    reasoning: str | None = Field(default=None, pattern="^(none|low|medium|high|max)$")
     #: where the key comes from: own or macro:<id>; not a secret
     credential_ref: str = Field(default="own", pattern=r"^(own|macro:[A-Za-z0-9_-]{1,32})$")
 

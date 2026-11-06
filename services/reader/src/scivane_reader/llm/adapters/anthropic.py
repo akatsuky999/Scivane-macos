@@ -303,7 +303,11 @@ class AnthropicAdapter(ProtocolAdapter):
         # Thinking is a token budget and must stay below max_tokens. When the caller set no
         # ceiling, it goes on top of the default, so a medium budget doesn't eat the whole answer
         # (or make the request invalid).
-        budget = {"low": 2048, "medium": 8192, "high": 16384}.get(request.reasoning or "")
+        # "max" is this vendor's ceiling, not a bigger number plucked out of the air: 32768 is the
+        # largest budget Claude documents. The guard below still applies -- a caller who set a
+        # small max_tokens gets no thinking rather than an invalid request.
+        budget = {"low": 2048, "medium": 8192, "high": 16384, "max": 32768}.get(
+            request.reasoning or "")
         if request.max_tokens:
             ceiling = request.max_tokens
             thinking = budget is not None and budget < ceiling

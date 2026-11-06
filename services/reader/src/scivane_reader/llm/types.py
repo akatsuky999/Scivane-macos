@@ -211,8 +211,9 @@ def append_user_text(messages: Sequence["Message"], text: str) -> list["Message"
 
 #: medium rather than low: checking that formulas and code agree needs real reasoning.
 REASONING_DEFAULT = "medium"
-#: "none" isn't supported by every vendor; see the adapters.
-REASONING_LEVELS = ("none", "low", "medium", "high")
+#: "none" isn't supported by every vendor, and "max" means "as much as this vendor allows" rather
+#: than one number: each adapter translates it to its own ceiling. See the adapters.
+REASONING_LEVELS = ("none", "low", "medium", "high", "max")
 
 
 @dataclass(frozen=True)

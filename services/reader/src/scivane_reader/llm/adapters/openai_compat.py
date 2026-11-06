@@ -439,3 +439,8 @@ def _apply_reasoning(body: dict[str, object], level: str | None) -> None:
         body["reasoning"] = {"enabled": False}
     elif level in ("low", "medium", "high"):
         body["reasoning_effort"] = level
+    elif level == "max":
+        # No OpenAI-style server is documented to take "max"; "high" is the highest word that is
+        # universal. An endpoint with something above it (xhigh, max, a number) says so when it
+        # refuses a value, and llm/reasoning.py then maps this level onto that.
+        body["reasoning_effort"] = "high"

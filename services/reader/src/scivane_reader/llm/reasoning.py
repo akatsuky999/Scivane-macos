@@ -33,7 +33,7 @@ EFFORT: dict[str, int] = {
 
 #: Position of our own levels when the endpoint's words mean nothing to us: lowest, lowest, middle,
 #: highest of whatever it listed.
-_POSITION = {"none": 0.0, "low": 0.0, "medium": 0.5, "high": 1.0}
+_POSITION = {"none": 0.0, "low": 0.0, "medium": 0.5, "high": 1.0, "max": 1.0}
 
 #: A refusal tells us about this endpoint, not about the vendor in general, and a server can be
 #: reconfigured. Same week-long life as a vision verdict.

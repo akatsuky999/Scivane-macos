@@ -246,7 +246,9 @@ class GeminiAdapter(ProtocolAdapter):
                 ]
             }]
         # also a token budget; 0 turns thinking off
-        thinking = {"none": 0, "low": 2048, "medium": 8192, "high": 16384}.get(
+        # 24576 for "max": Pro documents 32768 but Flash stops at 24576, and one number that both
+        # accept beats the last few tokens on one of them.
+        thinking = {"none": 0, "low": 2048, "medium": 8192, "high": 16384, "max": 24576}.get(
             request.reasoning or "")
         if thinking is not None:
             generation = body.setdefault("generationConfig", {})

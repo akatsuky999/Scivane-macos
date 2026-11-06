@@ -101,7 +101,10 @@ extension AppModel {
       ("medium", L("中", "Medium"),
        L("默认。核对公式、读代码这类活儿够用", "Default. Enough for checking formulas and reading code")),
       ("high", L("高", "High"),
-       L("想得最久。复杂推导更稳，但等待明显变长", "Thinks longest. Steadier on hard derivations, but noticeably slower")),
+       L("复杂推导更稳，但等待明显变长", "Steadier on hard derivations, but noticeably slower")),
+      ("max", L("最大", "Max"),
+       L("这家给到的上限。最慢最贵；有的厂商没有比「高」更高的档，那两档就一样",
+         "This vendor's ceiling. Slowest and dearest; where a vendor has nothing above High, the two are the same")),
     ]
   }
 
