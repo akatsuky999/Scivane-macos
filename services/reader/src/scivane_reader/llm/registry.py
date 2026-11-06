@@ -476,7 +476,7 @@ class LlmRegistry:
         # Already been told what this endpoint accepts; say it that way instead of paying a
         # refused round trip to be told again.
         known = self._known_reasoning(config)
-        if known is not None:
+        if known is not None and ("reasoning_effort" in payload or "reasoning" in payload):
             self._speak_reasoning(payload, request.reasoning, known)
 
         logger.info(
@@ -595,7 +595,11 @@ class LlmRegistry:
             # so that sentence is the declaration: read it, say our level that way, and send the
             # same request again at once. Unreadable means send no budget and let the server use
             # its default -- either beats failing the turn. Remembered, and not an attempt.
+            # Only a body that carries an OpenAI-style budget can be renegotiated: Anthropic
+            # sends thinking.budget_tokens and Gemini thinkingConfig, and writing reasoning_effort
+            # into either would invent a field the server never asked for.
             if (failure.code == INVALID_ARGS and not emitted and not renegotiated
+                    and ("reasoning_effort" in payload or "reasoning" in payload)
                     and looks_like_reasoning_rejected(failure.message)):
                 renegotiated = True
                 vocab = parse_vocabulary(failure.message)
